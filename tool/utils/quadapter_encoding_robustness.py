@@ -803,8 +803,8 @@ class GPEncoding:
         biases_c = self.numpy_to_c_array(qu_b)
         
         # Get preimage bounds from DeepPoly
-        preimage_low = self.get_preimage_lower_bounds(layer_index)
-        preimage_high = self.get_preimage_upper_bounds(layer_index)
+        preimage_low = [self.deepPolyNets_DNN.layers[2 * (layer_index + 1)].neurons[i].concrete_lower_noClip for i in range(cur_layer.layer_size)]
+        preimage_high = [self.deepPolyNets_DNN.layers[2 * (layer_index + 1)].neurons[i].concrete_upper_noClip for i in range(cur_layer.layer_size)]
         
         return f"""
     #include <esbmc.h>
@@ -866,8 +866,8 @@ class GPEncoding:
         for (int i = 0; i < INPUT_SIZE; i++) {{
             input[i] = nondet_float();
             // Assume input bounds from Quadapter's input region
-            __ESBMC_assume(input[i] >= {self.input_bounds_low[i]} && 
-                        input[i] <= {self.input_bounds_high[i]});
+            __ESBMC_assume(input[i] >= {self.x_low_real} && 
+                        input[i] <= {self.x_high_real});
         }}
         
         // Apply quantized transformation
@@ -1049,7 +1049,7 @@ class GPEncoding:
         // Non-deterministic input
         for (int i = 0; i < INPUT_SIZE; i++) {{
             input[i] = nondet_float();
-            __ESBMC_assume(input[i] >= {self.input_bounds_low[i]} && 
+            __ESBMC_assume(input[i] >= {self.x_low_real[i]} && 
                         input[i] <= {self.input_bounds_high[i]});
         }}
         
