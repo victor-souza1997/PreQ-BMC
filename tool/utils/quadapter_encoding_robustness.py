@@ -211,7 +211,7 @@ class GPEncoding:
             backward_end_time = time.time()
             print("Backward Time is: ", backward_end_time - backward_start_time)
 
-            ifSucc, qu_list, qu_frac_list, qu_int_list = self.forward_quantization()
+            ifSucc, qu_list, qu_frac_list, qu_int_list = self.forward_quantization_with_esbmc()
             forward_end_time = time.time()
             print("Forward time is: ", forward_end_time - backward_end_time)
 
@@ -705,20 +705,19 @@ class GPEncoding:
             return scaleValue
 
     # forward quantization procedure
-    def forward_quantization(self):
-        print("\nNow we begin to do the forward quantization!")
+    def forward_quantization_with_esbmc(self):
+        print("\nNow we begin ESBMC-based forward quantization!")
         qu_list = []
         qu_frac_list = []
         qu_int_list = []
 
         nonInputLayers = self.dense_layers.copy()
         nonInputLayers.append(self.output_layer)
-
         in_layer_index = -1
 
         for cur_layer in nonInputLayers:
             in_layer_index += 1
-
+            
             if cur_layer.layer_index == 1:
                 in_layer = self.input_layer
             else:
@@ -727,253 +726,171 @@ class GPEncoding:
             w = cur_layer.layer_paras[0]
             b = cur_layer.layer_paras[1]
 
-            # test for all bit:
             lower_bit = self.bit_lb
             upper_bit = self.bit_ub
-
             ifFound = False
 
             for rela_bit in range(upper_bit - lower_bit + 1):
-                pre_mul_qu_lb_deepPoly = []
-                pre_mul_qu_ub_deepPoly = []
-
                 if ifFound:
                     break
-
-                model_cstr_ll = []
-                prop_cstr_ll = []
-                var_ll = []
 
                 frac_bit = rela_bit + lower_bit
                 int_bit = cur_layer.int_bit
                 all_bit = frac_bit + int_bit
 
-                # get_quantized_paras
+                # Get quantized parameters (same as original)
                 qu_w = quantize_int(w, all_bit, frac_bit) / (2 ** frac_bit)
                 qu_b = quantize_int(b, all_bit, frac_bit) / (2 ** frac_bit)
 
-                # for last layer
-                target_lb = 0
-                other_ubs = []
-
-                # quantized_concrete_algebra_lower
-                quantized_concrete_algebra_lower = []
-                quantized_concrete_algebra_upper = []
-
-                sumOfK = 0
-                numOfK = 0
-
-                for out_index in range(cur_layer.layer_size):
-                    qu_weights = qu_w[out_index]
-                    qu_bias = qu_b[out_index]
-
-                    tmp_acc_lower = 0
-                    tmp_acc_upper = 0
-
-                    # for var_index_poly in range(self.bit_ub - self.bit_lb + 1):
-                    lower_bound = np.append(qu_weights, qu_bias)  # cur_layer's paras (size of input_layer)
-                    upper_bound = np.append(qu_weights, qu_bias)  # cur_layer's paras (size of input_layer)
-
-                    # reverse, from cur_layer's affine layer to input layer
-                    cur_neuron_concrete_algebra_lower = None
-                    cur_neuron_concrete_algebra_upper = None
-
-                    if in_layer_index == 0:
-                        cur_neuron_concrete_algebra_lower = deepcopy(lower_bound)
-                        cur_neuron_concrete_algebra_upper = deepcopy(upper_bound)
-                        quantized_concrete_algebra_lower.append(cur_neuron_concrete_algebra_lower)
-                        quantized_concrete_algebra_upper.append(cur_neuron_concrete_algebra_upper)
-
-                    # reverse, from cur_layer's affine layer to input layer
-                    for kk in range(2 * (in_layer_index + 1) - 1)[::-1]:
-                        # size of input
-                        tmp_lower = np.zeros(len(self.deepPolyNets_DNN.layers[kk].neurons[0].algebra_lower))
-                        tmp_upper = np.zeros(len(self.deepPolyNets_DNN.layers[kk].neurons[0].algebra_lower))
-
-                        assert (self.deepPolyNets_DNN.layers[kk].size + 1 == len(lower_bound))
-                        assert (self.deepPolyNets_DNN.layers[kk].size + 1 == len(upper_bound))
-
-                        for pp in range(self.deepPolyNets_DNN.layers[kk].size):
-                            if lower_bound[pp] >= 0:
-                                tmp_lower += np.float32(
-                                    lower_bound[pp] * self.deepPolyNets_DNN.layers[kk].neurons[
-                                        pp].algebra_lower)
-                            else:
-                                tmp_lower += np.float32(
-                                    lower_bound[pp] * self.deepPolyNets_DNN.layers[kk].neurons[
-                                        pp].algebra_upper)
-
-                            if upper_bound[pp] >= 0:
-                                tmp_upper += np.float32(
-                                    upper_bound[pp] * self.deepPolyNets_DNN.layers[kk].neurons[
-                                        pp].algebra_upper)
-                            else:
-                                tmp_upper += np.float32(
-                                    upper_bound[pp] * self.deepPolyNets_DNN.layers[kk].neurons[
-                                        pp].algebra_lower)
-
-                        tmp_lower[-1] += lower_bound[-1]
-                        tmp_upper[-1] += upper_bound[-1]
-                        lower_bound = deepcopy(tmp_lower)
-                        upper_bound = deepcopy(tmp_upper)
-                        #
-                        if kk == 1:
-                            cur_neuron_concrete_algebra_lower = deepcopy(lower_bound)
-                            cur_neuron_concrete_algebra_upper = deepcopy(upper_bound)
-                            quantized_concrete_algebra_lower.append(cur_neuron_concrete_algebra_lower)
-                            quantized_concrete_algebra_upper.append(cur_neuron_concrete_algebra_upper)
-
-                    assert (len(lower_bound) == 1)
-                    assert (len(upper_bound) == 1)
-
-                    cur_neuron_concrete_lower = lower_bound[0]
-                    cur_neuron_concrete_upper = upper_bound[0]
-
-                    tmp_acc_lower += cur_neuron_concrete_lower
-                    tmp_acc_upper += cur_neuron_concrete_upper
-
-                    pre_mul_qu_lb_deepPoly.append(tmp_acc_lower)
-                    pre_mul_qu_ub_deepPoly.append(tmp_acc_upper)
-
-                    # generate property constraints
-                    # get quantized_ub_expression from backward-procedure
-                    quantized_lb_expression = np.dot(cur_neuron_concrete_algebra_lower[:-1],
-                                                     self.input_gp_vars)
-                    quantized_lb_expression = quantized_lb_expression + cur_neuron_concrete_algebra_lower[
-                        -1]
-
-                    quantized_ub_expression = np.dot(cur_neuron_concrete_algebra_upper[:-1],
-                                                     self.input_gp_vars)
-                    quantized_ub_expression = quantized_ub_expression + cur_neuron_concrete_algebra_upper[
-                        -1]
-
-                    # either lower or higher
-                    if cur_layer.layer_index == (len(self.dense_layers) + 1):
-                        if out_index == self.targetCls:
-                            target_lb = quantized_lb_expression
-                        else:
-                            other_ubs.append(quantized_ub_expression)
-                    else:
-                        k_i_lb = self.gp_model.addVar(vtype=GRB.BINARY)
-                        var_ll.append(k_i_lb)
-
-                        if cur_layer.relaxed_ub[out_index] > 0:
-                            prop_cstr_ll.append(self.gp_model.addConstr(
-                                quantized_lb_expression <= cur_layer.relaxed_lb_expression[out_index] - 1000 * (
-                                        k_i_lb - 1) - self.tole))
-                            prop_cstr_ll.append(self.gp_model.addConstr(
-                                quantized_lb_expression >= cur_layer.relaxed_lb_expression[
-                                    out_index] - 1000 * k_i_lb + self.tole))
-                            sumOfK = sumOfK + k_i_lb
-                            numOfK += 1
-
-                        # k_i encodes: is not included
-                        # for upper bounds
-                        k_i_ub = self.gp_model.addVar(vtype=GRB.BINARY)
-                        var_ll.append(k_i_ub)
-                        prop_cstr_ll.append(self.gp_model.addConstr(
-                            quantized_ub_expression >= cur_layer.relaxed_ub_expression[out_index] + 1000 * (
-                                    k_i_ub - 1) + self.tole))
-                        prop_cstr_ll.append(self.gp_model.addConstr(
-                            quantized_ub_expression <= cur_layer.relaxed_ub_expression[
-                                out_index] + 1000 * k_i_ub - self.tole))
-
-                        numOfK += 1
-                        sumOfK = sumOfK + k_i_ub
-
-                if len(other_ubs) > 0:  # output layer
-                    # k_i encodes: is not included
-                    # for upper bounds
-                    for other_single_ub in other_ubs:
-                        k_i_ub = self.gp_model.addVar(vtype=GRB.BINARY)
-                        var_ll.append(k_i_ub)
-                        prop_cstr_ll.append(self.gp_model.addConstr(
-                            other_single_ub >= target_lb + 1000 * (
-                                    k_i_ub - 1) + self.tole))
-                        prop_cstr_ll.append(self.gp_model.addConstr(
-                            other_single_ub <= target_lb + 1000 * k_i_ub - self.tole))
-
-                        sumOfK = sumOfK + k_i_ub
-                        numOfK += 1
-
-                # for relaxed version of Quadapter
-                if len(other_ubs) == 0 and self.ifRelax == 1:
-
-                    scale = 0.25
-
-                    # # for better performance, can try this relaxation
-                    # if self.scaleValueSet[in_layer_index] <= 0.01 and in_layer_index > 0:
-                    #     scale = 0.35
-
-                    prop_cstr_ll.append(self.gp_model.addConstr(sumOfK >= int(numOfK * scale) + 1))
-                else:
-                    prop_cstr_ll.append(self.gp_model.addConstr(sumOfK >= 1))
-
-                self.gp_model.update()
-                self.gp_model.setParam('DualReductions', 0)
-
-                self.gp_model.optimize()
-
-                ifgpUNSat = self.gp_model.status == GRB.INFEASIBLE
-
-                if ifgpUNSat:
-                    print("We find a quantization configuration [ Q , F ] for the Layer", cur_layer.layer_index,
-                          "as: [", all_bit, ",", frac_bit, '].')
-
+                # === ESBMC VERIFICATION REPLACEMENT ===
+                # Instead of Gurobi optimization, call ESBMC
+                esbmc_result = self.verify_layer_with_esbmc(
+                    cur_layer, in_layer, qu_w, qu_b, 
+                    frac_bit, all_bit, in_layer_index
+                )
+                
+                if esbmc_result == "VERIFIED":
+                    print(f"ESBMC verified quantization [Q={all_bit}, F={frac_bit}] for Layer {cur_layer.layer_index}")
+                    
                     cur_layer.frac_bit = frac_bit
-
                     qu_frac_list.append(cur_layer.frac_bit)
                     qu_int_list.append(cur_layer.int_bit)
                     qu_list.append(all_bit)
-
                     ifFound = True
 
-                    self.gp_model.remove(model_cstr_ll)
-                    self.gp_model.remove(prop_cstr_ll)
-
-                    self.gp_model.remove(var_ll)
-
-                    self.gp_model.update()
-
-                    self.update_quantized_weights_affine(in_layer, cur_layer, all_bit, frac_bit, frac_bit,
-                                                         in_layer_index)
-
-                    # if hidden layer, then update next relu's algebra for the abstract element cf. DeepPoly
+                    # Update weights and algebra (same as original)
+                    self.update_quantized_weights_affine(in_layer, cur_layer, all_bit, frac_bit, frac_bit, in_layer_index)
+                    
                     if cur_layer.layer_index < (len(self.dense_layers) + 1):
-                        for out_index in range(cur_layer.layer_size):
-                            lb_new = pre_mul_qu_lb_deepPoly[out_index]
-                            ub_new = pre_mul_qu_ub_deepPoly[out_index]
-                            cur_neuron = self.deepPolyNets_DNN.layers[2 * (in_layer_index + 1)].neurons[out_index]
-                            if lb_new >= 0:
-                                cur_neuron.algebra_lower = np.zeros(cur_layer.layer_size + 1)
-                                cur_neuron.algebra_upper = np.zeros(cur_layer.layer_size + 1)
-                                cur_neuron.algebra_lower[out_index] = 1
-                                cur_neuron.algebra_upper[out_index] = 1
-                            elif ub_new <= 0:
-                                cur_neuron.algebra_lower = np.zeros(cur_layer.layer_size + 1)
-                                cur_neuron.algebra_upper = np.zeros(cur_layer.layer_size + 1)
-                            elif lb_new + ub_new <= 0:
-                                cur_neuron.algebra_lower = np.zeros(cur_layer.layer_size + 1)
-                                k_new = ub_new / (ub_new - lb_new)
-                                cur_neuron.algebra_upper = np.zeros(cur_layer.layer_size + 1)
-                                cur_neuron.algebra_upper[out_index] = k_new
-                                cur_neuron.algebra_upper[-1] = - k_new * lb_new
-                            else:
-                                cur_neuron.algebra_lower = np.zeros(cur_layer.layer_size + 1)
-                                cur_neuron.algebra_lower[out_index] = 1
-                                k_new = ub_new / (ub_new - lb_new)
-                                cur_neuron.algebra_upper = np.zeros(cur_layer.layer_size + 1)
-                                cur_neuron.algebra_upper[out_index] = k_new
-                                cur_neuron.algebra_upper[-1] = - k_new * lb_new
+                        # Update DeepPoly algebra for hidden layers
+                        self.update_deepPoly_algebra(cur_layer, qu_w, qu_b, in_layer_index)
                     else:
                         self.output_layer.qu_lb = pre_mul_qu_lb_deepPoly
                         self.output_layer.qu_ub = pre_mul_qu_ub_deepPoly
+                        
             if not ifFound:
-                print("Cannot find a quantization strategy for the cur_layer with index as: ", cur_layer.layer_index)
+                print(f"ESBMC cannot verify any quantization for layer {cur_layer.layer_index}")
                 return False, None, None, None
 
         return True, qu_list, qu_frac_list, qu_int_list
+    def verify_layer_with_esbmc(self, cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit, layer_index):
+        """Replace Gurobi optimization with ESBMC verification"""
+        
+        # Generate ESBMC verification code for this layer
+        esbmc_code = self.generate_esbmc_verification_code(
+            cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit, layer_index
+        )
+        
+        # Write to temporary file
+        temp_file = f"esbmc_verify_layer_{layer_index}_Q{all_bit}_F{frac_bit}.c"
+        with open(temp_file, 'w') as f:
+            f.write(esbmc_code)
+        
+        # Run ESBMC
+        result = self.run_esbmc_verification(temp_file, layer_index)
+        
+        # Clean up
+        import os
+        os.remove(temp_file)
+        
+        return result
 
+    def generate_esbmc_verification_code(self, cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit, layer_index):
+        """Generate C code for ESBMC verification of preimage inclusion"""
+        
+        # Convert numpy arrays to C format
+        weights_c = self.numpy_to_c_array(qu_w)
+        biases_c = self.numpy_to_c_array(qu_b)
+        
+        # Get preimage bounds from DeepPoly
+        preimage_low = self.get_preimage_lower_bounds(layer_index)
+        preimage_high = self.get_preimage_upper_bounds(layer_index)
+        
+        return f"""
+    #include <esbmc.h>
+    #include <math.h>
+
+    #define INPUT_SIZE {in_layer.layer_size}
+    #define LAYER_SIZE {cur_layer.layer_size}
+    #define TOTAL_BITS {all_bit}
+    #define FRAC_BITS {frac_bit}
+
+    // Fixed-point arithmetic
+    typedef int32_t fixed_t;
+
+    fixed_t float_to_fixed(float f) {{
+        return (fixed_t)(f * (1 << FRAC_BITS));
+    }}
+
+    float fixed_to_float(fixed_t fixed) {{
+        return ((float)fixed) / (1 << FRAC_BITS);
+    }}
+
+    // Quantized weights and biases
+    float weights[LAYER_SIZE][INPUT_SIZE] = {weights_c};
+    float biases[LAYER_SIZE] = {biases_c};
+
+    // Preimage bounds from Quadapter's backward pass
+    float preimage_low[LAYER_SIZE] = {preimage_low};
+    float preimage_high[LAYER_SIZE] = {preimage_high};
+
+    // Quantized affine transformation
+    void quantized_affine(float input[INPUT_SIZE], float output[LAYER_SIZE]) {{
+        for (int i = 0; i < LAYER_SIZE; i++) {{
+            output[i] = biases[i];
+            for (int j = 0; j < INPUT_SIZE; j++) {{
+                output[i] += weights[i][j] * input[j];
+            }}
+            
+            // Apply quantization (simulate fixed-point)
+            fixed_t quantized = float_to_fixed(output[i]);
+            output[i] = fixed_to_float(quantized);
+        }}
+    }}
+
+    // Check preimage inclusion: γ(Â²ⁱ) ⊆ P²ⁱ
+    int check_preimage_inclusion(float output[LAYER_SIZE]) {{
+        for (int i = 0; i < LAYER_SIZE; i++) {{
+            if (output[i] < preimage_low[i] || output[i] > preimage_high[i]) {{
+                return 0; // Violation found
+            }}
+        }}
+        return 1; // All outputs within preimage
+    }}
+
+    int main() {{
+        float input[INPUT_SIZE];
+        float output[LAYER_SIZE];
+        
+        // Non-deterministic input within bounds
+        for (int i = 0; i < INPUT_SIZE; i++) {{
+            input[i] = nondet_float();
+            // Assume input bounds from Quadapter's input region
+            __ESBMC_assume(input[i] >= {self.input_bounds_low[i]} && 
+                        input[i] <= {self.input_bounds_high[i]});
+        }}
+        
+        // Apply quantized transformation
+        quantized_affine(input, output);
+        
+        // Verify preimage inclusion
+        int inclusion_holds = check_preimage_inclusion(output);
+        __ESBMC_assert(inclusion_holds, 
+                    "Preimage inclusion violated for layer {layer_index}");
+        
+        return 0;
+    }}
+    """
+
+    def numpy_to_c_array(self, np_array):
+        """Convert numpy array to C array initialization string"""
+        if np_array.ndim == 1:
+            return "{" + ", ".join(map(str, np_array)) + "}"
+        else:
+            rows = []
+            for row in np_array:
+                rows.append("{" + ", ".join(map(str, row)) + "}")
+            return "{" + ", ".join(rows) + "}"
     # update deepPoly model's quantized weights
     def update_quantized_weights_affine(self, in_layer, out_layer, num_bit, frac_bit_weights, frac_bit_bias,
                                         in_layer_index):
@@ -1033,3 +950,118 @@ class GPEncoding:
         fo.write("The num of numBinVars: " + str(numBinVars) + "\n")
         fo.write("The num of Constraints: " + str(numConstrs) + "\n")
         fo.close()
+
+    def run_esbmc_verification(self, c_file, layer_index):
+        """Execute ESBMC and parse results"""
+        
+        import subprocess
+        import re
+        
+        # ESBMC configuration optimized for neural network verification
+        esbmc_cmd = [
+            "esbmc", c_file,
+            "--function", "main",
+            "--floatbv",
+            "--bitvector", 
+            "--unwind", "100",
+            "--interval-analysis",
+            "--incremental-bmc",
+            "--no-unwinding-assertions",
+            "--state-hashing",
+            "--timeout", "900",  # 15 minutes per verification
+            "--verbosity", "1"
+        ]
+        
+        try:
+            print(f"Running ESBMC for layer {layer_index}...")
+            result = subprocess.run(esbmc_cmd, capture_output=True, text=True, timeout=1200)
+            
+            # Parse ESBMC output
+            if "VERIFICATION SUCCESSFUL" in result.stdout:
+                print(f"ESBMC verification PASSED for layer {layer_index}")
+                return "VERIFIED"
+            elif "VERIFICATION FAILED" in result.stdout:
+                print(f"ESBMC verification FAILED for layer {layer_index}")
+                # Extract counterexample if available
+                if "Counterexample:" in result.stdout:
+                    print("Counterexample found - quantization violates preimage")
+                return "FAILED"
+            else:
+                print(f"ESBMC verification UNKNOWN for layer {layer_index}")
+                print(f"ESBMC output: {result.stdout[-500:]}")  # Last 500 chars
+                return "UNKNOWN"
+                
+        except subprocess.TimeoutExpired:
+            print(f"ESBMC timeout for layer {layer_index}")
+            return "TIMEOUT"
+        except Exception as e:
+            print(f"ESBMC error for layer {layer_index}: {e}")
+            return "ERROR"
+        
+    def generate_esbmc_verification_with_relaxation(self, cur_layer, in_layer, qu_w, qu_b, 
+                                                frac_bit, all_bit, layer_index):
+        """Enhanced ESBMC verification supporting Quadapter's relaxation"""
+        
+        relaxation_factor = 0.25 if self.ifRelax == 1 else 0.0
+        
+        return f"""
+    // Enhanced ESBMC verification with relaxation support
+    #include <esbmc.h>
+    #include <math.h>
+
+    #define INPUT_SIZE {in_layer.layer_size}
+    #define LAYER_SIZE {cur_layer.layer_size}
+    #define RELAXATION_FACTOR {relaxation_factor}
+    #define MAX_VIOLATIONS (int)(LAYER_SIZE * RELAXATION_FACTOR)
+
+    int check_preimage_inclusion_relaxed(float output[LAYER_SIZE], 
+                                    float preimage_low[LAYER_SIZE],
+                                    float preimage_high[LAYER_SIZE]) {{
+        int violations = 0;
+        
+        for (int i = 0; i < LAYER_SIZE; i++) {{
+            if (output[i] < preimage_low[i] || output[i] > preimage_high[i]) {{
+                violations++;
+                if (violations > MAX_VIOLATIONS) {{
+                    return 0; // Too many violations
+                }}
+            }}
+        }}
+        return 1; // Within relaxation tolerance
+    }}
+
+    // For output layer: verify classification property
+    int verify_output_property(float output[LAYER_SIZE], int target_class) {{
+        float target_score = output[target_class];
+        
+        for (int i = 0; i < LAYER_SIZE; i++) {{
+            if (i != target_class && output[i] >= target_score) {{
+                return 0; // Another class has higher score
+            }}
+        }}
+        return 1; // Target class is the maximum
+    }}
+
+    int main() {{
+        float input[INPUT_SIZE];
+        float output[LAYER_SIZE];
+        
+        // Non-deterministic input
+        for (int i = 0; i < INPUT_SIZE; i++) {{
+            input[i] = nondet_float();
+            __ESBMC_assume(input[i] >= {self.input_bounds_low[i]} && 
+                        input[i] <= {self.input_bounds_high[i]});
+        }}
+        
+        quantized_affine(input, output);
+        
+        {"// Output layer verification" if layer_index == len(self.dense_layers) else "// Hidden layer verification"}
+        {"int property_holds = verify_output_property(output, " + str(self.targetCls) + ");" 
+        if layer_index == len(self.dense_layers) else 
+        "int property_holds = check_preimage_inclusion_relaxed(output, preimage_low, preimage_high);"}
+        
+        __ESBMC_assert(property_holds, "Property violation detected");
+        
+        return 0;
+    }}
+    """
