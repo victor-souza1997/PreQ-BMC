@@ -780,7 +780,11 @@ class GPEncoding:
         esbmc_code = self.generate_esbmc_verification_code(
             cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit, layer_index
         )
-        
+
+        # save layer in ouput/layers
+        with open(f"output/layers/layer_{layer_index}_Q{all_bit}_F{frac_bit}.c", 'w') as f:
+            f.write(esbmc_code)
+            f.close()
         # Write to temporary file
         temp_file = f"esbmc_verify_layer_{layer_index}_Q{all_bit}_F{frac_bit}.c"
         with open(temp_file, 'w') as f:
@@ -796,66 +800,65 @@ class GPEncoding:
         return result
 
     def generate_esbmc_verification_code(self, cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit, layer_index):
-        """Generate C code for ESBMC verification of preimage inclusion"""
+        """Generate CORRECT C code for ESBMC verification"""
         
         # Convert numpy arrays to C format
         weights_c = self.numpy_to_c_array(qu_w)
         biases_c = self.numpy_to_c_array(qu_b)
         
-        # Get preimage bounds from DeepPoly
-        preimage_low = [self.deepPolyNets_DNN.layers[2 * (layer_index + 1)].neurons[i].concrete_lower_noClip for i in range(cur_layer.layer_size)]
-        preimage_high = [self.deepPolyNets_DNN.layers[2 * (layer_index + 1)].neurons[i].concrete_upper_noClip for i in range(cur_layer.layer_size)]
+        # === CRITICAL FIX: Use the correct preimage bounds ===
+        # The preimage bounds are stored in the layer's relaxed_lb and relaxed_ub
+        # These were computed during backward_preimage_computation
+        if hasattr(cur_layer, 'relaxed_lb') and hasattr(cur_layer, 'relaxed_ub'):
+            preimage_low = cur_layer.relaxed_lb
+            preimage_high = cur_layer.relaxed_ub
+        else:
+            # Fallback: use the layer bounds (less precise but safe)
+            preimage_low = cur_layer.lb
+            preimage_high = cur_layer.ub
         
-        return f"""
-    #include <esbmc.h>
-    #include <math.h>
+        # Convert to C arrays
+        preimage_low_c = self.numpy_to_c_array(np.array(preimage_low))
+        preimage_high_c = self.numpy_to_c_array(np.array(preimage_high))
+        
+        # Get input bounds correctly (self.x_low_real is an array, not a scalar)
+        input_bounds_low = self.numpy_to_c_array(np.array(self.x_low_real))
+        input_bounds_high = self.numpy_to_c_array(np.array(self.x_high_real))
+        
+        # Check if this is the output layer
+        is_output_layer = (cur_layer.layer_index == len(self.dense_layers) + 1)
+        
+        if is_output_layer:
+            # Output layer: verify classification property
+            return f"""
 
     #define INPUT_SIZE {in_layer.layer_size}
     #define LAYER_SIZE {cur_layer.layer_size}
-    #define TOTAL_BITS {all_bit}
-    #define FRAC_BITS {frac_bit}
+    #define TARGET_CLASS {self.targetCls}
 
-    // Fixed-point arithmetic
-    typedef int32_t fixed_t;
-
-    fixed_t float_to_fixed(float f) {{
-        return (fixed_t)(f * (1 << FRAC_BITS));
-    }}
-
-    float fixed_to_float(fixed_t fixed) {{
-        return ((float)fixed) / (1 << FRAC_BITS);
-    }}
-
-    // Quantized weights and biases
     float weights[LAYER_SIZE][INPUT_SIZE] = {weights_c};
     float biases[LAYER_SIZE] = {biases_c};
 
-    // Preimage bounds from Quadapter's backward pass
-    float preimage_low[LAYER_SIZE] = {preimage_low};
-    float preimage_high[LAYER_SIZE] = {preimage_high};
+    float input_bounds_low[INPUT_SIZE] = {input_bounds_low};
+    float input_bounds_high[INPUT_SIZE] = {input_bounds_high};
 
-    // Quantized affine transformation
-    void quantized_affine(float input[INPUT_SIZE], float output[LAYER_SIZE]) {{
+    void affine_transform(float input[INPUT_SIZE], float output[LAYER_SIZE]) {{
         for (int i = 0; i < LAYER_SIZE; i++) {{
             output[i] = biases[i];
             for (int j = 0; j < INPUT_SIZE; j++) {{
                 output[i] += weights[i][j] * input[j];
             }}
-            
-            // Apply quantization (simulate fixed-point)
-            fixed_t quantized = float_to_fixed(output[i]);
-            output[i] = fixed_to_float(quantized);
         }}
     }}
 
-    // Check preimage inclusion: γ(Â²ⁱ) ⊆ P²ⁱ
-    int check_preimage_inclusion(float output[LAYER_SIZE]) {{
+    int verify_classification(float output[LAYER_SIZE]) {{
+        float target_score = output[TARGET_CLASS];
         for (int i = 0; i < LAYER_SIZE; i++) {{
-            if (output[i] < preimage_low[i] || output[i] > preimage_high[i]) {{
-                return 0; // Violation found
+            if (i != TARGET_CLASS && output[i] >= target_score) {{
+                return 0; // Another class has higher or equal score
             }}
         }}
-        return 1; // All outputs within preimage
+        return 1; // Target class is the maximum
     }}
 
     int main() {{
@@ -865,16 +868,72 @@ class GPEncoding:
         // Non-deterministic input within bounds
         for (int i = 0; i < INPUT_SIZE; i++) {{
             input[i] = nondet_float();
-            // Assume input bounds from Quadapter's input region
-            __ESBMC_assume(input[i] >= {self.x_low_real} && 
-                        input[i] <= {self.x_high_real});
+            __ESBMC_assume(input[i] >= input_bounds_low[i] && 
+                        input[i] <= input_bounds_high[i]);
         }}
         
-        // Apply quantized transformation
-        quantized_affine(input, output);
+        affine_transform(input, output);
         
-        // Verify preimage inclusion
-        int inclusion_holds = check_preimage_inclusion(output);
+        int property_holds = verify_classification(output);
+        __ESBMC_assert(property_holds, 
+                    "Classification property violated for output layer");
+        
+        return 0;
+    }}
+    """
+        else:
+            # Hidden layer: verify preimage inclusion of AFFINE output
+            return f"""
+    //#include <esbmc.h>
+
+    #define INPUT_SIZE {in_layer.layer_size}
+    #define LAYER_SIZE {cur_layer.layer_size}
+
+    float weights[LAYER_SIZE][INPUT_SIZE] = {weights_c};
+    float biases[LAYER_SIZE] = {biases_c};
+
+    float preimage_low[LAYER_SIZE] = {preimage_low_c};
+    float preimage_high[LAYER_SIZE] = {preimage_high_c};
+
+    float input_bounds_low[INPUT_SIZE] = {input_bounds_low};
+    float input_bounds_high[INPUT_SIZE] = {input_bounds_high};
+
+    void affine_transform(float input[INPUT_SIZE], float output[LAYER_SIZE]) {{
+        for (int i = 0; i < LAYER_SIZE; i++) {{
+            output[i] = biases[i];
+            for (int j = 0; j < INPUT_SIZE; j++) {{
+                output[i] += weights[i][j] * input[j];
+            }}
+        }}
+    }}
+
+    int check_preimage_inclusion(float affine_output[LAYER_SIZE]) {{
+        // Check AFFINE output against preimage bounds
+        // NO ReLU application - the preimage already accounts for it
+        for (int i = 0; i < LAYER_SIZE; i++) {{
+            if (affine_output[i] < preimage_low[i] || affine_output[i] > preimage_high[i]) {{
+                return 0; // Violation found
+            }}
+        }}
+        return 1; // All affine outputs within preimage
+    }}
+
+    int main() {{
+        float input[INPUT_SIZE];
+        float affine_output[LAYER_SIZE];
+        
+        // Non-deterministic input within bounds
+        for (int i = 0; i < INPUT_SIZE; i++) {{
+            input[i] = nondet_float();
+            __ESBMC_assume(input[i] >= input_bounds_low[i] && 
+                        input[i] <= input_bounds_high[i]);
+        }}
+        
+        // Apply quantized affine transformation
+        affine_transform(input, affine_output);
+        
+        // Verify preimage inclusion of AFFINE output (not ReLU output)
+        int inclusion_holds = check_preimage_inclusion(affine_output);
         __ESBMC_assert(inclusion_holds, 
                     "Preimage inclusion violated for layer {layer_index}");
         
@@ -885,12 +944,14 @@ class GPEncoding:
     def numpy_to_c_array(self, np_array):
         """Convert numpy array to C array initialization string"""
         if np_array.ndim == 1:
-            return "{" + ", ".join(map(str, np_array)) + "}"
+            return "{" + ", ".join([f"{x:.6f}f" for x in np_array]) + "}"
         else:
             rows = []
             for row in np_array:
-                rows.append("{" + ", ".join(map(str, row)) + "}")
+                rows.append("{" + ", ".join([f"{x:.6f}f" for x in row]) + "}")
             return "{" + ", ".join(rows) + "}"
+        
+
     # update deepPoly model's quantized weights
     def update_quantized_weights_affine(self, in_layer, out_layer, num_bit, frac_bit_weights, frac_bit_bias,
                                         in_layer_index):
@@ -962,7 +1023,7 @@ class GPEncoding:
             "esbmc", c_file,
             "--function", "main",
             "--floatbv",
-            "--bitvector", 
+            "--z3",
             "--unwind", "100",
             "--interval-analysis",
             "--incremental-bmc",
@@ -998,70 +1059,4 @@ class GPEncoding:
             print(f"ESBMC error for layer {layer_index}: {e}")
             return "ERROR"
         
-    def generate_esbmc_verification_with_relaxation(self, cur_layer, in_layer, qu_w, qu_b, 
-                                                frac_bit, all_bit, layer_index):
-        """Enhanced ESBMC verification supporting Quadapter's relaxation"""
-        
-        relaxation_factor = 0.25 if self.ifRelax == 1 else 0.0
-        
-        return f"""
-    // Enhanced ESBMC verification with relaxation support
-    #include <esbmc.h>
-    #include <math.h>
-
-    #define INPUT_SIZE {in_layer.layer_size}
-    #define LAYER_SIZE {cur_layer.layer_size}
-    #define RELAXATION_FACTOR {relaxation_factor}
-    #define MAX_VIOLATIONS (int)(LAYER_SIZE * RELAXATION_FACTOR)
-
-    int check_preimage_inclusion_relaxed(float output[LAYER_SIZE], 
-                                    float preimage_low[LAYER_SIZE],
-                                    float preimage_high[LAYER_SIZE]) {{
-        int violations = 0;
-        
-        for (int i = 0; i < LAYER_SIZE; i++) {{
-            if (output[i] < preimage_low[i] || output[i] > preimage_high[i]) {{
-                violations++;
-                if (violations > MAX_VIOLATIONS) {{
-                    return 0; // Too many violations
-                }}
-            }}
-        }}
-        return 1; // Within relaxation tolerance
-    }}
-
-    // For output layer: verify classification property
-    int verify_output_property(float output[LAYER_SIZE], int target_class) {{
-        float target_score = output[target_class];
-        
-        for (int i = 0; i < LAYER_SIZE; i++) {{
-            if (i != target_class && output[i] >= target_score) {{
-                return 0; // Another class has higher score
-            }}
-        }}
-        return 1; // Target class is the maximum
-    }}
-
-    int main() {{
-        float input[INPUT_SIZE];
-        float output[LAYER_SIZE];
-        
-        // Non-deterministic input
-        for (int i = 0; i < INPUT_SIZE; i++) {{
-            input[i] = nondet_float();
-            __ESBMC_assume(input[i] >= {self.x_low_real[i]} && 
-                        input[i] <= {self.input_bounds_high[i]});
-        }}
-        
-        quantized_affine(input, output);
-        
-        {"// Output layer verification" if layer_index == len(self.dense_layers) else "// Hidden layer verification"}
-        {"int property_holds = verify_output_property(output, " + str(self.targetCls) + ");" 
-        if layer_index == len(self.dense_layers) else 
-        "int property_holds = check_preimage_inclusion_relaxed(output, preimage_low, preimage_high);"}
-        
-        __ESBMC_assert(property_holds, "Property violation detected");
-        
-        return 0;
-    }}
-    """
+    
