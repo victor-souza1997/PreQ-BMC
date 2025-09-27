@@ -513,21 +513,35 @@ class GPEncoding:
         return scaleValue
 
     def underPreImageAbstr(self, in_layer_index, in_layer, cur_layer):
+        """Compute a sound preimage using abstraction-based relaxation.
+
+        This routine encoda uma relaxação linear da propagação ReLU usando as
+        variáveis auxiliares `alpha`/`beta`. Mantemos o padrão de ativação
+        observado durante a propagação DeepPoly e calculamos uma caixa relaxada
+        que ainda garante inclusão na pré-imagem já validada da próxima camada.
+        O valor `relaxScale` controla o quão “grande” essa caixa pode ser antes
+        de violar o envelope seguro. Maximizar `relaxScale` devolve a maior
+        região ainda certificada.
+        """
 
         enc_start_time = time.time()
         relaxScale_LL = []
 
-        var_ll = []
-        prop_cstr_ll = []
-        model_cstr_ll = []
+        var_ll = []  # lista de variáveis auxiliares criadas para remoção posterior
+        prop_cstr_ll = []  # restrições de propriedade que vinculam ao envelope da camada seguinte
+        model_cstr_ll = []  # restrições internas ao modelo (transformação ReLU e affine)
         w = cur_layer.layer_paras[0]
         b = cur_layer.layer_paras[1]
 
+        # Variável contínua que escala o relaxamento. Valores maiores indicam
+        # uma pré-imagem potencialmente mais larga.
         relaxScale = self.gp_model.addVar(lb=0, ub=1000, vtype=GRB.CONTINUOUS)
         relaxScale_LL.append(relaxScale)
 
-        # define relaxed_region for gp_vars_after (ReLU is approximated by abstract transformers)
-        # We require that activation pattern remains unchanged in the preimage to avoid combinatorial explosion problem
+        # Construímos a região relaxada para cada neurônio de entrada da camada
+        # corrente. O objetivo é modelar o efeito da ReLU sem introduzir binárias.
+        # Exigimos que o padrão de ativação permaneça igual ao observado na
+        # propagação simbólica, evitando explosão combinatória.
         for in_index in range(in_layer.layer_size):
 
             neuron_val = in_layer.realVal[in_index]
@@ -537,6 +551,8 @@ class GPEncoding:
             neuron_ub = in_layer.ub[in_index]
 
             if actMode == 1:
+                # ReLU ativo: desloca o ponto central (valor real) para cima e
+                # para baixo, escalando o slack com `relaxScale`.
                 alpha_K = neuron_val - neuron_lb
                 beta_K = neuron_ub - neuron_val
 
@@ -545,12 +561,17 @@ class GPEncoding:
                 model_cstr_ll.append(
                     self.gp_model.addConstr(in_layer.beta_after[in_index] == (beta_K * relaxScale)))
 
+                # Garante que `alpha_after` não seja maior que o valor original
+                # permitido pelo limite inferior (mantém monotonicidade).
                 model_cstr_ll.append(self.gp_model.addGenConstrMin(in_layer.alpha_after[in_index],
                                                                    [in_layer.alpha_before[in_index],
                                                                     in_layer.lb[in_index]]))
             elif actMode == 2:
+                # ReLU inativo: saída fixada em zero, logo nenhum slack é adicionado.
                 continue
-            else:  # actMode == 3 or 4:
+            else:  # actMode == 3 ou 4 (zona incerta da ReLU)
+                # ReLU parcial: para manter uma relaxação segura, usamos os
+                # limites concretos multiplicados por `relaxScale`.
                 model_cstr_ll.append(
                     self.gp_model.addConstr(in_layer.alpha_after[in_index] == (-neuron_lb * relaxScale)))
                 model_cstr_ll.append(
@@ -558,13 +579,15 @@ class GPEncoding:
 
         self.gp_model.update()
 
-        # compute relaxed accumulated bounds instead of exactly encoding cur_layer's computation
+        # Agora acumulamos os deslocamentos introduzidos pela relaxação quando a
+        # camada corrente (linear) é aplicada sobre a camada anterior.
         for out_index in range(cur_layer.layer_size):
             weights = w[out_index]
             tmp_add_lower = 0
             tmp_add_upper = 0
 
-            # get new added biases
+            # Cada neurônio de entrada contribui para o bound inferior/superior
+            # dependendo do sinal do peso e do padrão de ativação.
             for in_index in range(in_layer.layer_size):
                 actMode = in_layer.actMode[in_index]
                 if actMode == 1:
@@ -575,10 +598,12 @@ class GPEncoding:
                         tmp_add_lower += weights[in_index] * in_layer.beta_after[in_index]
                         tmp_add_upper -= weights[in_index] * in_layer.alpha_after[in_index]
                 elif actMode == 2:
+                    # Neurônio morto: não altera os limites.
                     continue
 
                 elif actMode == 3:
-                    # update bounds
+                    # Região cruzando zero: usamos o fator `K` padrão de DeepPoly
+                    # para ponderar o erro de quantização.
                     K = in_layer.ub[in_index] / (in_layer.ub[in_index] - in_layer.lb[in_index])
                     if weights[in_index] >= 0:
                         tmp_add_upper += weights[in_index] * K * (
@@ -587,7 +612,7 @@ class GPEncoding:
                         tmp_add_lower += weights[in_index] * K * (
                                 in_layer.beta_after[in_index] + in_layer.alpha_after[in_index])
 
-                else:  # actMode == 4
+                else:  # actMode == 4 (zona negativa com incerteza)
                     K = in_layer.ub[in_index] / (in_layer.ub[in_index] - in_layer.lb[in_index])
                     if weights[in_index] >= 0:
                         tmp_add_lower -= weights[in_index] * in_layer.alpha_after[in_index]
@@ -598,6 +623,7 @@ class GPEncoding:
                                 in_layer.beta_after[in_index] + in_layer.alpha_after[in_index])
                         tmp_add_upper -= weights[in_index] * in_layer.alpha_after[in_index]
 
+            # Relaciona os deslocamentos à caixa relaxada propagada pela camada atual.
             model_cstr_ll.append(self.gp_model.addConstr(
                 (tmp_add_lower + cur_layer.lb[out_index]) == cur_layer.gp_vars_lb_before[out_index]))
             model_cstr_ll.append(self.gp_model.addConstr(
@@ -610,7 +636,10 @@ class GPEncoding:
 
         prop_start_time = time.time()
 
-        # encoding cur_layer's property, the preimage propagated should be concluded in the next layer's preimage computed before
+        # Enforce que a pré-imagem relaxada permaneça dentro da região segura já
+        # registrada na camada seguinte. Para a camada de saída, isso equivale ao
+        # requisito de robustez (classe alvo acima das demais). Para camadas
+        # ocultas, impõe inclusão nos `relaxed_lb/ub` armazenados anteriormente.
         if cur_layer.layer_index == (len(self.dense_layers) + 1):
             for var_index, var in enumerate(cur_layer.gp_vars_ub_before):
                 if var_index == self.targetCls:
@@ -638,9 +667,12 @@ class GPEncoding:
 
         self.gp_model.update()
 
+        # Maximizar `relaxScale` tenta dilatar a pré-imagem sem quebrar as
+        # restrições anteriores. Se o otimizador encontrar uma solução ótima,
+        # obtemos o maior fator seguro possível.
         self.gp_model.setObjective(relaxScale, GRB.MAXIMIZE)
         self.gp_model.update()
-        self.gp_model.setParam('DualReductions', 0)  # set this value to 0, to get a more definite result
+        self.gp_model.setParam('DualReductions', 0)  # força checagem completa do status
         opt_start_time = time.time()
 
         self.gp_model.optimize()
@@ -696,6 +728,8 @@ class GPEncoding:
                 if in_layer.ub[in_index] <= 0:
                     in_layer.relaxed_ub_expression[in_index] = 0
 
+            # Limpa variáveis/restrições auxiliares para manter o modelo enxuto
+            # antes da próxima chamada.
             self.gp_model.remove(prop_cstr_ll)
             self.gp_model.remove(model_cstr_ll)
             self.gp_model.remove(relaxScale_LL)
