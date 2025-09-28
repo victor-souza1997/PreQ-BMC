@@ -20,6 +20,7 @@ class LayerEncoding:
             bit_ub,
             if_hid,
     ):
+        # Keep per-layer bookkeeping: bounds, quantization knobs and MILP vars
         self.layer_index = layer_index
         self.layer_size = layer_size
         self.layer_paras = layer_paras  # weight+bias
@@ -108,6 +109,7 @@ class LayerEncoding:
 
 class GPEncoding:
     def __init__(self, arch, model, args, original_prediction, x_low_real, x_high_real):
+        """Build the global MILP that couples DeepPoly bounds with quantization variables."""
         self.gp_model = gp.Model("gp_encoding")
         self.tole = 1e-6
         self.gp_model.Params.IntFeasTol = 1e-9
@@ -148,6 +150,7 @@ class GPEncoding:
             self.nnparas.append(paras)
 
         ########## output layer
+        # Prepare output layer encoding so preimage computation can start from logits
         self.output_layer = LayerEncoding(self.gp_model, preimg_mode=self.preimg_mode,
                                           layer_index=len(self.nnparas),
                                           layer_size=arch[-1],
@@ -169,6 +172,7 @@ class GPEncoding:
         ########## input layer
         input_size = arch[0]
 
+        # Input layer only needs concrete bounds; no weights attached
         self.input_layer = LayerEncoding(self.gp_model, preimg_mode=self.preimg_mode,
                                          layer_index=0,
                                          layer_size=input_size,
@@ -186,6 +190,7 @@ class GPEncoding:
             self.input_gp_vars.append(cur_var)
 
     def verified_quant(self, lb, ub):
+        """Main driver: check DNN robustness, compute preimages, then synthesize bits."""
 
         self.assert_input_box(lb, ub)
 
@@ -211,7 +216,7 @@ class GPEncoding:
             backward_end_time = time.time()
             print("Backward Time is: ", backward_end_time - backward_start_time)
 
-            ifSucc, qu_list, qu_frac_list, qu_int_list = self.forward_quantization()
+            ifSucc, qu_list, qu_frac_list, qu_int_list = self.forward_quantization_esbmc()#self.forward_quantization()
             forward_end_time = time.time()
             print("Forward time is: ", forward_end_time - backward_end_time)
 
@@ -227,6 +232,7 @@ class GPEncoding:
 
     # initiate input region
     def assert_input_box(self, x_lb, x_ub):
+        """Register the adversarial hyper-rectangle inside the DeepPoly abstraction."""
         low, high = x_lb, x_ub
 
         input_size = self.input_layer.layer_size
@@ -250,6 +256,7 @@ class GPEncoding:
 
     # Conduct DeepPoly on DNN
     def symbolic_propagate(self):
+        """Run DeepPoly forward to obtain concrete and symbolic bounds per neuron."""
         self.deepPolyNets_DNN.deeppoly()
 
         for i, l in enumerate(self.dense_layers):
@@ -303,6 +310,7 @@ class GPEncoding:
 
     # Two backward preimage computation: MILP-based, abstraction-bassed
     def backward_preimage_computation(self):
+        """Propagate the safe output set backwards layer-by-layer (MILP/abstr)."""
         cur_layer = self.output_layer
         in_layer_index = len(self.dense_layers)
 
@@ -322,6 +330,7 @@ class GPEncoding:
 
     # MILP-based method for computing preimage
     def underPreImageMILP(self, in_layer_index, in_layer, cur_layer):
+        """Exact MILP search for a tight sub-preimage of `cur_layer` in terms of `in_layer`."""
         enc_start_time = time.time()
 
         var_ll = []
@@ -740,6 +749,7 @@ class GPEncoding:
 
     # forward quantization procedure
     def forward_quantization(self):
+        """Iteratively pick the smallest bit-width per layer that preserves the preimage."""
         print("\nNow we begin to do the forward quantization!")
         qu_list = []
         qu_frac_list = []
@@ -1011,6 +1021,7 @@ class GPEncoding:
     # update deepPoly model's quantized weights
     def update_quantized_weights_affine(self, in_layer, out_layer, num_bit, frac_bit_weights, frac_bit_bias,
                                         in_layer_index):
+        """Inject the chosen quantized parameters back into the symbolic DeepPoly network."""
         min_fp_weight, max_fp_weight = int_get_min_max(num_bit, frac_bit_weights)
         min_fp_bias, max_fp_bias = int_get_min_max(num_bit, frac_bit_bias)
         for out_index in range(out_layer.layer_size):
@@ -1067,3 +1078,233 @@ class GPEncoding:
         fo.write("The num of numBinVars: " + str(numBinVars) + "\n")
         fo.write("The num of Constraints: " + str(numConstrs) + "\n")
         fo.close()
+    def forward_quantization_esbmc(self):
+        """Versão ESBMC da quantização forward - substitui o MILP por verificação formal"""
+        print("\nIniciando verificação ESBMC da quantização!")
+        qu_list = []
+        qu_frac_list = [] 
+        qu_int_list = []
+
+        for cur_layer in self.dense_layers + [self.output_layer]:
+            in_layer_index = cur_layer.layer_index - 1
+            in_layer = self.input_layer if cur_layer.layer_index == 1 else self.dense_layers[cur_layer.layer_index - 2]
+            
+            ifFound = False
+            
+            for frac_bit in range(self.bit_lb, self.bit_ub + 1):
+                all_bit = frac_bit + cur_layer.int_bit
+                
+                # 1. Quantizar parâmetros (igual ao original)
+                qu_w = quantize_int(cur_layer.layer_paras[0], all_bit, frac_bit) / (2 ** frac_bit)
+                qu_b = quantize_int(cur_layer.layer_paras[1], all_bit, frac_bit) / (2 ** frac_bit)
+                
+                # 2. VERIFICAÇÃO ESBMC (substitui o MILP)
+                if self.verify_layer_esbmc(cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit, in_layer_index):
+                    print(f"ESBMC verificou quantização [Q={all_bit}, F={frac_bit}] para Camada {cur_layer.layer_index}")
+                    
+                    cur_layer.frac_bit = frac_bit
+                    qu_frac_list.append(frac_bit)
+                    qu_int_list.append(cur_layer.int_bit)
+                    qu_list.append(all_bit)
+                    ifFound = True
+                    
+                    # Atualizar pesos e algebra (igual ao original)
+                    self.update_quantized_weights_affine(in_layer, cur_layer, all_bit, frac_bit, frac_bit, in_layer_index)
+                    break
+                    
+            if not ifFound:
+                return False, None, None, None
+                
+        return True, qu_list, qu_frac_list, qu_int_list
+    def verify_layer_esbmc(self, cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit, layer_index):
+        """Substitui a verificação MILP por ESBMC"""
+        
+        # Gerar código C para verificação
+        esbmc_code = self.generate_esbmc_verification(cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit, layer_index)
+        with open("output/layers/layer_{}.c".format(layer_index), 'w') as f:
+            f.write(esbmc_code)
+        # Salvar em arquivo temporário
+        temp_file = f"esbmc_layer_{layer_index}_Q{all_bit}_F{frac_bit}.c"
+        with open(temp_file, 'w') as f:
+            f.write(esbmc_code)
+        
+        # Executar ESBMC
+        result = self.run_esbmc(temp_file)
+        
+        # Limpar
+        import os
+        os.remove(temp_file)
+        
+        return result == "VERIFIED"
+
+    def generate_esbmc_verification(self, cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit, layer_index):
+        """Gera código C equivalente à verificação MILP do Quadapter"""
+        
+        is_output_layer = (cur_layer.layer_index == len(self.dense_layers) + 1)
+        
+        if is_output_layer:
+            return self._generate_output_layer_verification(cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit)
+        else:
+            return self._generate_hidden_layer_verification(cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit, layer_index)
+    
+    def _generate_hidden_layer_verification(self, cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit, layer_index):
+        """Gera verificação ESBMC para inclusão na pré-imagem"""
+        
+        # Obter limites da pré-imagem (calculados no backward pass)
+        preimage_low = cur_layer.relaxed_lb if hasattr(cur_layer, 'relaxed_lb') else cur_layer.lb
+        preimage_high = cur_layer.relaxed_ub if hasattr(cur_layer, 'relaxed_ub') else cur_layer.ub
+        
+        return f"""
+    #include <assert.h>
+
+    #define INPUT_SIZE {in_layer.layer_size}
+    #define LAYER_SIZE {cur_layer.layer_size}
+    #define SCALE_FACTOR {2 ** frac_bit}
+
+    // Parâmetros quantizados (convertidos para fixed-point)
+    int32_t weights[LAYER_SIZE][INPUT_SIZE] = {self._array_to_c(qu_w * (2 ** frac_bit))};
+    int32_t biases[LAYER_SIZE] = {self._array_to_c(qu_b * (2 ** frac_bit))};
+
+    // Pré-imagem calculada pelo Quadapter
+    int32_t preimage_low[LAYER_SIZE] = {self._array_to_c(np.array(preimage_low) * (2 ** frac_bit))};
+    int32_t preimage_high[LAYER_SIZE] = {self._array_to_c(np.array(preimage_high) * (2 ** frac_bit))};
+
+    // Limites de entrada
+    int32_t input_low[INPUT_SIZE] = {self._array_to_c(self.x_low_real * (2 ** frac_bit))};
+    int32_t input_high[INPUT_SIZE] = {self._array_to_c(self.x_high_real * (2 ** frac_bit))};
+
+    // Transformação afim quantizada
+    void quantized_affine(int32_t input[INPUT_SIZE], int32_t output[LAYER_SIZE]) {{
+        for (int i = 0; i < LAYER_SIZE; i++) {{
+            output[i] = biases[i];
+            for (int j = 0; j < INPUT_SIZE; j++) {{
+                output[i] += weights[i][j] * input[j];
+            }}
+        }}
+    }}
+
+    // Verificação: γ(Â²ⁱ) ⊆ P²ⁱ
+    int check_preimage_inclusion(int32_t output[LAYER_SIZE]) {{
+        for (int i = 0; i < LAYER_SIZE; i++) {{
+            if (output[i] < preimage_low[i] || output[i] > preimage_high[i]) {{
+                return 0; // Violação
+            }}
+        }}
+        return 1;
+    }}
+
+    int main() {{
+        int32_t input[INPUT_SIZE];
+        int32_t output[LAYER_SIZE];
+        
+        // Entrada não determinística dentro dos limites
+        for (int i = 0; i < INPUT_SIZE; i++) {{
+            input[i] = nondet_int32();
+            __ESBMC_assume(input[i] >= input_low[i] && input[i] <= input_high[i]);
+        }}
+        
+        quantized_affine(input, output);
+        
+        int property_holds = check_preimage_inclusion(output);
+        __ESBMC_assert(property_holds, "Inclusão na pré-imagem violada");
+        
+        return 0;
+    }}
+    """
+    def _generate_output_layer_verification(self, cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit):
+        """Gera verificação ESBMC para propriedade de classificação"""
+        return f"""
+    
+    #define INPUT_SIZE {in_layer.layer_size}
+    #define LAYER_SIZE {cur_layer.layer_size}
+    #define TARGET_CLASS {self.targetCls}
+
+    int32_t weights[LAYER_SIZE][INPUT_SIZE] = {self._array_to_c(qu_w * (2 ** frac_bit))};
+    int32_t biases[LAYER_SIZE] = {self._array_to_c(qu_b * (2 ** frac_bit))};
+
+    int32_t input_low[INPUT_SIZE] = {self._array_to_c(self.x_low_real * (2 ** frac_bit))};
+    int32_t input_high[INPUT_SIZE] = {self._array_to_c(self.x_high_real * (2 ** frac_bit))};
+
+    void quantized_affine(int32_t input[INPUT_SIZE], int32_t output[LAYER_SIZE]) {{
+        for (int i = 0; i < LAYER_SIZE; i++) {{
+            output[i] = biases[i];
+            for (int j = 0; j < INPUT_SIZE; j++) {{
+                output[i] += weights[i][j] * input[j];
+            }}
+        }}
+    }}
+
+    // Verificação: argmax(output) == TARGET_CLASS
+    int verify_classification(int32_t output[LAYER_SIZE]) {{
+        int32_t target_score = output[TARGET_CLASS];
+        
+        for (int i = 0; i < LAYER_SIZE; i++) {{
+            if (i != TARGET_CLASS && output[i] >= target_score) {{
+                return 0; // Outra classe tem score maior/igual
+            }}
+        }}
+        return 1;
+    }}
+
+    int main() {{
+        int32_t input[INPUT_SIZE];
+        int32_t output[LAYER_SIZE];
+        
+        for (int i = 0; i < INPUT_SIZE; i++) {{
+            input[i] = nondet_int32();
+            __ESBMC_assume(input[i] >= input_low[i] && input[i] <= input_high[i]);
+        }}
+        
+        quantized_affine(input, output);
+        
+        int property_holds = verify_classification(output);
+        __ESBMC_assert(property_holds, "Propriedade de classificação violada");
+        
+        return 0;
+    }}
+    """
+
+    def run_esbmc(self, c_file):
+        """Executa ESBMC e interpreta resultados"""
+        
+        import subprocess
+        
+        esbmc_cmd = [
+            "esbmc", c_file,
+            "--function", "main",
+            "--no-floatbv",  # Usar inteiros em vez de floating-point
+            "--bitvector",
+            "--unwind", "100",
+            "--interval-analysis", 
+            "--incremental-bmc",
+            "--timeout", "900"  # 15 minutos
+        ]
+        
+        try:
+            result = subprocess.run(esbmc_cmd, capture_output=True, text=True, timeout=1200)
+            print(result.stdout)
+            if "VERIFICATION SUCCESSFUL" in result.stdout:
+                print("Propriedade verificada pela ESBMC")
+                return "VERIFIED"
+            elif "VERIFICATION FAILED" in result.stdout:
+                print("Propriedade violada detectada pela ESBMC")
+                return "FALSIFIED"
+            else:
+                print("Resultado ESBMC inesperado")
+                return "UNKNOWN"
+                
+        except subprocess.TimeoutExpired:
+            print("ESBMC timed out")
+            return "TIMEOUT"
+
+    def _array_to_c(self, np_array):
+        """Converte array numpy para formato C"""
+        if np_array.ndim == 1:
+            return "{" + ", ".join(map(str, np_array.astype(int))) + "}"
+        else:
+            rows = []
+            for row in np_array:
+                rows.append("{" + ", ".join(map(str, row.astype(int))) + "}")
+            return "{" + ", ".join(rows) + "}"
+    
+
