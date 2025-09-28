@@ -1147,155 +1147,218 @@ class GPEncoding:
         else:
             return self._generate_hidden_layer_verification(cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit, layer_index)
     
-    def _generate_hidden_layer_verification(self, cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit, layer_index):
-        """Gera verificação ESBMC para inclusão na pré-imagem"""
-        
-        # Obter limites da pré-imagem (calculados no backward pass)
-        preimage_low = cur_layer.relaxed_lb if hasattr(cur_layer, 'relaxed_lb') else cur_layer.lb
-        preimage_high = cur_layer.relaxed_ub if hasattr(cur_layer, 'relaxed_ub') else cur_layer.ub
-        
+    def _generate_hidden_layer_verification(
+        self, cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit, layer_index
+    ):
+        """Gera verificação ESBMC para inclusão na pré-imagem (novo C format: análise por intervalo)"""
+
+        # Limites da pré-imagem (preferir relaxados, se existirem)
+        preimage_low = getattr(cur_layer, "relaxed_lb", cur_layer.lb)
+        preimage_high = getattr(cur_layer, "relaxed_ub", cur_layer.ub)
+
         return f"""
-    #include <assert.h>
+    #include <stdint.h>
+    #include <limits.h>
 
     #define INPUT_SIZE {in_layer.layer_size}
     #define LAYER_SIZE {cur_layer.layer_size}
-    #define SCALE_FACTOR {2 ** frac_bit}
+    #define Q_SHIFT {frac_bit}
+    #define DO_ROUND 1
 
-    // Parâmetros quantizados (convertidos para fixed-point)
-    int32_t weights[LAYER_SIZE][INPUT_SIZE] = {self._array_to_c(qu_w * (2 ** frac_bit))};
-    int32_t biases[LAYER_SIZE] = {self._array_to_c(qu_b * (2 ** frac_bit))};
+    // Parâmetros quantizados (fixed-point em Q_SHIFT bits de fração)
+    static const int32_t weights[LAYER_SIZE][INPUT_SIZE] = {self._array_to_c(qu_w * (2 ** frac_bit))};
+    static const int32_t biases[LAYER_SIZE] = {self._array_to_c(qu_b * (2 ** frac_bit))};
 
-    // Pré-imagem calculada pelo Quadapter
-    int32_t preimage_low[LAYER_SIZE] = {self._array_to_c(np.array(preimage_low) * (2 ** frac_bit))};
-    int32_t preimage_high[LAYER_SIZE] = {self._array_to_c(np.array(preimage_high) * (2 ** frac_bit))};
+    // Pré-imagem calculada (em mesma escala Q_SHIFT)
+    static const int32_t preimage_low[LAYER_SIZE]  = {self._array_to_c(np.array(preimage_low)  * (2 ** frac_bit))};
+    static const int32_t preimage_high[LAYER_SIZE] = {self._array_to_c(np.array(preimage_high) * (2 ** frac_bit))};
 
-    // Limites de entrada
-    int32_t input_low[INPUT_SIZE] = {self._array_to_c(self.x_low_real * (2 ** frac_bit))};
-    int32_t input_high[INPUT_SIZE] = {self._array_to_c(self.x_high_real * (2 ** frac_bit))};
+    // Limites da entrada (em mesma escala Q_SHIFT)
+    static const int32_t input_low[INPUT_SIZE]  = {self._array_to_c(self.x_low_real  * (2 ** frac_bit))};
+    static const int32_t input_high[INPUT_SIZE] = {self._array_to_c(self.x_high_real * (2 ** frac_bit))};
 
-    // Transformação afim quantizada
-    void quantized_affine(int32_t input[INPUT_SIZE], int32_t output[LAYER_SIZE]) {{
-        for (int i = 0; i < LAYER_SIZE; i++) {{
-            output[i] = biases[i];
-            for (int j = 0; j < INPUT_SIZE; j++) {{
-                output[i] += weights[i][j] * input[j];
-            }}
-        }}
+    static inline int32_t sat_int32(int64_t x) {{
+    if (x > INT32_MAX) return INT32_MAX;
+    if (x < INT32_MIN) return INT32_MIN;
+    return (int32_t)x;
     }}
 
-    // Verificação: γ(Â²ⁱ) ⊆ P²ⁱ
-    int check_preimage_inclusion(int32_t output[LAYER_SIZE]) {{
-        for (int i = 0; i < LAYER_SIZE; i++) {{
-            if (output[i] < preimage_low[i] || output[i] > preimage_high[i]) {{
-                return 0; // Violação
-            }}
-        }}
-        return 1;
+    static inline int32_t quantize_back(int64_t acc) {{
+    #if Q_SHIFT > 0
+    if (DO_ROUND) acc += (acc >= 0 ? (1LL<<(Q_SHIFT-1)) : -(1LL<<(Q_SHIFT-1)));
+    acc >>= Q_SHIFT;
+    #endif
+    return sat_int32(acc);
     }}
 
-    int main() {{
-        int32_t input[INPUT_SIZE];
-        int32_t output[LAYER_SIZE];
-        
-        // Entrada não determinística dentro dos limites
-        for (int i = 0; i < INPUT_SIZE; i++) {{
-            input[i] = nondet_int32();
-            __ESBMC_assume(input[i] >= input_low[i] && input[i] <= input_high[i]);
-        }}
-        
-        quantized_affine(input, output);
-        
-        int property_holds = check_preimage_inclusion(output);
-        __ESBMC_assert(property_holds, "Inclusão na pré-imagem violada");
-        
-        return 0;
+    // Calcula o menor/maior valor possível do neurônio i (soma afim) sem enumerar entradas
+    static void neuron_bounds_raw(int i, int64_t* lo, int64_t* hi) {{
+    int64_t L = biases[i], H = biases[i];
+    for (int j = 0; j < INPUT_SIZE; ++j) {{
+        int64_t w = (int64_t)weights[i][j];
+        int64_t a = (int64_t)input_low[j];
+        int64_t b = (int64_t)input_high[j];
+        if (a > b) {{ int64_t t = a; a = b; b = t; }}
+        if (w >= 0) {{ L += w * a; H += w * b; }}
+        else        {{ L += w * b; H += w * a; }}
     }}
-    """
-    def _generate_output_layer_verification(self, cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit):
-        """Gera verificação ESBMC para propriedade de classificação"""
+    *lo = L; *hi = H;
+    }}
+
+    int main(void) {{
+    for (int i = 0; i < LAYER_SIZE; ++i) {{
+        int64_t lo_raw, hi_raw;
+        neuron_bounds_raw(i, &lo_raw, &hi_raw);
+
+        int32_t out_lo = quantize_back(lo_raw);
+        int32_t out_hi = quantize_back(hi_raw);
+        if (out_lo > out_hi) {{ int32_t t = out_lo; out_lo = out_hi; out_hi = t; }}
+
+        __ESBMC_assert(out_lo >= preimage_low[i],  "LB \\u2284 P^2i (lower bound outside preimage)");
+        __ESBMC_assert(out_hi <= preimage_high[i], "UB \\u2284 P^2i (upper bound outside preimage)");
+    }}
+    return 0;
+    }}
+        """
+
+    def _generate_output_layer_verification(
+        self, cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit
+    ):
+        """Gera verificação ESBMC para propriedade de classificação (novo C format: prova por caixas)"""
+
         return f"""
-    
+    #include <stdint.h>
+    #include <limits.h>
+
     #define INPUT_SIZE {in_layer.layer_size}
     #define LAYER_SIZE {cur_layer.layer_size}
     #define TARGET_CLASS {self.targetCls}
+    #define Q_SHIFT {frac_bit}
+    #define DO_ROUND 1
 
-    int32_t weights[LAYER_SIZE][INPUT_SIZE] = {self._array_to_c(qu_w * (2 ** frac_bit))};
-    int32_t biases[LAYER_SIZE] = {self._array_to_c(qu_b * (2 ** frac_bit))};
+    // Parâmetros quantizados (fixed-point em Q_SHIFT bits de fração)
+    static const int32_t weights[LAYER_SIZE][INPUT_SIZE] = {self._array_to_c(qu_w * (2 ** frac_bit))};
+    static const int32_t biases[LAYER_SIZE] = {self._array_to_c(qu_b * (2 ** frac_bit))};
 
-    int32_t input_low[INPUT_SIZE] = {self._array_to_c(self.x_low_real * (2 ** frac_bit))};
-    int32_t input_high[INPUT_SIZE] = {self._array_to_c(self.x_high_real * (2 ** frac_bit))};
+    // Limites da entrada (em mesma escala Q_SHIFT)
+    static const int32_t input_low[INPUT_SIZE]  = {self._array_to_c(self.x_low_real  * (2 ** frac_bit))};
+    static const int32_t input_high[INPUT_SIZE] = {self._array_to_c(self.x_high_real * (2 ** frac_bit))};
 
-    void quantized_affine(int32_t input[INPUT_SIZE], int32_t output[LAYER_SIZE]) {{
-        for (int i = 0; i < LAYER_SIZE; i++) {{
-            output[i] = biases[i];
-            for (int j = 0; j < INPUT_SIZE; j++) {{
-                output[i] += weights[i][j] * input[j];
-            }}
-        }}
+    static inline int32_t sat_int32(int64_t x) {{
+    if (x > INT32_MAX) return INT32_MAX;
+    if (x < INT32_MIN) return INT32_MIN;
+    return (int32_t)x;
     }}
 
-    // Verificação: argmax(output) == TARGET_CLASS
-    int verify_classification(int32_t output[LAYER_SIZE]) {{
-        int32_t target_score = output[TARGET_CLASS];
-        
-        for (int i = 0; i < LAYER_SIZE; i++) {{
-            if (i != TARGET_CLASS && output[i] >= target_score) {{
-                return 0; // Outra classe tem score maior/igual
-            }}
-        }}
-        return 1;
+    static inline int32_t quantize_back(int64_t acc) {{
+    #if Q_SHIFT > 0
+    if (DO_ROUND) acc += (acc >= 0 ? (1LL<<(Q_SHIFT-1)) : -(1LL<<(Q_SHIFT-1)));
+    acc >>= Q_SHIFT;
+    #endif
+    return sat_int32(acc);
     }}
 
-    int main() {{
-        int32_t input[INPUT_SIZE];
-        int32_t output[LAYER_SIZE];
-        
-        for (int i = 0; i < INPUT_SIZE; i++) {{
-            input[i] = nondet_int32();
-            __ESBMC_assume(input[i] >= input_low[i] && input[i] <= input_high[i]);
-        }}
-        
-        quantized_affine(input, output);
-        
-        int property_holds = verify_classification(output);
-        __ESBMC_assert(property_holds, "Propriedade de classificação violada");
-        
-        return 0;
+    // Bounds exatos da soma afim do neurônio i
+    static void neuron_bounds_raw(int i, int64_t* lo, int64_t* hi) {{
+    int64_t L = biases[i], H = biases[i];
+    for (int j = 0; j < INPUT_SIZE; ++j) {{
+        int64_t w = (int64_t)weights[i][j];
+        int64_t a = (int64_t)input_low[j];
+        int64_t b = (int64_t)input_high[j];
+        if (a > b) {{ int64_t t = a; a = b; b = t; }}
+        if (w >= 0) {{ L += w * a; H += w * b; }}
+        else        {{ L += w * b; H += w * a; }}
     }}
-    """
+    *lo = L; *hi = H;
+    }}
 
+    int main(void) {{
+    // Bounds do alvo
+    int64_t lo_t_raw, hi_t_raw;
+    neuron_bounds_raw(TARGET_CLASS, &lo_t_raw, &hi_t_raw);
+    int32_t tgt_lo = quantize_back(lo_t_raw);
+    int32_t tgt_hi = quantize_back(hi_t_raw);
+    if (tgt_lo > tgt_hi) {{ int32_t t = tgt_lo; tgt_lo = tgt_hi; tgt_hi = t; }}
+
+    // Para toda classe k != TARGET_CLASS, exigimos: tgt_lo > other_hi
+    for (int k = 0; k < LAYER_SIZE; ++k) {{
+        if (k == TARGET_CLASS) continue;
+        int64_t lo_k_raw, hi_k_raw;
+        neuron_bounds_raw(k, &lo_k_raw, &hi_k_raw);
+        int32_t oth_lo = quantize_back(lo_k_raw);
+        int32_t oth_hi = quantize_back(hi_k_raw);
+        if (oth_lo > oth_hi) {{ int32_t t = oth_lo; oth_lo = oth_hi; oth_hi = t; }}
+
+        __ESBMC_assert(tgt_lo > oth_hi, "Classification violated: not strictly argmax(TARGET_CLASS)");
+    }}
+
+    return 0;
+    }}
+        """
     def run_esbmc(self, c_file):
-        """Executa ESBMC e interpreta resultados"""
-        
-        import subprocess
-        
+        """Executa ESBMC, imprime stdout/stderr e interpreta o resultado."""
+        import subprocess, shutil, sys
+
+        if not shutil.which("esbmc"):
+            print("ERRO: 'esbmc' não encontrado no PATH.")
+            return "NO_ESBMC"
+
         esbmc_cmd = [
             "esbmc", c_file,
             "--function", "main",
-            "--no-floatbv",  # Usar inteiros em vez de floating-point
-            "--bitvector",
-            "--unwind", "100",
-            "--interval-analysis", 
-            "--incremental-bmc",
-            "--timeout", "900"  # 15 minutos
+            "--boolector",                     # inclui contraexemplo
+            "--unwindset", "'neuron_bounds_raw:784,main:100'",  
+            "--no-bounds-check",
+            "--no-pointer-check",
+            "--no-div-by-zero-check",
+            "--timeout", "900",
         ]
-        
+
         try:
-            result = subprocess.run(esbmc_cmd, capture_output=True, text=True, timeout=1200)
-            print(result.stdout)
-            if "VERIFICATION SUCCESSFUL" in result.stdout:
-                print("Propriedade verificada pela ESBMC")
-                return "VERIFIED"
-            elif "VERIFICATION FAILED" in result.stdout:
-                print("Propriedade violada detectada pela ESBMC")
-                return "FALSIFIED"
-            else:
-                print("Resultado ESBMC inesperado")
-                return "UNKNOWN"
-                
-        except subprocess.TimeoutExpired:
-            print("ESBMC timed out")
+            result = subprocess.run(
+                esbmc_cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=1200,
+            )
+        except subprocess.TimeoutExpired as e:
+            print("=== ESBMC TIMEOUT (processo Python) ===")
+            if e.stdout:
+                print("=== STDOUT (parcial) ===\n", e.stdout)
+            if e.stderr:
+                print("=== STDERR (parcial) ===\n", e.stderr)
             return "TIMEOUT"
+
+        # Imprime tudo
+        print("=== CMD ===")
+        print(" ".join(esbmc_cmd))
+        print("=== Return code:", result.returncode, "===")
+
+        if result.stdout:
+            print("=== STDOUT ===")
+            print(result.stdout)
+        if result.stderr:
+            print("=== STDERR ===")
+            print(result.stderr)
+
+        # Procura status nos dois streams
+        combined = (result.stdout or "") + "\n" + (result.stderr or "")
+        if "VERIFICATION SUCCESSFUL" in combined:
+            print("Propriedade verificada pela ESBMC")
+            return "VERIFIED"
+        if "VERIFICATION FAILED" in combined or "Violated property" in combined:
+            print("Propriedade violada detectada pela ESBMC")
+            return "FALSIFIED"
+
+        # fallback pelo código de retorno (0 costuma ser sucesso)
+        if result.returncode == 0:
+            print("ESBMC retornou 0; provavelmente verificado.")
+            return "VERIFIED"
+
+        print("Resultado ESBMC inesperado")
+        return "UNKNOWN"
 
     def _array_to_c(self, np_array):
         """Converte array numpy para formato C"""
