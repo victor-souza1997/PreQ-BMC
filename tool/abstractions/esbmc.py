@@ -104,13 +104,27 @@ def _save_property(abstraction_path: Path, spec: EquivalenceSpec):
     
     lb = array2string(np.array(spec.input_lower_bounds))
     ub = array2string(np.array(spec.input_upper_bounds))
+
+    pre_lb_attr = getattr(spec, "preimage_lower_bounds", None)
+    pre_ub_attr = getattr(spec, "preimage_upper_bounds", None)
+
+    if pre_lb_attr is not None and pre_ub_attr is not None:
+        pre_lb = array2string(np.array(pre_lb_attr))
+        pre_ub = array2string(np.array(pre_ub_attr))
+        check_preimage = "1"
+        pre_layers = str(np.array(pre_lb_attr).shape[0])
+    else:
+        pre_lb = "{{0}}"
+        pre_ub = "{{0}}"
+        check_preimage = "0"
+        pre_layers = "0"
     # ub = np.array2string(
         # ub, formatter={"float_kind": lambda x: "{}".format(Decimal(x))}
     # )
     # ub = re.sub(r"\s+", " ", ub.replace("[", "{").replace("]", "}")).replace(" ", ", ")
 
     if len(spec.input_shape) == 2:
-        content = export_2d(spec, lb, ub)
+        content = export_2d(spec, lb, ub, pre_lb, pre_ub, check_preimage, pre_layers)
     elif len(spec.input_shape) == 3:
         content = export_3d(spec, lb, ub)
     elif len(spec.input_shape) == 4:

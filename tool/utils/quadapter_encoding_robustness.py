@@ -1128,8 +1128,8 @@ class GPEncoding:
         with open(temp_file, 'w') as f:
             f.write(esbmc_code)
         
-        # Executar ESBMC
-        result = self.run_esbmc(temp_file)
+        # Executar ESBMC com unwindset de acordo com tamanhos reais
+        result = self.run_esbmc(temp_file, in_layer.layer_size, cur_layer.layer_size)
         
         # Limpar
         import os
@@ -1156,6 +1156,12 @@ class GPEncoding:
         preimage_low = getattr(cur_layer, "relaxed_lb", cur_layer.lb)
         preimage_high = getattr(cur_layer, "relaxed_ub", cur_layer.ub)
 
+        # Pré-processar conversões float->int com arredondamento consistente
+        pre_low_int  = self._to_scaled_int_floor(np.array(preimage_low), frac_bit)
+        pre_high_int = self._to_scaled_int_ceil (np.array(preimage_high), frac_bit)
+        in_low_int   = self._to_scaled_int_floor(np.array(self.x_low_real),  frac_bit)
+        in_high_int  = self._to_scaled_int_ceil (np.array(self.x_high_real), frac_bit)
+
         return f"""
     #include <stdint.h>
     #include <limits.h>
@@ -1170,12 +1176,12 @@ class GPEncoding:
     static const int32_t biases[LAYER_SIZE] = {self._array_to_c(qu_b * (2 ** frac_bit))};
 
     // Pré-imagem calculada (em mesma escala Q_SHIFT)
-    static const int32_t preimage_low[LAYER_SIZE]  = {self._array_to_c(np.array(preimage_low)  * (2 ** frac_bit))};
-    static const int32_t preimage_high[LAYER_SIZE] = {self._array_to_c(np.array(preimage_high) * (2 ** frac_bit))};
+    static const int32_t preimage_low[LAYER_SIZE]  = {self._array_to_c(pre_low_int)};
+    static const int32_t preimage_high[LAYER_SIZE] = {self._array_to_c(pre_high_int)};
 
     // Limites da entrada (em mesma escala Q_SHIFT)
-    static const int32_t input_low[INPUT_SIZE]  = {self._array_to_c(self.x_low_real  * (2 ** frac_bit))};
-    static const int32_t input_high[INPUT_SIZE] = {self._array_to_c(self.x_high_real * (2 ** frac_bit))};
+    static const int32_t input_low[INPUT_SIZE]  = {self._array_to_c(in_low_int)};
+    static const int32_t input_high[INPUT_SIZE] = {self._array_to_c(in_high_int)};
 
     static inline int32_t sat_int32(int64_t x) {{
     if (x > INT32_MAX) return INT32_MAX;
@@ -1226,6 +1232,10 @@ class GPEncoding:
     ):
         """Gera verificação ESBMC para propriedade de classificação (novo C format: prova por caixas)"""
 
+        # Pré-processar conversões float->int com arredondamento consistente
+        in_low_int   = self._to_scaled_int_floor(np.array(self.x_low_real),  frac_bit)
+        in_high_int  = self._to_scaled_int_ceil (np.array(self.x_high_real), frac_bit)
+
         return f"""
     #include <stdint.h>
     #include <limits.h>
@@ -1241,8 +1251,8 @@ class GPEncoding:
     static const int32_t biases[LAYER_SIZE] = {self._array_to_c(qu_b * (2 ** frac_bit))};
 
     // Limites da entrada (em mesma escala Q_SHIFT)
-    static const int32_t input_low[INPUT_SIZE]  = {self._array_to_c(self.x_low_real  * (2 ** frac_bit))};
-    static const int32_t input_high[INPUT_SIZE] = {self._array_to_c(self.x_high_real * (2 ** frac_bit))};
+    static const int32_t input_low[INPUT_SIZE]  = {self._array_to_c(in_low_int)};
+    static const int32_t input_high[INPUT_SIZE] = {self._array_to_c(in_high_int)};
 
     static inline int32_t sat_int32(int64_t x) {{
     if (x > INT32_MAX) return INT32_MAX;
@@ -1295,7 +1305,7 @@ class GPEncoding:
     return 0;
     }}
         """
-    def run_esbmc(self, c_file):
+    def run_esbmc(self, c_file, input_size, layer_size):
         """Executa ESBMC, imprime stdout/stderr e interpreta o resultado."""
         import subprocess, shutil, sys
 
@@ -1307,7 +1317,7 @@ class GPEncoding:
             "esbmc", c_file,
             "--function", "main",
             "--boolector",                     # inclui contraexemplo
-            "--unwindset", "'neuron_bounds_raw:784,main:100'",  
+            "--unwindset", f"neuron_bounds_raw:{input_size},main:{layer_size}",
             "--no-bounds-check",
             "--no-pointer-check",
             "--no-div-by-zero-check",
@@ -1369,5 +1379,14 @@ class GPEncoding:
             for row in np_array:
                 rows.append("{" + ", ".join(map(str, row.astype(int))) + "}")
             return "{" + ", ".join(rows) + "}"
-    
 
+    def _to_scaled_int_floor(self, arr, frac_bits):
+        """Converte floats para inteiros escalados com floor (expande limites inferiores)."""
+        scaled = np.floor(np.array(arr, dtype=float) * (2 ** frac_bits))
+        return scaled.astype(int)
+
+    def _to_scaled_int_ceil(self, arr, frac_bits):
+        """Converte floats para inteiros escalados com ceil (expande limites superiores)."""
+        scaled = np.ceil(np.array(arr, dtype=float) * (2 ** frac_bits))
+        return scaled.astype(int)
+    

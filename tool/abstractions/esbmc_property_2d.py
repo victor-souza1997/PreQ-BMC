@@ -3,7 +3,15 @@ import numpy as np
 from ceg4n.verifier.base import EquivalenceSpec
 
 
-def export_2d(spec: EquivalenceSpec, lb: str, ub: str):
+def export_2d(
+    spec: EquivalenceSpec,
+    lb: str,
+    ub: str,
+    pre_lb: str,
+    pre_ub: str,
+    check_preimage: str,
+    pre_layers: str,
+):
     width = str(spec.input_shape[-1])
     output_size = str(np.prod(np.array(spec.y).shape))
 
@@ -17,6 +25,10 @@ def export_2d(spec: EquivalenceSpec, lb: str, ub: str):
         .replace("@UPPER_BOUNDS", ub)
         .replace("@EPSILON", epsilon)
         .replace("@EQUIVALENCE", equivalence)
+        .replace("@CHECK_PREIMAGE", check_preimage)
+        .replace("@PREIMAGE_NUM", pre_layers)
+        .replace("@PREIMAGE_LB", pre_lb)
+        .replace("@PREIMAGE_UB", pre_ub)
     )
 
 
@@ -46,6 +58,14 @@ _TEMPLATE = """
 #define OUTPUT_SIZE @OUTPUT_SIZE
 #endif
 
+#ifndef CHECK_PREIMAGE
+#define CHECK_PREIMAGE @CHECK_PREIMAGE
+#endif
+
+#ifndef PREIMAGE_NUM
+#define PREIMAGE_NUM @PREIMAGE_NUM
+#endif
+
 float nondet_float();
 
 const float lower_bounds[BATCH][WIDTH] = 
@@ -53,6 +73,14 @@ const float lower_bounds[BATCH][WIDTH] =
 
 const float upper_bounds[BATCH][WIDTH] = 
 @UPPER_BOUNDS;
+
+#if PREIMAGE_NUM > 0
+const float preimage_lower_bounds[PREIMAGE_NUM][OUTPUT_SIZE] = 
+@PREIMAGE_LB;
+
+const float preimage_upper_bounds[PREIMAGE_NUM][OUTPUT_SIZE] = 
+@PREIMAGE_UB;
+#endif
 
 static inline void init_symbolic_input(float input[BATCH * WIDTH])
 {
@@ -168,6 +196,31 @@ int main()
         check_top(original_output, quantized_output);
     } else {
         check_epsilon(original_output, quantized_output);
+    }
+
+    if(CHECK_PREIMAGE == 1 && PREIMAGE_NUM > 0)
+    {
+        int property_holds = 1;
+        for(size_t l = 0; l < PREIMAGE_NUM; l++)
+        {
+            for(size_t o = 0; o < OUTPUT_SIZE; o++)
+            {
+                if(preimage_lower_bounds[l][o] <= quantized_output[0][o] && quantized_output[0][o] <= preimage_upper_bounds[l][o])
+                {
+                    continue;
+                }
+
+                property_holds = 0;
+                break;
+            }
+
+            if(property_holds == 0)
+            {
+                break;
+            }
+        }
+
+        __ESBMC_assert(property_holds, "Quantized network output violates preimage bounds.");
     }
 }
 

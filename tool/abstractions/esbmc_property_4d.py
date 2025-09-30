@@ -58,10 +58,10 @@ _TEMPLATE = """
 
 float nondet_float();
 
-const float lower_bounds[BATCH][HEIGHT][HEIGHT][WIDTH] = 
+const float lower_bounds[BATCH][CHANNELS][HEIGHT][WIDTH] = 
 @LOWER_BOUNDS;
 
-const float upper_bounds[BATCH][HEIGHT][HEIGHT][WIDTH] = 
+const float upper_bounds[BATCH][CHANNELS][HEIGHT][WIDTH] = 
 @UPPER_BOUNDS;
 
 static inline void init_symbolic_input(float input[BATCH * CHANNELS * HEIGHT * WIDTH])

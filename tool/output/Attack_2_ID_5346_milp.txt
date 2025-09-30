@@ -1,0 +1,9 @@
+Solving Result: False
+Currently, we cannot find a quantization strategy to make the property hold.
+Encoding Time: 0
+Solving Time: 0
+Total Time: 567.8371374607086
+The num of vars: 4049
+The num of numIntVars: 48
+The num of numBinVars: 48
+The num of Constraints: 0
