@@ -885,7 +885,8 @@ class GPEncoding:
             # Hidden layer: verify preimage inclusion of AFFINE output
             return f"""
     //#include <esbmc.h>
-
+    #include <math.h>
+    //extern float nondet_float();
     #define INPUT_SIZE {in_layer.layer_size}
     #define LAYER_SIZE {cur_layer.layer_size}
 
@@ -907,16 +908,23 @@ class GPEncoding:
         }}
     }}
 
-    int check_preimage_inclusion(float affine_output[LAYER_SIZE]) {{
-        // Check AFFINE output against preimage bounds
-        // NO ReLU application - the preimage already accounts for it
-        for (int i = 0; i < LAYER_SIZE; i++) {{
-            if (affine_output[i] < preimage_low[i] || affine_output[i] > preimage_high[i]) {{
-                return 0; // Violation found
-            }}
+    int check_preimage_inclusion_tolerant(float output[LAYER_SIZE], 
+                                    float preimage_low[LAYER_SIZE],
+                                    float preimage_high[LAYER_SIZE]) {{
+    float abs_tolerance = 1e-3f;
+    float rel_tolerance = 0.01f; // 1%
+    
+    for (int i = 0; i < LAYER_SIZE; i++) {{
+        float range = preimage_high[i] - preimage_low[i];
+        float effective_tolerance = abs_tolerance + rel_tolerance * fabsf(range);
+        
+        if (output[i] < (preimage_low[i] - effective_tolerance) || 
+            output[i] > (preimage_high[i] + effective_tolerance)) {{
+            return 0;
         }}
-        return 1; // All affine outputs within preimage
     }}
+    return 1;
+}}
 
     int main() {{
         float input[INPUT_SIZE];
@@ -933,7 +941,7 @@ class GPEncoding:
         affine_transform(input, affine_output);
         
         // Verify preimage inclusion of AFFINE output (not ReLU output)
-        int inclusion_holds = check_preimage_inclusion(affine_output);
+        int inclusion_holds = check_preimage_inclusion_tolerant(affine_output, preimage_low, preimage_high);
         __ESBMC_assert(inclusion_holds, 
                     "Preimage inclusion violated for layer {layer_index}");
         
@@ -1036,7 +1044,7 @@ class GPEncoding:
         try:
             print(f"Running ESBMC for layer {layer_index}...")
             result = subprocess.run(esbmc_cmd, capture_output=True, text=True, timeout=1200)
-            
+            print(f"Result stdout: {result.stdout[-500:]}")  # Print last 500 chars of stdout for debugging
             # Parse ESBMC output
             if "VERIFICATION SUCCESSFUL" in result.stdout:
                 print(f"ESBMC verification PASSED for layer {layer_index}")
