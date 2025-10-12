@@ -1,7 +1,9 @@
 import argparse
+import os
 from utils.deep_models import *
 from utils.quadapter_encoding_robustness import *
 from utils.quadapter_utils import *
+from abstractions.onnx_export import save_keras_to_onnx
 
 from gurobipy import GRB
 
@@ -15,6 +17,8 @@ parser.add_argument("--bit_lb", type=int, default=1)
 parser.add_argument("--bit_ub", type=int, default=16)
 parser.add_argument("--eps", type=int, default=2)
 parser.add_argument("--outputPath", default="")
+parser.add_argument("--save_onnx", type=int, default=1)
+parser.add_argument("--onnx_dir", default="")
 parser.add_argument("--ifRelax", type=int, default=0)
 
 # Preimage Computing Mode: MILP-based ('milp'), Abstr-based ('abstr'), Composed ('comp')
@@ -123,6 +127,20 @@ if ifSucc:
     fo = open(fileName, "a")
     fo.write(outputMessage_DNN)
     fo.write(outputMessage_QNN)
+    # Export quantized model to ONNX if requested
+    try:
+        if args.save_onnx:
+            # Determine output directory for ONNX exports
+            onnx_dir = args.onnx_dir.strip() if args.onnx_dir else os.path.join(args.outputPath or "output", "onnx")
+            os.makedirs(onnx_dir, exist_ok=True)
+            onnx_filename = f"quantized_{args.dataset}_{args.arch}_id{args.sample_id}_eps{args.eps}.onnx"
+            onnx_path = os.path.join(onnx_dir, onnx_filename)
+            save_keras_to_onnx(model, onnx_path)
+            print(f"Saved quantized ONNX model to: {onnx_path}")
+            fo.write(f"\nSaved quantized ONNX model to: {onnx_path}")
+    except Exception as _export_err:
+        print(f"Failed to export quantized model to ONNX: {_export_err}")
+        fo.write(f"\nFailed to export quantized model to ONNX: {_export_err}")
     fo.close()
 else:
     print("Currently, we cannot find a quantization strategy to make the property hold.")

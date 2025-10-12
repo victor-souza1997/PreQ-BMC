@@ -1,7 +1,9 @@
 import argparse
+import os
 from utils.deep_models import *
 from utils.quadapter_encoding_backdoor import *
 from utils.quadapter_utils import *
+from abstractions.onnx_export import save_keras_to_onnx
 from gurobipy import GRB
 import gurobipy as gp
 import random
@@ -28,6 +30,9 @@ parser.add_argument("--scaleFactor_threshold", type=float, default=0.01)
 
 # Preimage Computing Mode: MILP-based ('milp'), Abstr-based ('abstr')
 parser.add_argument("--preimg_mode", default="milp")
+
+parser.add_argument("--save_onnx", type=int, default=1)
+parser.add_argument("--onnx_dir", default="")
 
 args = parser.parse_args()
 
@@ -205,6 +210,23 @@ while True:
             outputMessage_DNN = "\nThe accuracy of DNN is: {}".format(accu_DNN)
             fo.write(outputMessage_DNN)
             fo.write(outputMessage_QNN)
+
+            # Export quantized model to ONNX if requested
+            try:
+                if args.save_onnx:
+                    onnx_dir = args.onnx_dir.strip() if args.onnx_dir else os.path.join(args.outputPath or "output", "onnx")
+                    os.makedirs(onnx_dir, exist_ok=True)
+                    onnx_filename = (
+                        f"quantized_backdoor_{args.dataset}_{args.arch}_r{args.loc_row}_c{args.loc_col}_"
+                        f"s{args.stamp_size}_t{args.targetCls}_o{args.originalCls}.onnx"
+                    )
+                    onnx_path = os.path.join(onnx_dir, onnx_filename)
+                    save_keras_to_onnx(model, onnx_path)
+                    print(f"Saved quantized ONNX model to: {onnx_path}")
+                    fo.write(f"\nSaved quantized ONNX model to: {onnx_path}")
+            except Exception as _export_err:
+                print(f"Failed to export quantized model to ONNX: {_export_err}")
+                fo.write(f"\nFailed to export quantized model to ONNX: {_export_err}")
 
             fo.close()
             break
