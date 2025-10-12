@@ -42,3 +42,12 @@ python Quadapter_robustness_main.py --dataset mnist --arch 1blk_100 --sample_id 
 
 python Quadapter_backdoor_main.py --dataset mnist --arch 1blk_100 --bit_lb 2 --loc_row 1  --loc_col 1  --stamp_size 3 --targetCls 8 --originalCls 10 --K 5 --delta 0.05 --preimg_mode milp --ifRelax 1  --outputPath ./output/
 ```
+
+# Create a conda environment
+```shell script
+conda create -n quadapter python=3.8
+conda activate quadapter
+pip install -r requirements.txt
+```
+
+

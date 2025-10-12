@@ -1,0 +1,17 @@
+output/
+__python_version__/
+__pycache__/
+.ipynb_checkpoints/
+*.pyc
+*.pkl
+*.pth
+*.pt
+*.h5
+*.ckpt
+*.log
+*.out
+*.csv
+*.tsv
+*.npy
+*.npz
+venv/
