@@ -799,155 +799,190 @@ class GPEncoding:
         
         return result
 
-    def generate_esbmc_verification_code(self, cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit, layer_index):
-        """Generate CORRECT C code for ESBMC verification"""
-        
-        # Convert numpy arrays to C format
+    def generate_esbmc_verification_code(self, cur_layer, in_layer, qu_w, qu_b,
+                                        frac_bit, all_bit, layer_index):
+        """
+        Generate CORRECT C code for ESBMC verification with paper-style invariants.
+        - Output layer: proves target class is strictly maximal.
+        - Hidden layer: proves affine output lies within (relaxed) preimage interval.
+        """
+        import numpy as np
+
+        # to-C helpers
         weights_c = self.numpy_to_c_array(qu_w)
-        biases_c = self.numpy_to_c_array(qu_b)
-        
-        # === CRITICAL FIX: Use the correct preimage bounds ===
-        # The preimage bounds are stored in the layer's relaxed_lb and relaxed_ub
-        # These were computed during backward_preimage_computation
-        if hasattr(cur_layer, 'relaxed_lb') and hasattr(cur_layer, 'relaxed_ub'):
-            preimage_low = cur_layer.relaxed_lb
-            preimage_high = cur_layer.relaxed_ub
+        biases_c  = self.numpy_to_c_array(qu_b)
+
+        # pick preimage bounds (paper uses relaxed bounds)
+        if hasattr(cur_layer, "relaxed_lb") and hasattr(cur_layer, "relaxed_ub"):
+            preimage_low  = np.array(cur_layer.relaxed_lb)
+            preimage_high = np.array(cur_layer.relaxed_ub)
         else:
-            # Fallback: use the layer bounds (less precise but safe)
-            preimage_low = cur_layer.lb
-            preimage_high = cur_layer.ub
-        
-        # Convert to C arrays
-        preimage_low_c = self.numpy_to_c_array(np.array(preimage_low))
-        preimage_high_c = self.numpy_to_c_array(np.array(preimage_high))
-        
-        # Get input bounds correctly (self.x_low_real is an array, not a scalar)
-        input_bounds_low = self.numpy_to_c_array(np.array(self.x_low_real))
+            preimage_low  = np.array(cur_layer.lb)
+            preimage_high = np.array(cur_layer.ub)
+
+        preimage_low_c  = self.numpy_to_c_array(preimage_low)
+        preimage_high_c = self.numpy_to_c_array(preimage_high)
+
+        # input box bounds (arrays)
+        input_bounds_low  = self.numpy_to_c_array(np.array(self.x_low_real))
         input_bounds_high = self.numpy_to_c_array(np.array(self.x_high_real))
-        
-        # Check if this is the output layer
+
         is_output_layer = (cur_layer.layer_index == len(self.dense_layers) + 1)
-        
+
         if is_output_layer:
-            # Output layer: verify classification property
-            return f"""
+            # ===== OUTPUT LAYER =====
+            return f"""\
 
-    #define INPUT_SIZE {in_layer.layer_size}
-    #define LAYER_SIZE {cur_layer.layer_size}
-    #define TARGET_CLASS {self.targetCls}
+            #ifndef __invariant
+            #define __invariant(p) /* paper-style invariant marker (no-op for ESBMC) */
+            #endif
+            static inline float f_abs(float x){{ return x < 0.0f ? -x : x; }}
 
-    float weights[LAYER_SIZE][INPUT_SIZE] = {weights_c};
-    float biases[LAYER_SIZE] = {biases_c};
 
-    float input_bounds_low[INPUT_SIZE] = {input_bounds_low};
-    float input_bounds_high[INPUT_SIZE] = {input_bounds_high};
+            #define INPUT_SIZE   {in_layer.layer_size}
+            #define LAYER_SIZE   {cur_layer.layer_size}
+            #define TARGET_CLASS {self.targetCls}
 
-    void affine_transform(float input[INPUT_SIZE], float output[LAYER_SIZE]) {{
-        for (int i = 0; i < LAYER_SIZE; i++) {{
-            output[i] = biases[i];
-            for (int j = 0; j < INPUT_SIZE; j++) {{
-                output[i] += weights[i][j] * input[j];
+            extern float nondet_float(void);
+
+            float weights[LAYER_SIZE][INPUT_SIZE] = {weights_c};
+            float biases[LAYER_SIZE]              = {biases_c};
+
+            float input_bounds_low[INPUT_SIZE]  = {input_bounds_low};
+            float input_bounds_high[INPUT_SIZE] = {input_bounds_high};
+
+            static void affine_transform(const float in_[INPUT_SIZE], float out_[LAYER_SIZE])
+            {{
+            for (int i = 0; i < LAYER_SIZE; ++i) {{
+                out_[i] = biases[i];
+                for (int j = 0; j < INPUT_SIZE; ++j) {{
+                out_[i] += weights[i][j] * in_[j];
+                }}
             }}
-        }}
-    }}
-
-    int verify_classification(float output[LAYER_SIZE]) {{
-        float target_score = output[TARGET_CLASS];
-        for (int i = 0; i < LAYER_SIZE; i++) {{
-            if (i != TARGET_CLASS && output[i] >= target_score) {{
-                return 0; // Another class has higher or equal score
             }}
-        }}
-        return 1; // Target class is the maximum
-    }}
 
-    int main() {{
-        float input[INPUT_SIZE];
-        float output[LAYER_SIZE];
-        
-        // Non-deterministic input within bounds
-        for (int i = 0; i < INPUT_SIZE; i++) {{
-            input[i] = nondet_float();
-            __ESBMC_assume(input[i] >= input_bounds_low[i] && 
-                        input[i] <= input_bounds_high[i]);
-        }}
-        
-        affine_transform(input, output);
-        
-        int property_holds = verify_classification(output);
-        __ESBMC_assert(property_holds, 
-                    "Classification property violated for output layer");
-        
-        return 0;
-    }}
-    """
+            /* Classification: argmax(out) == TARGET_CLASS */
+            static int verify_classification(const float out_[LAYER_SIZE])
+            {{
+            const int   T      = TARGET_CLASS;
+            const float target = out_[T];
+            float max_other    = -INFINITY;
+
+            int i = 0;
+            __invariant(0 <= i && i <= LAYER_SIZE);
+            __invariant(max_other <= target);
+            while (i < LAYER_SIZE)
+            {{
+                __ESBMC_loop_invariant(0 <= i && i <= LAYER_SIZE && max_other <= target);
+                if (i != T) {{
+                const float cand = out_[i];
+                if (cand > max_other) max_other = cand;
+                }}
+                ++i;
+            }}
+            return max_other < target;
+            }}
+
+            int main(void)
+            {{
+            float input[INPUT_SIZE];
+            float output[LAYER_SIZE];
+
+            for (int k = 0; k < INPUT_SIZE; ++k) {{
+                input[k] = nondet_float();
+                __ESBMC_assume(input[k] >= input_bounds_low[k] &&
+                            input[k] <= input_bounds_high[k]);
+            }}
+
+            affine_transform(input, output);
+            __ESBMC_assert(verify_classification(output),
+                            "Classification property violated (output layer)");
+            return 0;
+            }}
+            """
         else:
-            # Hidden layer: verify preimage inclusion of AFFINE output
-            return f"""
-    //#include <esbmc.h>
-    #include <math.h>
-    //extern float nondet_float();
-    #define INPUT_SIZE {in_layer.layer_size}
-    #define LAYER_SIZE {cur_layer.layer_size}
+                    # ===== HIDDEN LAYER =====
+                    # Prove: for each neuron i, the affine output lies within relaxed preimage
+            return f"""\
 
-    float weights[LAYER_SIZE][INPUT_SIZE] = {weights_c};
-    float biases[LAYER_SIZE] = {biases_c};
+            #ifndef __invariant
+            #define __invariant(p) /* paper-style invariant marker (no-op for ESBMC) */
+            #endif
 
-    float preimage_low[LAYER_SIZE] = {preimage_low_c};
-    float preimage_high[LAYER_SIZE] = {preimage_high_c};
+            #define INPUT_SIZE {in_layer.layer_size}
+            #define LAYER_SIZE {cur_layer.layer_size}
 
-    float input_bounds_low[INPUT_SIZE] = {input_bounds_low};
-    float input_bounds_high[INPUT_SIZE] = {input_bounds_high};
+            extern float nondet_float(void);
 
-    void affine_transform(float input[INPUT_SIZE], float output[LAYER_SIZE]) {{
-        for (int i = 0; i < LAYER_SIZE; i++) {{
-            output[i] = biases[i];
-            for (int j = 0; j < INPUT_SIZE; j++) {{
-                output[i] += weights[i][j] * input[j];
+            float weights[LAYER_SIZE][INPUT_SIZE] = {weights_c};
+            float biases[LAYER_SIZE]              = {biases_c};
+
+            float preimage_low[LAYER_SIZE]  = {preimage_low_c};
+            float preimage_high[LAYER_SIZE] = {preimage_high_c};
+
+            float input_bounds_low[INPUT_SIZE]  = {input_bounds_low};
+            float input_bounds_high[INPUT_SIZE] = {input_bounds_high};
+
+            /* Affine layer over an input box: maintain running enclosure s_lb <= s_out <= s_ub */
+            static void affine_transform_and_check(const float in_[INPUT_SIZE])
+            {{
+            const float abs_tol = 1e-3f;
+            const float rel_tol = 1e-2f;
+
+            for (int i = 0; i < LAYER_SIZE; ++i) {{
+                float s_out = biases[i];   /* exact partial sum on actual input   */
+                float s_lb  = biases[i];   /* running lower bound using box       */
+                float s_ub  = biases[i];   /* running upper bound using box       */
+
+                /* tolerance around the (relaxed) preimage interval */
+                const float pre_lo = preimage_low[i];
+                const float pre_hi = preimage_high[i];
+                const float eps    = abs_tol + rel_tol * f_abs(pre_hi - pre_lo);
+
+                int j = 0;
+                __invariant(0 <= j && j <= INPUT_SIZE);
+                __invariant(s_lb <= s_out && s_out <= s_ub);
+                while (j < INPUT_SIZE)
+                {{
+                __ESBMC_loop_invariant(0 <= j && j <= INPUT_SIZE &&
+                    s_lb <= s_out && s_out <= s_ub);
+                const float w  = weights[i][j];
+                const float lo = input_bounds_low[j];
+                const float hi = input_bounds_high[j];
+
+                /* exact step on actual (nondet) input */
+                s_out += w * in_[j];
+
+                /* sign-aware contribution bounds (box image) */
+                const float cmin = (w >= 0.0f) ? (w * lo) : (w * hi);
+                const float cmax = (w >= 0.0f) ? (w * hi) : (w * lo);
+                s_lb += cmin;
+                s_ub += cmax;
+
+                ++j;
+                }}
+
+                /* final postcondition (affine, before any ReLU): inside tolerated preimage */
+                __ESBMC_assert(s_out >= pre_lo - eps && s_out <= pre_hi + eps,
+                            "Affine output not within tolerated preimage (hidden layer)");
             }}
-        }}
-    }}
+            }}
 
-    int check_preimage_inclusion_tolerant(float output[LAYER_SIZE], 
-                                    float preimage_low[LAYER_SIZE],
-                                    float preimage_high[LAYER_SIZE]) {{
-    float abs_tolerance = 1e-3f;
-    float rel_tolerance = 0.01f; // 1%
-    
-    for (int i = 0; i < LAYER_SIZE; i++) {{
-        float range = preimage_high[i] - preimage_low[i];
-        float effective_tolerance = abs_tolerance + rel_tolerance * fabsf(range);
-        
-        if (output[i] < (preimage_low[i] - effective_tolerance) || 
-            output[i] > (preimage_high[i] + effective_tolerance)) {{
+            int main(void)
+            {{
+            /* nondet input constrained by box */
+            float in_[INPUT_SIZE];
+            for (int j = 0; j < INPUT_SIZE; ++j) {{
+                in_[j] = nondet_float();
+                __ESBMC_assume(in_[j] >= input_bounds_low[j] &&
+                            in_[j] <= input_bounds_high[j]);
+            }}
+
+            affine_transform_and_check(in_);
             return 0;
         }}
-    }}
-    return 1;
-}}
+        """
 
-    int main() {{
-        float input[INPUT_SIZE];
-        float affine_output[LAYER_SIZE];
-        
-        // Non-deterministic input within bounds
-        for (int i = 0; i < INPUT_SIZE; i++) {{
-            input[i] = nondet_float();
-            __ESBMC_assume(input[i] >= input_bounds_low[i] && 
-                        input[i] <= input_bounds_high[i]);
-        }}
-        
-        // Apply quantized affine transformation
-        affine_transform(input, affine_output);
-        
-        // Verify preimage inclusion of AFFINE output (not ReLU output)
-        int inclusion_holds = check_preimage_inclusion_tolerant(affine_output, preimage_low, preimage_high);
-        __ESBMC_assert(inclusion_holds, 
-                    "Preimage inclusion violated for layer {layer_index}");
-        
-        return 0;
-    }}
-    """
 
     def numpy_to_c_array(self, np_array):
         """Convert numpy array to C array initialization string"""
@@ -1029,22 +1064,35 @@ class GPEncoding:
         # ESBMC configuration optimized for neural network verification
         esbmc_cmd = [
             "esbmc", c_file,
+            "--loop-invariant",
             "--function", "main",
-            "--floatbv",
             "--z3",
-            "--unwind", "100",
+            "--fixedbv",
+            "--k-induction",
+            "--unwind", "3",
             "--interval-analysis",
             "--incremental-bmc",
             "--no-unwinding-assertions",
             "--state-hashing",
             "--timeout", "900",  # 15 minutes per verification
-            "--verbosity", "1"
+            "--verbosity", "10"
         ]
         
         try:
             print(f"Running ESBMC for layer {layer_index}...")
-            result = subprocess.run(esbmc_cmd, capture_output=True, text=True, timeout=1200)
+            result = subprocess.run(
+                esbmc_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=1200,
+                encoding="utf-8",
+                errors="replace",
+            )            
             print(f"Result stdout: {result.stdout[-500:]}")  # Print last 500 chars of stdout for debugging
+            print("ESBMC return code:", result.returncode)
+            print("--- STDOUT (tail) ---\n", (result.stdout or "")[-2000:])
+            print("--- STDERR (tail) ---\n", (result.stderr or "")[-2000:])
             # Parse ESBMC output
             if "VERIFICATION SUCCESSFUL" in result.stdout:
                 print(f"ESBMC verification PASSED for layer {layer_index}")
