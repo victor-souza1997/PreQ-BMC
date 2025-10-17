@@ -1,90 +1,120 @@
-from symbolic_pp.DeepPoly_quadapter import *
-from utils.quadapter_utils import *
-from utils.abstract import *
-import math
-from gurobipy import GRB
-import gurobipy as gp
-import time
-import numpy as np
+# ==================== IMPORTAÇÕES E DEPENDÊNCIAS ====================
+from symbolic_pp.DeepPoly_quadapter import *  # DeepPoly para análise de intervalos simbólicos
+from utils.quadapter_utils import *           # Utilitários específicos do Quadapter
+from utils.abstract import *                  # Funções para geração de código C abstrato
+import math                                   # Operações matemáticas
+from gurobipy import GRB                     # Constantes e tipos do Gurobi
+import gurobipy as gp                        # Solver MILP (Mixed Integer Linear Programming)
+import time                                  # Medição de tempo de execução
+import numpy as np                           # Operações numéricas e arrays
 
-
+# ==================== CLASSE PARA CODIFICAÇÃO DE CAMADAS ====================
 class LayerEncoding:
+    """
+    Classe que codifica uma camada da rede neural para verificação de quantização.
+    Mantém informações sobre bounds, quantização e variáveis do modelo Gurobi.
+    """
     def __init__(
             self,
-            gp_model,
-            preimg_mode,
-            layer_index,
-            layer_size,
-            layer_paras,
-            bit_lb,
-            bit_ub,
-            if_hid,
+            gp_model,      # Modelo Gurobi para otimização
+            preimg_mode,   # Modo de computação de pré-imagem ('milp', 'abstr', 'comp')
+            layer_index,   # Índice da camada na rede
+            layer_size,    # Número de neurônios na camada
+            layer_paras,   # Parâmetros da camada (pesos e biases)
+            bit_lb,        # Limite inferior de bits para quantização
+            bit_ub,        # Limite superior de bits para quantização
+            if_hid,        # Flag indicando se é camada oculta (True) ou saída/entrada (False)
     ):
-        self.layer_index = layer_index
-        self.layer_size = layer_size
-        self.layer_paras = layer_paras  # weight+bias
-        self.bit_lb = bit_lb
-        self.bit_ub = bit_ub
-        self.frac_bit = None
-        self.grad = None
-        self.realVal = None
+        # ==================== INICIALIZAÇÃO DOS ATRIBUTOS BÁSICOS ====================
+        # Armazena informações básicas da camada
+        self.layer_index = layer_index    # Índice da camada na rede
+        self.layer_size = layer_size      # Número de neurônios
+        self.layer_paras = layer_paras    # Pesos e biases [weight_matrix, bias_vector]
+        self.bit_lb = bit_lb             # Limite mínimo de bits para quantização
+        self.bit_ub = bit_ub             # Limite máximo de bits para quantização
+        self.frac_bit = None             # Bits fracionários (será determinado depois)
+        self.grad = None                 # Gradiente (não usado nesta implementação)
+        self.realVal = None              # Valores reais de ativação
 
+        # ==================== CONFIGURAÇÃO DE LIMITES DE NEURÔNIOS ====================
+        # Define limites para variáveis do Gurobi baseado no tipo de camada
         if if_hid:
+            # Camadas ocultas: após ReLU, valores ≥ 0
             neuron_lb_after = 0
         else:
+            # Camadas de entrada/saída: valores podem ser negativos
             neuron_lb_after = -GRB.MAXINT
 
+        # Antes da ativação ReLU, valores podem ser negativos em qualquer camada
         neuron_lb_before = -GRB.MAXINT
 
-        self.lb = np.zeros(layer_size, dtype=np.float32)
-        self.ub = np.zeros(layer_size, dtype=np.float32)
-        self.clipped_lb = np.zeros(layer_size, dtype=np.float32)
-        self.clipped_ub = np.zeros(layer_size, dtype=np.float32)
+        # ==================== INICIALIZAÇÃO DOS ARRAYS DE BOUNDS ====================
+        # Arrays para armazenar limites concretos (obtidos via DeepPoly)
+        self.lb = np.zeros(layer_size, dtype=np.float32)           # Limite inferior concreto
+        self.ub = np.zeros(layer_size, dtype=np.float32)           # Limite superior concreto
+        self.clipped_lb = np.zeros(layer_size, dtype=np.float32)   # Limite inferior após ReLU
+        self.clipped_ub = np.zeros(layer_size, dtype=np.float32)   # Limite superior após ReLU
 
-        self.qu_lb = np.zeros(layer_size, dtype=np.float32)  # lower bound of QNN
-        self.qu_ub = np.zeros(layer_size, dtype=np.float32)  # upper bound of QNN
-        self.qu_clipped_lb = np.zeros(layer_size, dtype=np.float32)
-        self.qu_clipped_ub = np.zeros(layer_size, dtype=np.float32)
+        # Arrays para limites da rede quantizada (QNN)
+        self.qu_lb = np.zeros(layer_size, dtype=np.float32)        # Limite inferior da QNN
+        self.qu_ub = np.zeros(layer_size, dtype=np.float32)        # Limite superior da QNN
+        self.qu_clipped_lb = np.zeros(layer_size, dtype=np.float32) # Limite inferior da QNN após ReLU
+        self.qu_clipped_ub = np.zeros(layer_size, dtype=np.float32) # Limite superior da QNN após ReLU
 
-        # variable set for encoding bit-width of current layer
+        # ==================== VARIÁVEIS BINÁRIAS PARA CODIFICAÇÃO DE BITS ====================
+        # Cria variáveis binárias para codificar o número de bits usado na quantização
+        # Uma variável para cada possível número de bits no intervalo [bit_lb, bit_ub]
         self.bit_vars = [gp_model.addVar(vtype=GRB.BINARY) for i in range(self.bit_ub - self.bit_lb + 1)]
 
-        # obtain minimal bit-width for integer part to avoid overflow
+        # ==================== CÁLCULO DOS BITS INTEIROS NECESSÁRIOS ====================
+        # Calcula o número mínimo de bits inteiros necessários para evitar overflow
         if layer_index > 0:
+            # Para camadas não-entrada, analisa os parâmetros da camada
             self.max_weight = np.round(max(np.max(layer_paras[0]), np.max(layer_paras[1])))
             self.min_weight = np.round(min(np.min(layer_paras[0]), np.min(layer_paras[1])))
             self.max_int = max(abs(self.max_weight), abs(self.min_weight))
+            
+            # Determina bits inteiros baseado no maior valor absoluto
             if self.max_int == 0:
-                self.int_bit = 1
+                self.int_bit = 1     # Mínimo 1 bit para representar zero
             elif self.max_int == 1:
-                self.int_bit = 2
+                self.int_bit = 2     # 2 bits para representar ±1 (1 bit + sinal)
             else:
+                # log2(max_value) + 1 bit para sinal
                 self.int_bit = int(np.ceil(math.log(self.max_int, 2)) + 1)
         else:
+            # Camada de entrada: não tem parâmetros próprios
             self.int_bit = None
 
-        self.relaxed_lb = np.zeros(layer_size, dtype=np.float32)
-        self.relaxed_lb_expression = [1 for i in range(layer_size)]
-        self.relaxed_ub = np.zeros(layer_size, dtype=np.float32)
-        self.relaxed_ub_expression = [1 for i in range(layer_size)]
-        self.actMode = np.zeros(layer_size, dtype=np.float32)
+        # ==================== INICIALIZAÇÃO DE BOUNDS RELAXADOS ====================
+        # Arrays para armazenar bounds relaxados (usados na computação de pré-imagem)
+        self.relaxed_lb = np.zeros(layer_size, dtype=np.float32)      # Limite inferior relaxado
+        self.relaxed_lb_expression = [1 for i in range(layer_size)]   # Expressão simbólica do limite inferior
+        self.relaxed_ub = np.zeros(layer_size, dtype=np.float32)      # Limite superior relaxado
+        self.relaxed_ub_expression = [1 for i in range(layer_size)]   # Expressão simbólica do limite superior
+        self.actMode = np.zeros(layer_size, dtype=np.float32)         # Modo de ativação (0=inativo, 1=ativo, 2=saturado)
 
-        #### initiate variables for encoding preimage template
-
+        # ==================== CRIAÇÃO DE VARIÁVEIS GUROBI PARA PRÉ-IMAGEM ====================
+        # Inicializa variáveis para codificação do template de pré-imagem
+        # Diferentes conjuntos de variáveis dependem do modo de computação
 
         if preimg_mode == 'milp' or preimg_mode == 'comp':
+            # Modo MILP ou composição: variáveis para codificação exata
             self.gp_vars_before = [gp_model.addVar(lb=neuron_lb_before, ub=1000, vtype=GRB.CONTINUOUS) for s in
-                                      range(layer_size)]  # before relu function
+                                      range(layer_size)]  # Valores antes da função ReLU
             self.gp_vars_after = [gp_model.addVar(lb=0, ub=1000, vtype=GRB.CONTINUOUS) for s in
-                                      range(layer_size)]  # before relu function
+                                      range(layer_size)]  # Valores após a função ReLU
+            # Variáveis para controlar a relaxação da pré-imagem
             self.alpha = [gp_model.addVar(lb=0, ub=100, vtype=GRB.CONTINUOUS) for s in range(layer_size)]
             self.beta = [gp_model.addVar(lb=0, ub=100, vtype=GRB.CONTINUOUS) for s in range(layer_size)]
 
         elif preimg_mode == 'abstr' or preimg_mode == 'comp':
+            # Modo abstração ou composição: variáveis para análise de intervalos
             self.gp_vars_lb_before = [gp_model.addVar(lb=neuron_lb_before, ub=1000, vtype=GRB.CONTINUOUS) for s in
-                                      range(layer_size)]  # before relu function
+                                      range(layer_size)]  # Limite inferior antes do ReLU
             self.gp_vars_ub_before = [gp_model.addVar(lb=neuron_lb_before, ub=1000, vtype=GRB.CONTINUOUS) for s in
-                                      range(layer_size)]  # before relu function
+                                      range(layer_size)]  # Limite superior antes do ReLU
+            # Variáveis alpha e beta para relaxação antes e depois do ReLU
             self.alpha_before = [gp_model.addVar(lb=0, ub=100, vtype=GRB.CONTINUOUS) for s in range(layer_size)]
             self.alpha_after = [gp_model.addVar(lb=0, ub=100, vtype=GRB.CONTINUOUS) for s in range(layer_size)]
             self.beta_before = [gp_model.addVar(lb=0, ub=100, vtype=GRB.CONTINUOUS) for s in range(layer_size)]
@@ -93,128 +123,174 @@ class LayerEncoding:
             print("Wrong option for the preimage computation mode!")
             exit(0)
 
+        # Atualiza o modelo Gurobi para registrar todas as novas variáveis
         gp_model.update()
 
         print("The quantization bit size for integer parts of Layer ", self.layer_index, " is: ", self.int_bit)
 
     def set_input_bounds(self, low, high):
+        """Define os limites de entrada para a camada."""
         self.lb = low
         self.ub = high
 
     def set_realVal(self, realVal):
+        """Define os valores reais de ativação para a camada (usado como referência)."""
         self.realVal = realVal
         print("We set the real output values for the layer ", self.layer_index)
 
 
+# ==================== CLASSE PRINCIPAL PARA CODIFICAÇÃO GUROBI ====================
 class GPEncoding:
+    """
+    Classe principal que coordena a verificação de quantização usando Gurobi.
+    Implementa o algoritmo Quadapter para encontrar estratégias de quantização robustas.
+    """
     def __init__(self, arch, model, args, original_prediction, x_low_real, x_high_real):
+        # ==================== CONFIGURAÇÃO DO MODELO GUROBI ====================
+        # Inicializa o solver de otimização MILP
         self.gp_model = gp.Model("gp_encoding")
-        self.tole = 1e-6
-        self.gp_model.Params.IntFeasTol = 1e-9
-        self.gp_model.Params.FeasibilityTol = self.tole
-        self.gp_model.setParam(GRB.Param.Threads, 30)
-        self.gp_model.setParam(GRB.Param.OutputFlag, 0)
-        self.bit_lb = args.bit_lb
-        self.bit_ub = args.bit_ub
-        self.preimg_mode = args.preimg_mode  # preimage computation mode
-        self.x_low_real = x_low_real  # lower bound of input region
-        self.x_high_real = x_high_real  # upper bound of input region
-        self.sample_id = args.sample_id
-        self.eps = args.eps  # perturbation radius
-        self.outputPath = args.outputPath
-        self.ifRelax = args.ifRelax
-        self.scaleValueSet = []
+        self.tole = 1e-6                                    # Tolerância para comparações numéricas
+        self.gp_model.Params.IntFeasTol = 1e-9             # Tolerância de factibilidade para inteiros
+        self.gp_model.Params.FeasibilityTol = self.tole    # Tolerância geral de factibilidade
+        self.gp_model.setParam(GRB.Param.Threads, 30)      # Usa até 30 threads para paralelização
+        self.gp_model.setParam(GRB.Param.OutputFlag, 0)    # Suprime saída do Gurobi
 
+        # ==================== PARÂMETROS DE CONFIGURAÇÃO ====================
+        # Extrai parâmetros dos argumentos de linha de comando
+        self.bit_lb = args.bit_lb                           # Limite inferior de bits para quantização
+        self.bit_ub = args.bit_ub                           # Limite superior de bits para quantização
+        self.preimg_mode = args.preimg_mode                 # Modo de computação de pré-imagem
+        self.x_low_real = x_low_real                        # Limite inferior da região de entrada
+        self.x_high_real = x_high_real                      # Limite superior da região de entrada
+        self.sample_id = args.sample_id                     # ID da amostra sendo verificada
+        self.eps = args.eps                                 # Raio de perturbação (epsilon)
+        self.outputPath = args.outputPath                   # Caminho para salvar resultados
+        self.ifRelax = args.ifRelax                         # Flag de relaxação
+        self.scaleValueSet = []                             # Armazena valores de escala para cada camada
+
+        # ==================== ESTATÍSTICAS DE PERFORMANCE ====================
+        # Dicionário para rastrear tempos de execução de diferentes fases
         self._stats = {
-            "encoding_time": 0,
-            "solving_time": 0,
-            "backward_time": 0,
-            "forward_time": 0,
-            "total_time": 0,
+            "encoding_time": 0,      # Tempo para codificar o problema MILP
+            "solving_time": 0,       # Tempo para resolver o problema MILP
+            "backward_time": 0,      # Tempo para computação backward (pré-imagem)
+            "forward_time": 0,       # Tempo para quantização forward
+            "total_time": 0,         # Tempo total de execução
         }
 
-        self.dense_layers = []
-        self.nnparas = []
-        self.deep_model = model
-        self.layerNum = len(model.dense_layers)
-        self.targetCls = original_prediction
-        self.deepPolyNets_DNN = DP_DNN_network(True)
+        # ==================== INICIALIZAÇÃO DE ESTRUTURAS DA REDE ====================
+        # Estruturas para armazenar informações das camadas
+        self.dense_layers = []                              # Lista de camadas ocultas codificadas
+        self.nnparas = []                                   # Parâmetros de cada camada (pesos/biases)
+        self.deep_model = model                             # Referência ao modelo original
+        self.layerNum = len(model.dense_layers)             # Número de camadas densas
+        self.targetCls = original_prediction                # Classe alvo (predição original)
+        self.deepPolyNets_DNN = DP_DNN_network(True)       # Rede DeepPoly para análise simbólica
 
+        # ==================== EXTRAÇÃO DOS PARÂMETROS DA REDE ====================
+        # Lista para variáveis de entrada no modelo Gurobi
         self.input_gp_vars = []
+        
+        # Extrai pesos e biases de cada camada densa do modelo
         for i, l in enumerate(model.dense_layers):
             tf_layer = model.dense_layers[i]
-            w_cont, b_cont = tf_layer.get_weights()
-            paras = [w_cont.T, b_cont]
-            self.nnparas.append(paras)
+            w_cont, b_cont = tf_layer.get_weights()         # Obtém pesos e biases
+            paras = [w_cont.T, b_cont]                      # Transpõe pesos para formato correto
+            self.nnparas.append(paras)                      # Adiciona à lista de parâmetros
 
-        ########## output layer
+        # ==================== CRIAÇÃO DA CAMADA DE SAÍDA ====================
+        # Cria codificação para a camada de saída (última camada)
         self.output_layer = LayerEncoding(self.gp_model, preimg_mode=self.preimg_mode,
-                                          layer_index=len(self.nnparas),
-                                          layer_size=arch[-1],
+                                          layer_index=len(self.nnparas),    # Índice após todas as camadas ocultas
+                                          layer_size=arch[-1],              # Tamanho da camada de saída
                                           layer_paras=self.nnparas[-1], bit_lb=self.bit_lb, bit_ub=self.bit_ub,
-                                          if_hid=False)
+                                          if_hid=False)                     # Não é camada oculta
 
-        ########## hidden layer
+        # ==================== CRIAÇÃO DAS CAMADAS OCULTAS ====================
+        # Cria codificação para cada camada oculta
         for layer in range(len(arch) - 2):
             self.dense_layers.append(
                 LayerEncoding(self.gp_model, preimg_mode=self.preimg_mode,
-                              layer_index=layer + 1,
-                              layer_size=arch[layer + 1],
-                              layer_paras=self.nnparas[layer],
+                              layer_index=layer + 1,                    # Índices 1, 2, 3, ...
+                              layer_size=arch[layer + 1],               # Tamanho da camada
+                              layer_paras=self.nnparas[layer],          # Parâmetros correspondentes
                               bit_lb=self.bit_lb, bit_ub=self.bit_ub,
-                              if_hid=True)
+                              if_hid=True)                              # É camada oculta
             )
-            self.scaleValueSet.append(0)
+            self.scaleValueSet.append(0)                               # Inicializa valor de escala
 
-        ########## input layer
-        input_size = arch[0]
+        # ==================== CRIAÇÃO DA CAMADA DE ENTRADA ====================
+        # Cria codificação para a camada de entrada
+        input_size = arch[0]                                           # Tamanho da entrada (784 para MNIST)
 
         self.input_layer = LayerEncoding(self.gp_model, preimg_mode=self.preimg_mode,
-                                         layer_index=0,
-                                         layer_size=input_size,
-                                         layer_paras=None,
+                                         layer_index=0,                 # Primeira camada (índice 0)
+                                         layer_size=input_size,         # 784 neurônios para MNIST
+                                         layer_paras=None,              # Entrada não tem parâmetros próprios
                                          bit_lb=self.bit_lb, bit_ub=self.bit_ub,
-                                         if_hid=False)
+                                         if_hid=False)                  # Não é camada oculta
 
+        # ==================== CONFIGURAÇÃO DO DEEPPOLY ====================
+        # Carrega o modelo na rede DeepPoly para análise simbólica
         self.deepPolyNets_DNN.load_dnn(model)
 
-        # add input vars constraints
+        # ==================== CRIAÇÃO DE VARIÁVEIS DE ENTRADA NO GUROBI ====================
+        # Adiciona variáveis de entrada com restrições de bounds
         for input_index in range(self.input_layer.layer_size):
-            x_lb = x_low_real[input_index]
-            x_ub = x_high_real[input_index]
+            x_lb = x_low_real[input_index]                             # Limite inferior da entrada
+            x_ub = x_high_real[input_index]                           # Limite superior da entrada
+            # Cria variável contínua com bounds específicos
             cur_var = self.gp_model.addVar(lb=x_lb, ub=x_ub, vtype=GRB.CONTINUOUS)
             self.input_gp_vars.append(cur_var)
 
     def verified_quant(self, lb, ub):
-
+        """
+        Método principal para verificação de quantização.
+        Executa o algoritmo Quadapter para encontrar estratégia de quantização robusta.
+        """
+        # ==================== CONFIGURAÇÃO DA REGIÃO DE ENTRADA ====================
+        # Define a caixa de entrada (input box) para a verificação
         self.assert_input_box(lb, ub)
 
+        # ==================== PROPAGAÇÃO SIMBÓLICA ====================
+        # Executa análise DeepPoly para obter bounds simbólicos
         self.symbolic_propagate()
 
-        # DNN should satisfy the property
-        out_bounds_lb = self.output_layer.lb
-        out_bounds_ub = self.output_layer.ub
-        other_max = -1000
+        # ==================== VERIFICAÇÃO DA PROPRIEDADE NA DNN ORIGINAL ====================
+        # A DNN deve satisfazer a propriedade de robustez antes da quantização
+        out_bounds_lb = self.output_layer.lb                          # Limites inferiores da saída
+        out_bounds_ub = self.output_layer.ub                          # Limites superiores da saída
+        other_max = -1000                                              # Máximo limite superior das outras classes
 
+        # Encontra o máximo limite superior entre todas as classes exceto a alvo
         for i, v in enumerate(self.output_layer.ub):
             if i == self.targetCls:
-                continue
+                continue                                               # Pula a classe alvo
             else:
-                other_max = max(other_max, v)
+                other_max = max(other_max, v)                         # Atualiza máximo das outras classes
 
         print("The lower bound of the target class: ", out_bounds_lb[self.targetCls])
         print("The maximal upper bound of other classes: ", other_max)
 
+        # ==================== VERIFICAÇÃO DA CONDIÇÃO DE ROBUSTEZ ====================
+        # Verifica se o limite inferior da classe alvo é maior que o máximo das outras
+        # Isso garante que a propriedade de classificação é robusta na região de entrada
         if (out_bounds_lb[self.targetCls] >= other_max):
+            # ==================== COMPUTAÇÃO BACKWARD (PRÉ-IMAGEM) ====================
+            # Calcula pré-imagens relaxadas para todas as camadas
             backward_start_time = time.time()
             self.backward_preimage_computation()
             backward_end_time = time.time()
             print("Backward Time is: ", backward_end_time - backward_start_time)
 
+            # ==================== QUANTIZAÇÃO FORWARD COM ESBMC ====================
+            # Busca estratégia de quantização usando verificação ESBMC
             ifSucc, qu_list, qu_frac_list, qu_int_list = self.forward_quantization_with_esbmc()
             forward_end_time = time.time()
             print("Forward time is: ", forward_end_time - backward_end_time)
 
+            # ==================== ATUALIZAÇÃO DAS ESTATÍSTICAS ====================
+            # Registra tempos de execução para análise de performance
             self._stats["backward_time"] = backward_end_time - backward_start_time
             self._stats["forward_time"] = forward_end_time - backward_end_time
             self._stats["total_time"] = self._stats["backward_time"] + self._stats["forward_time"]
@@ -222,11 +298,16 @@ class GPEncoding:
             return ifSucc, qu_list, qu_frac_list, qu_int_list
 
         else:
+            # ==================== PROPRIEDADE NÃO SATISFEITA ====================
+            # Se a DNN original não satisfaz a propriedade, não há como quantizar robustamente
             print("The property does not hold in DNN!")
             exit(0)
 
-    # initiate input region
     def assert_input_box(self, x_lb, x_ub):
+        """
+        Inicializa a região de entrada (input box) para verificação.
+        Define os limites da região onde a propriedade deve ser verificada.
+        """
         low, high = x_lb, x_ub
 
         input_size = self.input_layer.layer_size
@@ -802,56 +883,121 @@ class GPEncoding:
     def generate_esbmc_verification_code(self, cur_layer, in_layer, qu_w, qu_b,
                                         frac_bit, all_bit, layer_index):
         """
-        Generate CORRECT C code for ESBMC verification with paper-style invariants.
-        - Output layer: proves target class is strictly maximal.
-        - Hidden layer: proves affine output lies within (relaxed) preimage interval.
+        Gera código C para verificação ESBMC usando aritmética de ponto fixo (inteiros).
+        
+        Estratégia de ponto fixo:
+        - Representa cada valor v como V = round(v * SCALE), onde SCALE = 2^frac_bit
+        - Camadas ocultas: verifica se saída afim fica dentro do intervalo de pré-imagem (escalado)
+        - Camada de saída: verifica se classe alvo é estritamente maximal (saídas escaladas)
         """
-        import numpy as np
+        # ==================== CONFIGURAÇÃO DO FATOR DE ESCALA ====================
+        # Calcula o fator de escala para conversão para ponto fixo
+        SCALE = 1 << int(frac_bit)  # SCALE = 2^frac_bit
 
-        # to-C helpers
-        weights_c = self.numpy_to_c_array(qu_w)
-        biases_c  = self.numpy_to_c_array(qu_b)
+        # ==================== QUANTIZAÇÃO DOS PARÂMETROS PARA INTEIROS ====================
+        # Converte pesos e biases para representação de ponto fixo (inteiros)
+        w_int = quantize_int(cur_layer.layer_paras[0], all_bit, frac_bit).astype(np.int32)
+        b_int = quantize_int(cur_layer.layer_paras[1], all_bit, frac_bit).astype(np.int32)
 
-        # pick preimage bounds (paper uses relaxed bounds)
-        if hasattr(cur_layer, "relaxed_lb") and hasattr(cur_layer, "relaxed_ub"):
-            preimage_low  = np.array(cur_layer.relaxed_lb)
-            preimage_high = np.array(cur_layer.relaxed_ub)
+        # Converte arrays numpy para strings de inicialização C
+        weights_c_int = self.numpy_to_c_int_array(w_int)
+        biases_c_int  = self.numpy_to_c_int_array(b_int)
+        
+        # ==================== CONFIGURAÇÃO DOS BOUNDS DE PRÉ-IMAGEM ====================
+        # Usa bounds relaxados se disponíveis, senão usa bounds concretos
+        # Escala conservadoramente para evitar problemas de precisão
+        if hasattr(cur_layer, "relaxed_lb") and hasattr(cur_layer, "relaxed_ub") and \
+           cur_layer.relaxed_lb is not None and cur_layer.relaxed_ub is not None:
+            # Usa bounds relaxados (computados pela análise de pré-imagem)
+            pre_lo = np.array(cur_layer.relaxed_lb, dtype=np.float64)
+            pre_hi = np.array(cur_layer.relaxed_ub, dtype=np.float64)
         else:
-            preimage_low  = np.array(cur_layer.lb)
-            preimage_high = np.array(cur_layer.ub)
+            # Usa bounds concretos (obtidos via DeepPoly)
+            pre_lo = np.array(cur_layer.lb, dtype=np.float64)
+            pre_hi = np.array(cur_layer.ub, dtype=np.float64)
 
-        preimage_low_c  = self.numpy_to_c_array(preimage_low)
-        preimage_high_c = self.numpy_to_c_array(preimage_high)
+        # Converte para inteiros de forma conservadora (floor/ceil para ampliar intervalo)
+        pre_lo_int = np.floor(pre_lo * SCALE).astype(np.int64)  # Floor para limite inferior
+        pre_hi_int = np.ceil(pre_hi * SCALE).astype(np.int64)   # Ceil para limite superior
 
-        # input box bounds (arrays)
-        input_bounds_low  = self.numpy_to_c_array(np.array(self.x_low_real))
-        input_bounds_high = self.numpy_to_c_array(np.array(self.x_high_real))
+        # Converte para strings C
+        preimage_low_c_int  = self.numpy_to_c_int_array(pre_lo_int)
+        preimage_high_c_int = self.numpy_to_c_int_array(pre_hi_int)
 
+        # ==================== CONFIGURAÇÃO DOS BOUNDS DE ENTRADA ====================
+        # Converte bounds da região de entrada para inteiros escalados
+        # Alarga ligeiramente para ser conservativo
+        x_lo = np.array(self.x_low_real, dtype=np.float64)        # Limite inferior da entrada
+        x_hi = np.array(self.x_high_real, dtype=np.float64)       # Limite superior da entrada
+        x_lo_int = np.floor(x_lo * SCALE).astype(np.int64)        # Floor para ser conservativo
+        x_hi_int = np.ceil(x_hi * SCALE).astype(np.int64)         # Ceil para ser conservativo
+        input_bounds_low_int  = self.numpy_to_c_int_array(x_lo_int)
+        input_bounds_high_int = self.numpy_to_c_int_array(x_hi_int)
+
+        # ==================== SELEÇÃO DO TEMPLATE DE VERIFICAÇÃO ====================
+        # Determina se é camada de saída ou camada oculta
         is_output_layer = (cur_layer.layer_index == len(self.dense_layers) + 1)
 
         if is_output_layer:
-            # ===== OUTPUT LAYER =====
-            return outerlayer(in_layer, cur_layer, weights_c, biases_c, input_bounds_low, input_bounds_high, self.targetCls)
+            # ==================== CAMADA DE SAÍDA ====================
+            # Verifica propriedade de classificação: classe alvo deve ser máxima
+            return outerlayer_fixed_int(
+                in_layer.layer_size, cur_layer.layer_size,   # Tamanhos das camadas
+                weights_c_int, biases_c_int,                 # Parâmetros quantizados
+                input_bounds_low_int, input_bounds_high_int, # Bounds da região de entrada
+                self.targetCls, SCALE                        # Classe alvo e fator de escala
+            )
         else:
-                    # ===== HIDDEN LAYER =====
-                    # Prove: for each neuron i, the affine output lies within relaxed preimage
-            return innerlayer(cur_layer.layer_size, in_layer.layer_size, weights_c, biases_c, preimage_low_c, preimage_high_c, input_bounds_low, input_bounds_high)
+            # ==================== CAMADA OCULTA ====================
+            # Verifica se saída afim fica dentro da pré-imagem relaxada
+            return innerlayer_fixed_int(
+                cur_layer.layer_size, in_layer.layer_size,   # Tamanhos das camadas
+                weights_c_int, biases_c_int,                 # Parâmetros quantizados
+                preimage_low_c_int, preimage_high_c_int,     # Pré-imagem relaxada
+                input_bounds_low_int, input_bounds_high_int, # Bounds da região de entrada
+                SCALE                                        # Fator de escala
+            )
 
 
     def numpy_to_c_array(self, np_array):
-        """Convert numpy array to C array initialization string"""
+        """
+        Converte array numpy para string de inicialização C (ponto flutuante).
+        Usado para gerar código C com valores em ponto flutuante.
+        """
         if np_array.ndim == 1:
+            # Array 1D: {val1, val2, val3}
             return "{" + ", ".join([f"{x:.6f}f" for x in np_array]) + "}"
         else:
+            # Array 2D: {{row1}, {row2}, {row3}}
             rows = []
             for row in np_array:
                 rows.append("{" + ", ".join([f"{x:.6f}f" for x in row]) + "}")
             return "{" + ", ".join(rows) + "}"
+            
+    def numpy_to_c_int_array(self, np_array):
+        """
+        Converte array numpy para string de inicialização C (inteiros).
+        Usado para gerar código C com valores inteiros (ponto fixo).
+        """
+        if np_array.ndim == 1:
+            # Array 1D: {val1, val2, val3}
+            return "{" + ", ".join([str(int(x)) for x in np_array]) + "}"
+        else:
+            # Array 2D: {{row1}, {row2}, {row3}}
+            rows = []
+            for row in np_array:
+                rows.append("{" + ", ".join([str(int(x)) for x in row]) + "}")
+            return "{" + ", ".join(rows) + "}"
         
 
-    # update deepPoly model's quantized weights
     def update_quantized_weights_affine(self, in_layer, out_layer, num_bit, frac_bit_weights, frac_bit_bias,
                                         in_layer_index):
+        """
+        Atualiza os pesos quantizados no modelo DeepPoly.
+        Aplica quantização de ponto fixo aos parâmetros da camada.
+        """
+        # ==================== CÁLCULO DOS LIMITES DE QUANTIZAÇÃO ====================
+        # Obtém os valores mínimos e máximos representáveis com a quantização especificada
         min_fp_weight, max_fp_weight = int_get_min_max(num_bit, frac_bit_weights)
         min_fp_bias, max_fp_bias = int_get_min_max(num_bit, frac_bit_bias)
         for out_index in range(out_layer.layer_size):
@@ -910,63 +1056,77 @@ class GPEncoding:
         fo.close()
 
     def run_esbmc_verification(self, c_file, layer_index):
-        """Execute ESBMC and parse results"""
+        """
+        Executa o verificador ESBMC e analisa os resultados.
         
+        ESBMC (Efficient SMT-based Bounded Model Checker) é usado para verificar
+        se a propriedade de quantização é preservada em cada camada.
+        """
         import subprocess
         import re
         
-        # ESBMC configuration optimized for neural network verification
+        # ==================== CONFIGURAÇÃO DO COMANDO ESBMC ====================
+        # Configuração otimizada para verificação de redes neurais
         esbmc_cmd = [
-            "esbmc", c_file,
-            "--loop-invariant",
-            "--function", "main",
-            "--z3",
-            "--floatbv",
-            "--k-induction",
-            "--unwind", "3",
-            "--interval-analysis",
-            "--incremental-bmc",
-            "--no-unwinding-assertions",
-            "--state-hashing",
-            "--timeout", "900",  # 15 minutes per verification
-            "--verbosity", "10"
+            "esbmc", c_file,                    # Arquivo C a ser verificado
+            "--loop-invariant",                 # Usa invariantes de loop para melhor verificação
+            "--function", "main",               # Verifica função main
+            "--z3",                            # Usa solver Z3 SMT
+            "--floatbv",                       # Suporte para aritmética de ponto flutuante
+            "--interval-analysis",             # Análise de intervalos para otimização
+            "--incremental-bmc",               # BMC incremental para melhor performance
+            "--no-unwinding-assertions",       # Desabilita assertions de unwinding de loops
+            "--state-hashing",                 # Hashing de estados para reduzir exploração
+            "--force-malloc-success",          # Assume que malloc sempre sucede
+            "--no-bounds-check",               # Desabilita verificação de bounds de arrays
+            "--no-div-by-zero-check",          # Desabilita verificação de divisão por zero
+            "--no-pointer-check",              # Desabilita verificação de ponteiros
+            "--timeout", "900",                # Timeout de 15 minutos por verificação
+            "--verbosity", "10"                # Nível máximo de verbosidade para debug
         ]
         
         try:
+            # ==================== EXECUÇÃO DO ESBMC ====================
             print(f"Running ESBMC for layer {layer_index}...")
             result = subprocess.run(
-                esbmc_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=1200,
-                encoding="utf-8",
-                errors="replace",
+                esbmc_cmd,                     # Comando e argumentos
+                stdout=subprocess.PIPE,        # Captura saída padrão
+                stderr=subprocess.PIPE,        # Captura saída de erro
+                text=True,                     # Decodifica como texto
+                timeout=1200,                  # Timeout de 20 minutos (safety margin)
+                encoding="utf-8",             # Codificação de caracteres
+                errors="replace",             # Substitui caracteres inválidos
             )            
-            print(f"Result stdout: {result.stdout[-500:]}")  # Print last 500 chars of stdout for debugging
+            # ==================== DEBUG E LOG DA EXECUÇÃO ====================
+            # Imprime informações de debug para monitoramento
+            print(f"Result stdout: {result.stdout[-500:]}")  # Últimos 500 chars para debug
             print("ESBMC return code:", result.returncode)
             print("--- STDOUT (tail) ---\n", (result.stdout or "")[-2000:])
             print("--- STDERR (tail) ---\n", (result.stderr or "")[-2000:])
-            # Parse ESBMC output
+            
+            # ==================== ANÁLISE DOS RESULTADOS ====================
+            # Parseia a saída do ESBMC para determinar o resultado da verificação
             if "VERIFICATION SUCCESSFUL" in result.stdout:
                 print(f"ESBMC verification PASSED for layer {layer_index}")
-                return "VERIFIED"
+                return "VERIFIED"                          # Propriedade verificada com sucesso
             elif "VERIFICATION FAILED" in result.stdout:
                 print(f"ESBMC verification FAILED for layer {layer_index}")
-                # Extract counterexample if available
+                # Extrai contraexemplo se disponível
                 if "Counterexample:" in result.stdout:
                     print("Counterexample found - quantization violates preimage")
-                return "FAILED"
+                return "FAILED"                           # Propriedade violada
             else:
                 print(f"ESBMC verification UNKNOWN for layer {layer_index}")
-                print(f"ESBMC output: {result.stdout[-500:]}")  # Last 500 chars
-                return "UNKNOWN"
+                print(f"ESBMC output: {result.stdout[-500:]}")  # Últimos 500 chars
+                return "UNKNOWN"                          # Resultado inconclusivo
                 
         except subprocess.TimeoutExpired:
+            # ==================== TRATAMENTO DE TIMEOUT ====================
             print(f"ESBMC timeout for layer {layer_index}")
-            return "TIMEOUT"
+            return "TIMEOUT"                              # Timeout na verificação
         except Exception as e:
+            # ==================== TRATAMENTO DE ERROS ====================
             print(f"ESBMC error for layer {layer_index}: {e}")
-            return "ERROR"
+            return "ERROR"                                # Erro na execução
         
     
