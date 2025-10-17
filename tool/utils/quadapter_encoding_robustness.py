@@ -896,8 +896,8 @@ class GPEncoding:
 
         # ==================== QUANTIZAÇÃO DOS PARÂMETROS PARA INTEIROS ====================
         # Converte pesos e biases para representação de ponto fixo (inteiros)
-        w_int = quantize_int(cur_layer.layer_paras[0], all_bit, frac_bit).astype(np.int32)
-        b_int = quantize_int(cur_layer.layer_paras[1], all_bit, frac_bit).astype(np.int32)
+        w_int = qu_w#quantize_int(cur_layer.layer_paras[0], all_bit, frac_bit).astype(np.int32)
+        b_int = qu_b#quantize_int(cur_layer.layer_paras[1], all_bit, frac_bit).astype(np.int32)
 
         # Converte arrays numpy para strings de inicialização C
         weights_c_int = self.numpy_to_c_int_array(w_int)
@@ -929,8 +929,8 @@ class GPEncoding:
         # Alarga ligeiramente para ser conservativo
         x_lo = np.array(self.x_low_real, dtype=np.float64)        # Limite inferior da entrada
         x_hi = np.array(self.x_high_real, dtype=np.float64)       # Limite superior da entrada
-        x_lo_int = np.floor(x_lo * SCALE).astype(np.int64)        # Floor para ser conservativo
-        x_hi_int = np.ceil(x_hi * SCALE).astype(np.int64)         # Ceil para ser conservativo
+        x_lo_int = np.floor(x_lo * SCALE).astype(np.int32)        # Floor para ser conservativo
+        x_hi_int = np.ceil(x_hi * SCALE).astype(np.int32)         # Ceil para ser conservativo
         input_bounds_low_int  = self.numpy_to_c_int_array(x_lo_int)
         input_bounds_high_int = self.numpy_to_c_int_array(x_hi_int)
 
@@ -1072,7 +1072,7 @@ class GPEncoding:
             "--loop-invariant",                 # Usa invariantes de loop para melhor verificação
             "--function", "main",               # Verifica função main
             "--z3",                            # Usa solver Z3 SMT
-            "--floatbv",                       # Suporte para aritmética de ponto flutuante
+           # "--floatbv",                       # Suporte para aritmética de ponto flutuante
             "--interval-analysis",             # Análise de intervalos para otimização
             "--incremental-bmc",               # BMC incremental para melhor performance
             "--no-unwinding-assertions",       # Desabilita assertions de unwinding de loops

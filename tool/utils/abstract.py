@@ -218,7 +218,7 @@ def outerlayer_fixed_int(in_layer_layer_size, cur_layer_layer_size, weights_c_in
                 long long input[INPUT_SIZE];
                 long long output[LAYER_SIZE];
                 for (int k = 0; k < INPUT_SIZE; ++k) {{
-                    input[k] = nondet_float(); /* nondet within box */
+                    input[k] = nondet_int(); /* nondet within box */
                     __ESBMC_assume(input[k] >= input_bounds_low[k] && input[k] <= input_bounds_high[k]);
                 }}
                 affine_transform_fixed(input, output);
