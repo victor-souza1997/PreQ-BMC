@@ -1,11 +1,14 @@
 # ==================== IMPORTAÇÕES E CONFIGURAÇÕES INICIAIS ====================
 import argparse
+import numpy as np
 from utils.deep_models import *
 from utils.quadapter_encoding_robustness import *
 from utils.quadapter_utils import *
 from utils.data.iris import load_train_test_data
 from utils.data.load_onnx import *
 from gurobipy import GRB
+import logging 
+
 
 # Define o valor máximo para restrições (Big-M method usado em programação linear inteira)
 bigM = GRB.MAXINT
@@ -66,9 +69,13 @@ elif args.dataset == "iris":
 else:
     raise ValueError("Unknown dataset '{}'".format(args.dataset))
 
+# Converte dados para arrays NumPy (simplifica uso posterior)
+x_train = np.asarray(x_train)
+x_test = np.asarray(x_test)
+y_train = np.asarray(y_train)
+y_test = np.asarray(y_test)
+
 # Achata as labels de formato (n, 1) para (n,) - remove dimensão extra
-
-
 y_train = y_train.flatten()
 y_test = y_test.flatten()
 
@@ -87,6 +94,15 @@ try:
         x_test = x_test.reshape([-1, 28 * 28]).astype(np.float32)
 except Exception as e: 
     print(e)
+
+# Determina dimensionalidade de entrada e número de classes da tarefa
+if x_train.ndim == 1:
+    input_dim = x_train.size
+else:
+    input_dim = x_train.shape[-1]
+
+num_classes = int(np.max(y_train)) + 1
+
 # ==================== CONSTRUÇÃO DA ARQUITETURA DA REDE ====================
 
 # Parseia a string de arquitetura (ex: "1blk_100" -> ["1blk", "100"])
@@ -96,29 +112,30 @@ archMnist = args.arch.split('_')
 # Ex: "1blk" -> "1"
 numBlk = archMnist[0][:-3]
 
-# Inicializa a arquitetura com a camada de entrada (784 = 28*28 pixels)
-arch = [784]
+# Inicializa a arquitetura com a dimensionalidade de entrada inferida
+arch = [input_dim]
 
 # Converte os tamanhos das camadas ocultas para inteiros
 # Ex: ["100", "50"] -> [100, 50]
 blkset = list(map(int, archMnist[1:]))
 
-# Adiciona a camada de saída (10 classes para MNIST/Fashion-MNIST)
-blkset.append(10)
+# Adiciona a camada de saída com o número de classes da tarefa
+blkset.append(num_classes)
 
 # Combina entrada + camadas ocultas + saída
-# Ex: arch = [784, 100, 10] para uma rede com 1 camada oculta de 100 neurônios
+# Ex: arch = [input_dim, 100, num_classes] para uma rede com 1 camada oculta
 arch += blkset
 
 # Verifica se o número de blocos especificado corresponde à arquitetura parseada
 # (número de camadas - 1, excluindo a camada de saída)
 assert int(numBlk) == len(blkset) - 1
-
 # ==================== CRIAÇÃO E CARREGAMENTO DO MODELO ====================
-
+print("Architecture is: ", arch)
+print("Number of blocks is: ", numBlk)
+print("Numer of blkset is: ", blkset)
 # Cria o modelo de rede neural profunda com a arquitetura especificada
 model = DeepModel(
-    blkset,  # Lista com tamanhos das camadas [camadas_ocultas..., 10]
+    arch,  # Lista com tamanhos das camadas [camadas_ocultas..., num_classes]
     last_layer_signed=True,  # Última camada usa valores com sinal (logits)
 )
 
@@ -139,10 +156,12 @@ model.compile(
     metrics=[tf.keras.metrics.SparseCategoricalAccuracy()],
 )
 
-# Constrói o modelo com o formato de entrada correto (None, 784)
+# Constrói o modelo com o formato de entrada correto (None, input_dim)
 # None permite batch size variável
-model.build((None, 28 * 28))
 
+print("input dim is: ", input_dim)
+model.build((None, input_dim))
+model.summary()
 # Carrega os pesos pré-treinados do arquivo .h5
 model.load_weights(weight_path)  # input: 0~255
 
@@ -166,6 +185,9 @@ print("\nModel prediction is: ", model_predict)
 
 # Verifica se a predição está correta
 # Só verificamos amostras que o modelo classifica corretamente
+print("\nOriginal label is: ", original_prediction)
+print("Checking whether the original prediction is correct...")
+print("If correct, then proceed to verified quantization...")
 assert model_predict == original_prediction
 
 print("original_prediction is: ", original_prediction, '\n')

@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import torch
 from sklearn.model_selection import train_test_split
@@ -52,6 +52,9 @@ def iris_dataloaders():
         "test": test,
     }
     return loader
+
+
+ArrayLike = Tuple[Any, Any]
 
 
 __iris_data = """
@@ -206,19 +209,48 @@ __iris_data = """
 6.2,3.4,5.4,2.3,2
 5.9,3.0,5.1,1.8,2
 """
-def load_train_test_data() -> Tuple[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+
+
+def load_train_test_data(
+    as_numpy: bool = True,
+) -> Tuple[ArrayLike, ArrayLike]:
+    """
+    Return the Iris dataset as full train/test tensors.
+
+    Parameters
+    ----------
+    as_numpy:
+        If True, convert tensors to numpy arrays before returning.
+    """
     dataloaders = iris_dataloaders()
-    # pega tudo de uma vez
-    train_loader = torch.utils.data.DataLoader(dataloaders["train"], batch_size=len(dataloaders["train"]), shuffle=False)
-    test_loader  = torch.utils.data.DataLoader(dataloaders["test"],  batch_size=len(dataloaders["test"]),  shuffle=False)
+    # Load the entire split at once.
+    train_loader = torch.utils.data.DataLoader(
+        dataloaders["train"],
+        batch_size=len(dataloaders["train"]),
+        shuffle=False,
+    )
+    test_loader = torch.utils.data.DataLoader(
+        dataloaders["test"],
+        batch_size=len(dataloaders["test"]),
+        shuffle=False,
+    )
 
     x_train, y_train = next(iter(train_loader))
-    x_data,  y_data  = next(iter(test_loader))
+    x_test, y_test = next(iter(test_loader))
 
-    # x_train = x_train.view(x_train.size(0), -1)  # opcional
-    # x_data  = x_data.view(x_data.size(0), -1)    # opcional
+    # Remove singleton channel dimensions introduced earlier.
+    x_train = x_train.squeeze(1)
+    x_test = x_test.squeeze(1)
+    y_train = y_train.squeeze(1)
+    y_test = y_test.squeeze(1)
 
-    return (y_data, x_data), (y_train, x_train)
+    if as_numpy:
+        return (
+            (x_train.numpy(), x_test.numpy()),
+            (y_train.numpy(), y_test.numpy()),
+        )
+
+    return (x_train, x_test), (y_train, y_test)
 if __name__ == "__main__":
     (x_train, x_test), (y_train, y_test) = load_train_test_data()
     #for (data, target) in train_loader:
