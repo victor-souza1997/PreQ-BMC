@@ -3,7 +3,8 @@ import argparse
 from utils.deep_models import *
 from utils.quadapter_encoding_robustness import *
 from utils.quadapter_utils import *
-
+from utils.data.iris import load_train_test_data
+from utils.data.load_onnx import *
 from gurobipy import GRB
 
 # Define o valor máximo para restrições (Big-M method usado em programação linear inteira)
@@ -55,18 +56,37 @@ if args.dataset == "fashion-mnist":
 elif args.dataset == "mnist":
     # MNIST: dataset de dígitos manuscritos (28x28, 10 classes)
     (x_train, y_train), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
+    print("x_train data shape:", x_train.shape)
+    print("y_train data shape:", y_train.shape) 
+    print("x_test data shape:", x_test.shape)
+elif args.dataset == "iris":
+    # Iris: dataset clássico de flores Iris (4 features, 3 classes)
+    (x_train, x_test), (y_train, y_test) = load_train_test_data()
+    #input()
 else:
     raise ValueError("Unknown dataset '{}'".format(args.dataset))
 
 # Achata as labels de formato (n, 1) para (n,) - remove dimensão extra
+
+
 y_train = y_train.flatten()
 y_test = y_test.flatten()
 
+print("y_train data shape after flatten:", y_train.shape)
+print("y_test data shape after flatten:", y_test.shape)
+
 # Redimensiona as imagens 28x28 para vetores 784x1 e converte para float32
 # Mantém valores no intervalo [0, 255] (sem normalização ainda)
-x_train = x_train.reshape([-1, 28 * 28]).astype(np.float32)
-x_test = x_test.reshape([-1, 28 * 28]).astype(np.float32)
-
+try:
+    if len(x_train.shape) > 2 and np.prod(x_train.shape[1:]) == 28 * 28:
+        x_train = x_train.reshape([-1, 28 * 28]).astype(np.float32)
+except Exception as e: 
+    print(e)
+try:
+    if len(x_test.shape) > 2 and np.prod(x_test.shape[1:]) == 28 * 28:
+        x_test = x_test.reshape([-1, 28 * 28]).astype(np.float32)
+except Exception as e: 
+    print(e)
 # ==================== CONSTRUÇÃO DA ARQUITETURA DA REDE ====================
 
 # Parseia a string de arquitetura (ex: "1blk_100" -> ["1blk", "100"])
@@ -103,7 +123,11 @@ model = DeepModel(
 )
 
 # Define o caminho dos pesos pré-treinados baseado no dataset e arquitetura
-weight_path = "benchmark/{}/{}_{}_weight.h5".format(args.dataset, args.dataset, args.arch)
+
+if args.dataset == "iris":
+    weight_path = "benchmark/{}/{}_weight.h5".format(args.dataset, args.dataset)
+else:
+    weight_path = "benchmark/{}/{}_{}_weight.h5".format(args.dataset, args.dataset, args.arch)
 
 # Compila o modelo especificando:
 # - Otimizador: Adam com learning rate baixo

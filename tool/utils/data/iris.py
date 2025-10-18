@@ -206,16 +206,22 @@ __iris_data = """
 6.2,3.4,5.4,2.3,2
 5.9,3.0,5.1,1.8,2
 """
-
-def load_train_test_data() -> Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
+def load_train_test_data() -> Tuple[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
     dataloaders = iris_dataloaders()
-    train_loader = torch.utils.data.DataLoader(dataloaders["train"], batch_size=16, shuffle=True)
-    test_loader = torch.utils.data.DataLoader(dataloaders["test"], batch_size=16, shuffle=False)
-    return train_loader, test_loader
+    # pega tudo de uma vez
+    train_loader = torch.utils.data.DataLoader(dataloaders["train"], batch_size=len(dataloaders["train"]), shuffle=False)
+    test_loader  = torch.utils.data.DataLoader(dataloaders["test"],  batch_size=len(dataloaders["test"]),  shuffle=False)
 
+    x_train, y_train = next(iter(train_loader))
+    x_data,  y_data  = next(iter(test_loader))
+
+    # x_train = x_train.view(x_train.size(0), -1)  # opcional
+    # x_data  = x_data.view(x_data.size(0), -1)    # opcional
+
+    return (y_data, x_data), (y_train, x_train)
 if __name__ == "__main__":
-    train_loader, test_loader = load_train_test_data()
-    for (data, target) in train_loader:
-        print("Data:", data)
-        print("Target:", target)
+    (x_train, x_test), (y_train, y_test) = load_train_test_data()
+    #for (data, target) in train_loader:
+    #    print("Data:", data)
+    #    print("Target:", target)
         
