@@ -259,4 +259,3 @@ if __name__ == "__main__":
     #    print("Data:", data)
     #    print("Target:", target)
         
-0.6944444  0.33333334 0.6440678  0.5416667
