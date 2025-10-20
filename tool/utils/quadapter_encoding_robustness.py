@@ -8,6 +8,9 @@ import gurobipy as gp                        # Solver MILP (Mixed Integer Linear
 import time                                  # Medição de tempo de execução
 import numpy as np                           # Operações numéricas e arrays
 
+import logging
+
+logging.basicConfig(filename='logs/quadapter_encoding_robustness.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 # ==================== CLASSE PARA CODIFICAÇÃO DE CAMADAS ====================
 class LayerEncoding:
     """
@@ -261,7 +264,6 @@ class GPEncoding:
         out_bounds_lb = self.output_layer.lb                          # Limites inferiores da saída
         out_bounds_ub = self.output_layer.ub                          # Limites superiores da saída
         other_max = -1000                                              # Máximo limite superior das outras classes
-
         # Encontra o máximo limite superior entre todas as classes exceto a alvo
         for i, v in enumerate(self.output_layer.ub):
             if i == self.targetCls:
@@ -275,6 +277,7 @@ class GPEncoding:
         # ==================== VERIFICAÇÃO DA CONDIÇÃO DE ROBUSTEZ ====================
         # Verifica se o limite inferior da classe alvo é maior que o máximo das outras
         # Isso garante que a propriedade de classificação é robusta na região de entrada
+        logging.debug(f"Target class lower bound: {out_bounds_lb[self.targetCls]} >= {other_max}")
         if (out_bounds_lb[self.targetCls] >= other_max):
             # ==================== COMPUTAÇÃO BACKWARD (PRÉ-IMAGEM) ====================
             # Calcula pré-imagens relaxadas para todas as camadas
@@ -820,9 +823,12 @@ class GPEncoding:
                 all_bit = frac_bit + int_bit
 
                 # Get quantized parameters (same as original)
+                logging.debug(f"Weights before quantization: {w}")
                 qu_w = quantize_int(w, all_bit, frac_bit) / (2 ** frac_bit)
                 qu_b = quantize_int(b, all_bit, frac_bit) / (2 ** frac_bit)
-
+                logging.debug(f"Quantized weights: {qu_w}")
+                logging.debug(f"Quantized biases: {qu_b}")
+                quit()
                 # === ESBMC VERIFICATION REPLACEMENT ===
                 # Instead of Gurobi optimization, call ESBMC
                 esbmc_result = self.verify_layer_with_esbmc(
@@ -1072,7 +1078,7 @@ class GPEncoding:
             "--loop-invariant",                 # Usa invariantes de loop para melhor verificação
             "--function", "main",               # Verifica função main
             "--z3",                            # Usa solver Z3 SMT
-           # "--floatbv",                       # Suporte para aritmética de ponto flutuante
+            "--floatbv",                       # Suporte para aritmética de ponto flutuante
             "--interval-analysis",             # Análise de intervalos para otimização
             "--incremental-bmc",               # BMC incremental para melhor performance
             "--no-unwinding-assertions",       # Desabilita assertions de unwinding de loops

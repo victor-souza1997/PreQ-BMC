@@ -21,10 +21,12 @@ class DeepModel(tf.keras.Model):
             layers,
             dropout_rate=0.0,
             last_layer_signed=False,
+            input_scale=255.0,
     ):
 
         super(DeepModel, self).__init__()
         self.dense_layers = []
+        self.input_scale = input_scale
         for i, l in enumerate(layers):
             if type(l) == int:
                 signed = (
@@ -51,8 +53,9 @@ class DeepModel(tf.keras.Model):
         )
 
     def call(self, inputs, **kwargs):
-        x = inputs / 255
-        x = tf.cast(x, tf.float32)
+        x = tf.cast(inputs, tf.float32)
+        if self.input_scale not in (None, 0):
+            x = x / self.input_scale
 
         for c in self.dense_layers:
             if self.dropout_rate > 0.0:

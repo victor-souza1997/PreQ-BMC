@@ -6,6 +6,8 @@ from utils.deep_models import *
 from utils.quadapter_encoding_robustness import *
 from utils.quadapter_utils import *
 from utils.data.iris import load_train_test_data
+from utils.data.seeds import load_train_test_data_seeds
+from utils.data.mnist_64 import load_train_test_data_mnist64
 from utils.data.load_onnx import *
 from gurobipy import GRB
 import time
@@ -37,7 +39,7 @@ parser.add_argument("--bit_lb", type=int, default=1)
 parser.add_argument("--bit_ub", type=int, default=16)
 
 # Epsilon: raio de perturbação para verificação de robustez (norma L∞)
-parser.add_argument("--eps", type=int, default=2)
+parser.add_argument("--eps", type=float, default=1)
 
 # Caminho para salvar os resultados da verificação
 parser.add_argument("--outputPath", default="")
@@ -106,14 +108,30 @@ def _infer_dense_arch_from_h5(weight_file: str | Path) -> list[int]:
 # Carrega o dataset apropriado com base no argumento fornecido
 input_scale = 255.0
 if args.dataset == "fashion-mnist":
+    logging.info("Loading Fashion-MNIST dataset...")
     # Fashion-MNIST: dataset de roupas e acessórios (28x28, 10 classes)
     (x_train, y_train), (x_test, y_test) = tf.keras.datasets.fashion_mnist.load_data()
-elif args.dataset == "mnist":
+elif args.dataset == "mnist" or args.dataset == "mnist_onnx":
     # MNIST: dataset de dígitos manuscritos (28x28, 10 classes)
+    logging.info("Loading MNIST dataset...")
     (x_train, y_train), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
+elif args.dataset == "mnist64":
+    logging.info("Loading MNIST 64x64 dataset...")
+    # MNIST 64x64: versão redimensionada do MNIST (64x64, 10 classes)
+    (x_train, x_test), (y_train, y_test) = load_train_test_data_mnist64()
+    print(f"x_train shape: {x_train.shape}, x_test shape: {x_test.shape}")
 elif args.dataset == "iris":
     # Iris: dataset clássico de flores Iris (4 features, 3 classes)
     (x_train, x_test), (y_train, y_test) = load_train_test_data()
+    input_scale = 1.0
+    logging.debug(f"x_train data shape:{x_train.shape}")
+    logging.debug(f"y_train data shape: {y_train.shape}") 
+    logging.debug(f"x_test data shape: {x_test.shape}")
+    logging.debug(f"y_test data shape: {y_test.shape}")
+    #input()
+elif args.dataset == "seeds":
+    # Seeds: dataset de sementes de trigo (7 features, 3 classes)
+    (x_train, x_test), (y_train, y_test) = load_train_test_data_seeds()
     input_scale = 1.0
     logging.debug(f"x_train data shape:{x_train.shape}")
     logging.debug(f"y_train data shape: {y_train.shape}") 
@@ -157,8 +175,9 @@ else:
 
 num_classes = int(np.max(y_train)) + 1
 
-if args.dataset == "iris":
+if args.dataset == "iris" or args.dataset == "seeds" or args.dataset == "mnist64":
     weight_path = Path(f"benchmark/{args.dataset}/{args.dataset}_weight.h5")
+
 else:
     weight_path = Path(f"benchmark/{args.dataset}/{args.dataset}_{args.arch}_weight.h5")
 
@@ -284,7 +303,6 @@ for i in range(30):
     except AssertionError:
         logging.debug("The prediction is incorrect. Skip to the next one.")
         continue
-quit()
 x_input = x_test[args.sample_id]
 
 # Faz a predição para a amostra selecionada (adiciona dimensão batch)
@@ -309,7 +327,6 @@ print("If correct, then proceed to verified quantization...")
 assert model_predict == original_prediction
 
 print("original_prediction is: ", original_prediction, '\n')
-quit()
 # ==================== DEFINIÇÃO DA REGIÃO DE ENTRADA (INPUT BOX) ====================
 # Define os limites inferior e superior da região de perturbação L∞
 # x_low: entrada original - epsilon (limitado ao intervalo [0, 255])

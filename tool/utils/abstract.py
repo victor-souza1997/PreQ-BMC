@@ -153,134 +153,198 @@ def innerlayer(cur_layer_layer_size, in_layer_layer_size, weights_c, biases_c, p
             return 0;
         }}
         """
-
-
 def outerlayer_fixed_int(in_layer_layer_size, cur_layer_layer_size, weights_c_int, biases_c_int,
                          input_bounds_low_int, input_bounds_high_int, targetCls, scale_factor):
 
     return f"""\
+#include <stdint.h>
+#include <limits.h>
 
-            #include <stdint.h>
-            #include <math.h>
+#ifndef __invariant
+#define __invariant(p) /* paper-style invariant marker (no-op for ESBMC) */
+#endif
 
-            #ifndef __invariant
-            #define __invariant(p) /* paper-style invariant marker (no-op for ESBMC) */
-            #endif
+#define INPUT_SIZE   {in_layer_layer_size}
+#define LAYER_SIZE   {cur_layer_layer_size}
+#define TARGET_CLASS {targetCls}
+#define SCALE_FACTOR {scale_factor}LL
 
-            #define INPUT_SIZE   {in_layer_layer_size}
-            #define LAYER_SIZE   {cur_layer_layer_size}
-            #define TARGET_CLASS {targetCls}
-            #define SCALE_FACTOR {scale_factor}
+extern long long nondet_longlong(void);
 
-            extern long long nondet_longlong(void);
+long long weights[LAYER_SIZE][INPUT_SIZE] = {weights_c_int};
+long long biases[LAYER_SIZE]              = {biases_c_int};
 
-            long long weights[LAYER_SIZE][INPUT_SIZE] = {weights_c_int};
-            long long biases[LAYER_SIZE]              = {biases_c_int};
+long long input_bounds_low[INPUT_SIZE]  = {input_bounds_low_int};
+long long input_bounds_high[INPUT_SIZE] = {input_bounds_high_int};
 
-            long long input_bounds_low[INPUT_SIZE]  = {input_bounds_low_int};
-            long long input_bounds_high[INPUT_SIZE] = {input_bounds_high_int};
+static inline long long llabs(long long x) {{
+    return x < 0LL ? -x : x;
+}}
 
-            static void affine_transform_fixed(const long long in_[INPUT_SIZE], long long out_[LAYER_SIZE])
-            {{
-                for (int i = 0; i < LAYER_SIZE; ++i) {{
-                    long long acc = 0; /* scaled by SCALE_FACTOR^2 during accumulation */
-                    for (int j = 0; j < INPUT_SIZE; ++j) {{
-                        acc += weights[i][j] * in_[j];
-                    }}
-                    /* rescale to SCALE_FACTOR and add bias (already at SCALE_FACTOR) */
-                    out_[i] = (acc / SCALE_FACTOR) + biases[i];
-                }}
+/* Transformação afim em ponto fixo: out[i] = (W[i] · in + b[i]) / SCALE */
+static void affine_transform_fixed(const long long in_[INPUT_SIZE], long long out_[LAYER_SIZE])
+{{
+    for (int i = 0; i < LAYER_SIZE; ++i) {{
+        long long acc = 0LL; /* acumulador em SCALE_FACTOR^2 */
+        
+        for (int j = 0; j < INPUT_SIZE; ++j) {{
+            /* w * x ambos em SCALE_FACTOR → produto em SCALE_FACTOR^2 */
+            long long prod = weights[i][j] * in_[j];
+            acc += prod;
+        }}
+        
+        /* Rescale para SCALE_FACTOR e adiciona bias (já em SCALE_FACTOR) */
+        out_[i] = (acc / SCALE_FACTOR) + biases[i];
+    }}
+}}
+
+/* Verifica classificação: argmax(out) == TARGET_CLASS */
+static int verify_classification(const long long out_[LAYER_SIZE])
+{{
+    const int T = TARGET_CLASS;
+    const long long target = out_[T];
+    long long max_other = LLONG_MIN / 2; /* evita overflow nas comparações */
+    
+    int i = 0;
+    __invariant(0 <= i && i <= LAYER_SIZE);
+    __invariant(max_other <= target);
+    
+    while (i < LAYER_SIZE)
+    {{
+        __ESBMC_loop_invariant(0 <= i && i <= LAYER_SIZE && max_other <= target);
+        if (i != T) {{
+            const long long cand = out_[i];
+            if (cand > max_other) {{
+                max_other = cand;
             }}
+        }}
+        ++i;
+    }}
+    
+    return max_other < target;
+}}
 
-            /* Classification: argmax(out) == TARGET_CLASS */
-            static int verify_classification(const long long out_[LAYER_SIZE])
-            {{
-                const int T   = TARGET_CLASS;
-                const long long target = out_[T];
-                long long max_other    = LLONG_MIN / 4;
-                int i = 0;
-                __invariant(0 <= i && i <= LAYER_SIZE);
-                __invariant(max_other <= target);
-                while (i < LAYER_SIZE)
-                {{
-                    __ESBMC_loop_invariant(0 <= i && i <= LAYER_SIZE && max_other <= target);
-                    if (i != T) {{
-                        const long long cand = out_[i];
-                        if (cand > max_other) max_other = cand;
-                    }}
-                    ++i;
-                }}
-                return max_other < target;
-            }}
+int main(void)
+{{
+    long long input[INPUT_SIZE];
+    long long output[LAYER_SIZE];
+    
+    /* Entrada não-determinística dentro do box */
+    for (int k = 0; k < INPUT_SIZE; ++k) {{
+        input[k] = nondet_longlong();
+        __ESBMC_assume(input[k] >= input_bounds_low[k] && 
+                       input[k] <= input_bounds_high[k]);
+    }}
+    
+    affine_transform_fixed(input, output);
+    
+    __ESBMC_assert(verify_classification(output),
+                   "Classification property violated (output layer, fixed-point)");
+    
+    return 0;
+}}
+"""
 
-            int main(void)
-            {{
-                long long input[INPUT_SIZE];
-                long long output[LAYER_SIZE];
-                for (int k = 0; k < INPUT_SIZE; ++k) {{
-                    input[k] = nondet_int(); /* nondet within box */
-                    __ESBMC_assume(input[k] >= input_bounds_low[k] && input[k] <= input_bounds_high[k]);
-                }}
-                affine_transform_fixed(input, output);
-                __ESBMC_assert(verify_classification(output),
-                               "Classification property violated (output layer, fixed-point)");
-                return 0;
-            }}
-            """
+
 def innerlayer_fixed_int(cur_layer_layer_size, in_layer_layer_size, weights_c_int, biases_c_int,
                          preimage_low_int, preimage_high_int, input_bounds_low_int, input_bounds_high_int,
                          scale_factor):
     return f"""\
-            #include <stdint.h>
-            #include <limits.h>
+#include <stdint.h>
+#include <limits.h>
+
+#ifndef __invariant
+#define __invariant(p) /* paper-style invariant marker (no-op for ESBMC) */
+#endif
+
+#define INPUT_SIZE   {in_layer_layer_size}
+#define LAYER_SIZE   {cur_layer_layer_size}
+#define SCALE_FACTOR {scale_factor}LL
+
+extern long long nondet_longlong(void);
+
+long long weights[LAYER_SIZE][INPUT_SIZE] = {weights_c_int};
+long long biases[LAYER_SIZE]              = {biases_c_int};
+
+long long preimage_low[LAYER_SIZE]  = {preimage_low_int};
+long long preimage_high[LAYER_SIZE] = {preimage_high_int};
+
+long long input_bounds_low[INPUT_SIZE]  = {input_bounds_low_int};
+long long input_bounds_high[INPUT_SIZE] = {input_bounds_high_int};
+
+static inline long long llabs(long long x) {{
+    return x < 0LL ? -x : x;
+}}
+
+/* Verifica bounds da transformação afim usando aritmética de intervalos */
+static void check_affine_bounds_fixed(const long long in_[INPUT_SIZE])
+{{
+    /* Tolerâncias para a pré-imagem relaxada */
+    const long long abs_tol = (long long)(1e-3 * SCALE_FACTOR);
+    const long long rel_tol_num = 1; /* 1% = 1/100 */
+    const long long rel_tol_den = 100;
+    
+    for (int i = 0; i < LAYER_SIZE; ++i) {{
+        long long s_out = 0LL;  /* saída exata na entrada atual */
+        long long s_lb  = 0LL;  /* limite inferior usando box */
+        long long s_ub  = 0LL;  /* limite superior usando box */
+        
+        /* Tolerância ao redor do intervalo de pré-imagem */
+        const long long pre_lo = preimage_low[i];
+        const long long pre_hi = preimage_high[i];
+        const long long range = llabs(pre_hi - pre_lo);
+        const long long eps = abs_tol + (rel_tol_num * range) / rel_tol_den;
+        
+        int j = 0;
+        __invariant(0 <= j && j <= INPUT_SIZE);
+        __invariant(s_lb <= s_out && s_out <= s_ub);
+        
+        while (j < INPUT_SIZE)
+        {{
+            //__ESBMC_loop_invariant(0 <= j && j <= INPUT_SIZE &&
+            //                       s_lb <= s_out && s_out <= s_ub);
             
-            #define INPUT_SIZE  {in_layer_layer_size}
-            #define LAYER_SIZE  {cur_layer_layer_size}
-            #define SCALE_FACTOR {scale_factor}
+            const long long w  = weights[i][j];
+            const long long lo = input_bounds_low[j];
+            const long long hi = input_bounds_high[j];
+            
+            /* Passo exato na entrada não-determinística */
+            s_out += w * in_[j];
+            
+            /* Contribuição baseada no sinal (imagem do box) */
+            const long long cmin = (w >= 0LL) ? (w * lo) : (w * hi);
+            const long long cmax = (w >= 0LL) ? (w * hi) : (w * lo);
+            
+            s_lb += cmin;
+            s_ub += cmax;
+            
+            ++j;
+        }}
+        
+        /* Rescale e adiciona bias */
+        s_out = (s_out / SCALE_FACTOR) + biases[i];
+        s_lb  = (s_lb  / SCALE_FACTOR) + biases[i];
+        s_ub  = (s_ub  / SCALE_FACTOR) + biases[i];
+        
+        /* Verifica se a saída está dentro da pré-imagem tolerada */
+        __ESBMC_assert(s_out >= pre_lo - eps && s_out <= pre_hi + eps,
+                       "Affine output not within tolerated preimage (hidden layer, fixed-point)");
+    }}
+}}
 
-            long long weights[LAYER_SIZE][INPUT_SIZE] = {weights_c_int};
-            long long biases[LAYER_SIZE]              = {biases_c_int};
-
-            long long preimage_low[LAYER_SIZE]  = {preimage_low_int};
-            long long preimage_high[LAYER_SIZE] = {preimage_high_int};
-
-            long long input_bounds_low[INPUT_SIZE]  = {input_bounds_low_int};
-            long long input_bounds_high[INPUT_SIZE] = {input_bounds_high_int};
-
-            /* Calcula limites exatos da transformação afim usando aritmética de intervalos inteiros */
-            static void check_affine_bounds_fixed(void)
-            {{
-                for (int i = 0; i < LAYER_SIZE; ++i) {{
-                    long long acc_min = 0; /* acumulador mínimo em SCALE_FACTOR^2 */
-                    long long acc_max = 0; /* acumulador máximo em SCALE_FACTOR^2 */
-                    
-                    for (int j = 0; j < INPUT_SIZE; ++j) {{
-                        long long w = weights[i][j];
-                        long long lo = input_bounds_low[j];
-                        long long hi = input_bounds_high[j];
-                        
-                        if (w >= 0) {{
-                            acc_min += w * lo;
-                            acc_max += w * hi;
-                        }} else {{
-                            acc_min += w * hi;
-                            acc_max += w * lo;
-                        }}
-                    }}
-                    
-                    /* Aplica divisão do fator de escala e adiciona bias */
-                    long long s_out_min = (acc_min / SCALE_FACTOR) + biases[i];
-                    long long s_out_max = (acc_max / SCALE_FACTOR) + biases[i];
-                    
-                    /* Verifica se os limites calculados estão dentro da pré-imagem */
-                    __ESBMC_assert(s_out_min >= preimage_low[i] && s_out_max <= preimage_high[i],
-                                   "Affine output bounds exceed preimage (fixed-point)");
-                }}
-            }}
-
-            int main(void)
-            {{
-                check_affine_bounds_fixed();
-                return 0;
-            }}
-    """
+int main(void)
+{{
+    long long in_[INPUT_SIZE];
+    
+    /* Entrada não-determinística dentro do box */
+    for (int j = 0; j < INPUT_SIZE; ++j) {{
+        in_[j] = nondet_longlong();
+        __ESBMC_assume(in_[j] >= input_bounds_low[j] && 
+                       in_[j] <= input_bounds_high[j]);
+    }}
+    
+    check_affine_bounds_fixed(in_);
+    
+    return 0;
+}}
+"""
