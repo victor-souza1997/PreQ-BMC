@@ -1074,7 +1074,6 @@ class GPEncoding:
             "--loop-invariant",                 # Usa invariantes de loop para melhor verificação
             "--function", "main",               # Verifica função main
             "--z3",                            # Usa solver Z3 SMT
-            "--floatbv",                       # Suporte para aritmética de ponto flutuante
             "--interval-analysis",             # Análise de intervalos para otimização
             "--incremental-bmc",               # BMC incremental para melhor performance
             "--no-unwinding-assertions",       # Desabilita assertions de unwinding de loops
