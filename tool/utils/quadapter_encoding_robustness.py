@@ -824,17 +824,23 @@ class GPEncoding:
 
                 # Get quantized parameters (same as original)
                 logging.debug(f"Weights before quantization: {w}")
-                qu_w = quantize_int(w, all_bit, frac_bit) / (2 ** frac_bit)
-                qu_b = quantize_int(b, all_bit, frac_bit) / (2 ** frac_bit)
-                logging.debug(f"Quantized weights: {qu_w}")
-                logging.debug(f"Quantized biases: {qu_b}")
-                quit()
+                qu_w_int = quantize_int(w, all_bit, frac_bit) #/ (2 ** frac_bit)
+                qu_b_int = quantize_int(b, all_bit, frac_bit) #/ (2 ** frac_bit)
+                logging.debug(f"Quantized weights: {qu_w_int}")
+                logging.debug(f"Quantized biases: {qu_b_int}")
+                  # Para uso posterior (DeepPoly), converte de volta para float
+                qu_w_float = qu_w_int / (2 ** frac_bit)
+                qu_b_float = qu_b_int / (2 ** frac_bit)
+
+                logging.debug(f"about to gen the C code for ESBMC verification for Layer {cur_layer.layer_index} with Q={all_bit}, F={frac_bit}")
+                logging.debug(f"cur_layer: {cur_layer}, in_layer: {in_layer}, qu_w: {qu_w_float}, qu_b: {qu_b_float}, frac_bit: {frac_bit}, all_bit: {all_bit}, in_layer_index: {in_layer_index}")
                 # === ESBMC VERIFICATION REPLACEMENT ===
                 # Instead of Gurobi optimization, call ESBMC
                 esbmc_result = self.verify_layer_with_esbmc(
-                    cur_layer, in_layer, qu_w, qu_b, 
+                    cur_layer, in_layer, qu_w_int, qu_b_int, 
                     frac_bit, all_bit, in_layer_index
                 )
+                
                 
                 if esbmc_result == "VERIFIED":
                     print(f"ESBMC verified quantization [Q={all_bit}, F={frac_bit}] for Layer {cur_layer.layer_index}")
@@ -848,13 +854,7 @@ class GPEncoding:
                     # Update weights and algebra (same as original)
                     self.update_quantized_weights_affine(in_layer, cur_layer, all_bit, frac_bit, frac_bit, in_layer_index)
                     
-                    if cur_layer.layer_index < (len(self.dense_layers) + 1):
-                        # Update DeepPoly algebra for hidden layers
-                        self.update_deepPoly_algebra(cur_layer, qu_w, qu_b, in_layer_index)
-                    else:
-                        self.output_layer.qu_lb = pre_mul_qu_lb_deepPoly
-                        self.output_layer.qu_ub = pre_mul_qu_ub_deepPoly
-                        
+
             if not ifFound:
                 print(f"ESBMC cannot verify any quantization for layer {cur_layer.layer_index}")
                 return False, None, None, None
@@ -886,7 +886,7 @@ class GPEncoding:
         
         return result
 
-    def generate_esbmc_verification_code(self, cur_layer, in_layer, qu_w, qu_b,
+    def generate_esbmc_verification_code(self, cur_layer, in_layer, qu_w_int, qu_b_int,
                                         frac_bit, all_bit, layer_index):
         """
         Gera código C para verificação ESBMC usando aritmética de ponto fixo (inteiros).
@@ -902,12 +902,8 @@ class GPEncoding:
 
         # ==================== QUANTIZAÇÃO DOS PARÂMETROS PARA INTEIROS ====================
         # Converte pesos e biases para representação de ponto fixo (inteiros)
-        w_int = qu_w#quantize_int(cur_layer.layer_paras[0], all_bit, frac_bit).astype(np.int32)
-        b_int = qu_b#quantize_int(cur_layer.layer_paras[1], all_bit, frac_bit).astype(np.int32)
-
-        # Converte arrays numpy para strings de inicialização C
-        weights_c_int = self.numpy_to_c_int_array(w_int)
-        biases_c_int  = self.numpy_to_c_int_array(b_int)
+        weights_c_int = self.numpy_to_c_int_array(qu_w_int)  # ← Já é inteiro!
+        biases_c_int  = self.numpy_to_c_int_array(qu_b_int)  # ← Já é inteiro!
         
         # ==================== CONFIGURAÇÃO DOS BOUNDS DE PRÉ-IMAGEM ====================
         # Usa bounds relaxados se disponíveis, senão usa bounds concretos
@@ -1112,7 +1108,7 @@ class GPEncoding:
             
             # ==================== ANÁLISE DOS RESULTADOS ====================
             # Parseia a saída do ESBMC para determinar o resultado da verificação
-            if "VERIFICATION SUCCESSFUL" in result.stdout:
+            if "VERIFICATION SUCCESSFUL" in result.stderr:
                 print(f"ESBMC verification PASSED for layer {layer_index}")
                 return "VERIFIED"                          # Propriedade verificada com sucesso
             elif "VERIFICATION FAILED" in result.stdout:
