@@ -1,5 +1,6 @@
 # ==================== IMPORTAÇÕES E CONFIGURAÇÕES INICIAIS ====================
 import argparse
+from pathlib import Path
 import numpy as np
 from utils.deep_models import *
 from utils.quadapter_encoding_robustness import *
@@ -7,9 +8,12 @@ from utils.quadapter_utils import *
 from utils.data.iris import load_train_test_data
 from utils.data.load_onnx import *
 from gurobipy import GRB
-import logging 
+import time
+from sklearn.preprocessing import MinMaxScaler
+import logging
 
-
+# Configure basic logging to the console
+logging.basicConfig(filename='logs/quadapter_robustness_main.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 # Define o valor máximo para restrições (Big-M method usado em programação linear inteira)
 bigM = GRB.MAXINT
 
@@ -52,19 +56,69 @@ args = parser.parse_args()
 
 # ==================== CARREGAMENTO E PRÉ-PROCESSAMENTO DOS DADOS ====================
 
+
+def _infer_dense_arch_from_h5(weight_file: str | Path) -> list[int]:
+    """Infer [input_dim, hidden..., output_dim] from a Keras weight .h5 file."""
+    weight_path = Path(weight_file)
+    if not weight_path.exists() or weight_path.suffix.lower() != ".h5":
+        return []
+    try:
+        import h5py  # type: ignore
+    except ImportError:
+        return []
+
+    kernel_shapes: list[tuple[int, int]] = []
+    try:
+        with h5py.File(weight_path, "r") as h5f:
+            layer_names = h5f.attrs.get("layer_names", [])
+            if isinstance(layer_names, np.ndarray):
+                layer_names = layer_names.tolist()
+            for raw_name in layer_names:
+                layer_name = raw_name.decode("utf-8") if isinstance(raw_name, bytes) else raw_name
+                if layer_name not in h5f:
+                    continue
+                layer_group = h5f[layer_name]
+                weight_names = layer_group.attrs.get("weight_names", [])
+                if isinstance(weight_names, np.ndarray):
+                    weight_names = weight_names.tolist()
+                for raw_weight in weight_names:
+                    weight_name = raw_weight.decode("utf-8") if isinstance(raw_weight, bytes) else raw_weight
+                    dataset_key = weight_name.split("/", maxsplit=1)[-1]
+                    if not dataset_key.endswith("kernel:0"):
+                        continue
+                    if dataset_key in layer_group:
+                        dataset = layer_group[dataset_key]
+                    elif weight_name in layer_group:
+                        dataset = layer_group[weight_name]
+                    else:
+                        continue
+                    kernel_shapes.append(tuple(int(d) for d in dataset.shape))
+    except OSError:
+        return []
+
+    if not kernel_shapes:
+        return []
+
+    inferred = [kernel_shapes[0][0]]
+    inferred.extend(shape[1] for shape in kernel_shapes)
+    return inferred
+
 # Carrega o dataset apropriado com base no argumento fornecido
+input_scale = 255.0
 if args.dataset == "fashion-mnist":
     # Fashion-MNIST: dataset de roupas e acessórios (28x28, 10 classes)
     (x_train, y_train), (x_test, y_test) = tf.keras.datasets.fashion_mnist.load_data()
 elif args.dataset == "mnist":
     # MNIST: dataset de dígitos manuscritos (28x28, 10 classes)
     (x_train, y_train), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
-    print("x_train data shape:", x_train.shape)
-    print("y_train data shape:", y_train.shape) 
-    print("x_test data shape:", x_test.shape)
 elif args.dataset == "iris":
     # Iris: dataset clássico de flores Iris (4 features, 3 classes)
     (x_train, x_test), (y_train, y_test) = load_train_test_data()
+    input_scale = 1.0
+    logging.debug(f"x_train data shape:{x_train.shape}")
+    logging.debug(f"y_train data shape: {y_train.shape}") 
+    logging.debug(f"x_test data shape: {x_test.shape}")
+    logging.debug(f"y_test data shape: {y_test.shape}")
     #input()
 else:
     raise ValueError("Unknown dataset '{}'".format(args.dataset))
@@ -79,8 +133,8 @@ y_test = np.asarray(y_test)
 y_train = y_train.flatten()
 y_test = y_test.flatten()
 
-print("y_train data shape after flatten:", y_train.shape)
-print("y_test data shape after flatten:", y_test.shape)
+logging.debug(f"y_train data shape after flatten: {y_train.shape}")
+logging.debug(f"y_test data shape after flatten: {y_test.shape}" )
 
 # Redimensiona as imagens 28x28 para vetores 784x1 e converte para float32
 # Mantém valores no intervalo [0, 255] (sem normalização ainda)
@@ -103,7 +157,32 @@ else:
 
 num_classes = int(np.max(y_train)) + 1
 
+if args.dataset == "iris":
+    weight_path = Path(f"benchmark/{args.dataset}/{args.dataset}_weight.h5")
+else:
+    weight_path = Path(f"benchmark/{args.dataset}/{args.dataset}_{args.arch}_weight.h5")
+
+inferred_arch = _infer_dense_arch_from_h5(weight_path)
+blkset_override: list[int] = []
+if inferred_arch:
+    inferred_input = inferred_arch[0]
+    blkset_override = inferred_arch[1:]
+    if inferred_input != input_dim:
+        print(
+            f"Aviso: input_dim inferido ({inferred_input}) difere do dataset ({input_dim}). "
+            "Usando valor do arquivo de pesos."
+        )
+        input_dim = inferred_input
+    inferred_classes = blkset_override[-1]
+    if inferred_classes != num_classes:
+        print(
+            f"Aviso: número de classes inferido ({inferred_classes}) difere do dataset ({num_classes}). "
+            "Usando valor do arquivo de pesos."
+        )
+        num_classes = inferred_classes
+
 # ==================== CONSTRUÇÃO DA ARQUITETURA DA REDE ====================
+logging.info("Starting Quadapter Robustness Main")
 
 # Parseia a string de arquitetura (ex: "1blk_100" -> ["1blk", "100"])
 archMnist = args.arch.split('_')
@@ -112,9 +191,6 @@ archMnist = args.arch.split('_')
 # Ex: "1blk" -> "1"
 numBlk = archMnist[0][:-3]
 
-# Inicializa a arquitetura com a dimensionalidade de entrada inferida
-arch = [input_dim]
-
 # Converte os tamanhos das camadas ocultas para inteiros
 # Ex: ["100", "50"] -> [100, 50]
 blkset = list(map(int, archMnist[1:]))
@@ -122,56 +198,98 @@ blkset = list(map(int, archMnist[1:]))
 # Adiciona a camada de saída com o número de classes da tarefa
 blkset.append(num_classes)
 
+if blkset_override:
+    blkset = blkset_override
+
 # Combina entrada + camadas ocultas + saída
 # Ex: arch = [input_dim, 100, num_classes] para uma rede com 1 camada oculta
-arch += blkset
+arch = [input_dim] + blkset
 
 # Verifica se o número de blocos especificado corresponde à arquitetura parseada
 # (número de camadas - 1, excluindo a camada de saída)
-assert int(numBlk) == len(blkset) - 1
+try:
+    expected_blocks = int(numBlk)
+except ValueError:
+    expected_blocks = len(blkset) - 1
+if expected_blocks != len(blkset) - 1:
+    print(
+        f"Aviso: número de blocos inferido ({len(blkset) - 1}) "
+        f"diferente do fornecido via --arch ({expected_blocks}). Usando configuração dos pesos."
+    )
 # ==================== CRIAÇÃO E CARREGAMENTO DO MODELO ====================
-print("Architecture is: ", arch)
-print("Number of blocks is: ", numBlk)
-print("Numer of blkset is: ", blkset)
+logging.debug(f"Architecture is: {arch}")
+logging.debug(f"Number of hidden blocks: {len(blkset) - 1}")
+logging.debug(f"Layer widths (excluding input): {blkset}")
 # Cria o modelo de rede neural profunda com a arquitetura especificada
 model = DeepModel(
-    arch,  # Lista com tamanhos das camadas [camadas_ocultas..., num_classes]
+    blkset,  # Lista com tamanhos das camadas [camadas_ocultas..., num_classes]
     last_layer_signed=True,  # Última camada usa valores com sinal (logits)
+    input_scale=input_scale,
 )
-
-# Define o caminho dos pesos pré-treinados baseado no dataset e arquitetura
-
-if args.dataset == "iris":
-    weight_path = "benchmark/{}/{}_weight.h5".format(args.dataset, args.dataset)
-else:
-    weight_path = "benchmark/{}/{}_{}_weight.h5".format(args.dataset, args.dataset, args.arch)
 
 # Compila o modelo especificando:
 # - Otimizador: Adam com learning rate baixo
 # - Função de perda: Cross-entropy categórica esparsa (logits não normalizados)
 # - Métrica: Acurácia categórica esparsa
+"""
 model.compile(
     optimizer=tf.keras.optimizers.Adam(0.0001),
     loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=[tf.keras.metrics.SparseCategoricalAccuracy()],
 )
+"""
+#if args.dataset == "iris":
+#    scaler = MinMaxScaler()
+#    x_train = scaler.fit_transform(x_train)
+#    x_test = scaler.transform(x_test)
+#    x_train = x_train.astype(np.float32)
+#    x_test = x_test.astype(np.float32)
+
+#model.fit(x_train, y_train, epochs=20, batch_size=16, verbose=0)
 
 # Constrói o modelo com o formato de entrada correto (None, input_dim)
 # None permite batch size variável
 
 print("input dim is: ", input_dim)
 model.build((None, input_dim))
-model.summary()
 # Carrega os pesos pré-treinados do arquivo .h5
-model.load_weights(weight_path)  # input: 0~255
+model.load_weights(str(weight_path))  # input: 0~255
+
 
 # ==================== VERIFICAÇÃO DA PREDIÇÃO ORIGINAL ====================
 
 # Seleciona a amostra de teste com base no sample_id fornecido
+print("Sample ID is: ", args.sample_id)
+logging.debug(f"get weight form the model {model.get_weights()}")
+
+for i in range(30):
+    logging.debug(f"x_test[{i}] is: {x_train[i]}")
+    model_out = model.predict(np.expand_dims(x_train[i], 0))[0]
+    # Obtém a classe predita (índice do maior logit)
+    model_predict = np.argmax(model_out)
+
+    # Obtém a classe verdadeira (ground truth) da amostra
+    original_prediction = y_train[i]
+
+    logging.debug(f"\nModel output is: {model_out}")
+    logging.debug(f"\nModel prediction is: { model_predict}")
+
+    # Verifica se a predição está correta
+    # Só verificamos amostras que o modelo classifica corretamente
+    logging.debug(f"\nOriginal label is: {original_prediction}")
+    logging.debug("Checking whether the original prediction is correct...")
+    logging.debug("If correct, then proceed to verified quantization...")
+    try:
+        assert model_predict == original_prediction
+    except AssertionError:
+        logging.debug("The prediction is incorrect. Skip to the next one.")
+        continue
+quit()
 x_input = x_test[args.sample_id]
 
 # Faz a predição para a amostra selecionada (adiciona dimensão batch)
 # Retorna array com logits para cada classe
+print("x_input is: ", x_input)
 model_out = model.predict(np.expand_dims(x_test[args.sample_id], 0))[0]
 
 # Obtém a classe predita (índice do maior logit)
@@ -191,28 +309,29 @@ print("If correct, then proceed to verified quantization...")
 assert model_predict == original_prediction
 
 print("original_prediction is: ", original_prediction, '\n')
-
+quit()
 # ==================== DEFINIÇÃO DA REGIÃO DE ENTRADA (INPUT BOX) ====================
-
 # Define os limites inferior e superior da região de perturbação L∞
 # x_low: entrada original - epsilon (limitado ao intervalo [0, 255])
 # x_high: entrada original + epsilon (limitado ao intervalo [0, 255])
 # np.clip garante que os valores permaneçam no domínio válido das imagens
-x_low, x_high = np.clip(x_input - args.eps, 0, 255), np.clip(x_input + args.eps, 0, 255)
+clip_low = 0.0
+clip_high = input_scale if input_scale not in (None, 0) else np.max(x_train)
+x_low, x_high = np.clip(x_input - args.eps, clip_low, clip_high), np.clip(x_input + args.eps, clip_low, clip_high)
 
 # ==================== CRIAÇÃO DO MODELO DE VERIFICAÇÃO (GUROBI) ====================
 
 # Cria o modelo de codificação Gurobi para verificação de quantização
 # Normaliza os valores de entrada dividindo por 255 (converte [0,255] -> [0,1])
 # Isso é necessário porque a rede foi treinada com entradas normalizadas
-dnn_gurobi_model = GPEncoding(arch, model, args, original_prediction, x_low / 255, x_high / 255)
+dnn_gurobi_model = GPEncoding(arch, model, args, original_prediction, x_low / input_scale, x_high / input_scale)
 
 # ==================== PROPAGAÇÃO FORWARD NA DNN ====================
 
 # Executa forward pass na rede neural para obter os valores reais de saída
 # Normaliza a entrada dividindo por 255 (mesmo que durante o treinamento)
 # Isso estabelece os valores de referência para a verificação
-res = forward_DNN(x_input / 255, dnn_gurobi_model)
+res = forward_DNN(x_input / input_scale, dnn_gurobi_model)
 
 # ==================== VERIFICAÇÃO DE QUANTIZAÇÃO ====================
 
@@ -227,8 +346,8 @@ start_time = time.time()
 # - qu_frac_list: lista de bits fracionários por camada (para representar decimais)
 # - qu_int_list: lista de bits inteiros por camada (para representar parte inteira)
 ifSucc, qu_list, qu_frac_list, qu_int_list = dnn_gurobi_model.verified_quant(
-    np.float32(x_low / 255),    # Limite inferior normalizado da região de entrada
-    np.float32(x_high / 255))   # Limite superior normalizado da região de entrada
+    np.float32(x_low / input_scale),    # Limite inferior normalizado da região de entrada
+    np.float32(x_high / input_scale))   # Limite superior normalizado da região de entrada
 
 # Marca o tempo de término e calcula o tempo total de execução
 finish_time = time.time()

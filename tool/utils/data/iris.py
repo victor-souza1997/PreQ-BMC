@@ -253,7 +253,10 @@ def load_train_test_data(
     return (x_train, x_test), (y_train, y_test)
 if __name__ == "__main__":
     (x_train, x_test), (y_train, y_test) = load_train_test_data()
+    print(x_test[0])
+    print(y_test[0])
     #for (data, target) in train_loader:
     #    print("Data:", data)
     #    print("Target:", target)
         
+0.6944444  0.33333334 0.6440678  0.5416667

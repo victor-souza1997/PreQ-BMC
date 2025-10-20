@@ -21,12 +21,20 @@ except ImportError as exc:  # pragma: no cover - handled at runtime
         "Install it with `pip install tensorflow`."
     ) from exc
 
-from load_onnx import (
-    extract_gemm_params,
-    infer_onnx_input_dim,
-    load_onnx_model,
-    load_onnx_weights_into_keras,
-)
+try:
+    from .load_onnx import (  # type: ignore
+        extract_gemm_params,
+        infer_onnx_input_dim,
+        load_onnx_model,
+        load_onnx_weights_into_keras,
+    )
+except ImportError:  # pragma: no cover - module executed as script
+    from load_onnx import (  # type: ignore
+        extract_gemm_params,
+        infer_onnx_input_dim,
+        load_onnx_model,
+        load_onnx_weights_into_keras,
+    )
 
 LOGGER = logging.getLogger(__name__)
 
@@ -283,7 +291,6 @@ def main() -> None:
         weights_output_path=args.weights_output,
         overwrite=args.overwrite,
     )
-
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
     main()
