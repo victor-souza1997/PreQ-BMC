@@ -51,8 +51,8 @@ static int verify_classification(const long long out_[LAYER_SIZE])
     long long max_other = LLONG_MIN / 2; /* evita overflow nas comparações */
     
     int i = 0;
-    __invariant(0 <= i && i <= LAYER_SIZE);
-    __invariant(max_other <= target);
+    loop_invariant(0 <= i && i <= LAYER_SIZE);
+    loop_invariant(max_other <= target);
     
     while (i < LAYER_SIZE)
     {{

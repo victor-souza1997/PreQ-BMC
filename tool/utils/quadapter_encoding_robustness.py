@@ -867,6 +867,9 @@ class GPEncoding:
         esbmc_code = self.generate_esbmc_verification_code(
             cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit, layer_index
         )
+        if esbmc_code is None:
+            print("Output layer ESBMC verification code generation not implemented.")
+            return "UNVERIFIED"
 
         # save layer in ouput/layers
         with open(f"output/layers/layer_{layer_index}_Q{all_bit}_F{frac_bit}.c", 'w') as f:
@@ -941,8 +944,10 @@ class GPEncoding:
         is_output_layer = (cur_layer.layer_index == len(self.dense_layers) + 1)
 
         if is_output_layer:
+            
             # ==================== CAMADA DE SAÍDA ====================
             # Verifica propriedade de classificação: classe alvo deve ser máxima
+            return None
             return outerlayer_fixed_int(
                 in_layer.layer_size, cur_layer.layer_size,   # Tamanhos das camadas
                 weights_c_int, biases_c_int,                 # Parâmetros quantizados

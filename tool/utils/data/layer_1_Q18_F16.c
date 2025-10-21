@@ -17,11 +17,21 @@ long long biases[LAYER_SIZE]              = {71861, 8346, 12687, -12176, 1318, -
 long long preimage_low[LAYER_SIZE]  = {287623, 53481, -174387, -31393, -11663, -87508, -90671, -24210, -20887, -36220, -12795, 3603, -25387, -49611, -7826};
 long long preimage_high[LAYER_SIZE] = {642890, 200136, 34170, 7275, 2921, -32561, 74551, 9984, 6801, 1408, 9860, 51558, -8129, -11533, 8005};
 
-long long input_bounds_low[INPUT_SIZE]  = {26651, 53957, 1566, 2075};
-long long input_bounds_high[INPUT_SIZE] = {27963, 55269, 2877, 3387};
+long long input_bounds_low[INPUT_SIZE]  = {26651, 53957, 1566, 2075, 0,0,0,0,0,0,0,0,0,0,0};
+long long input_bounds_high[INPUT_SIZE] = {27963, 55269, 2877, 3387, 0,0,0,0,0,0,0,0,0,0,0};
 
 static inline long long llabs(long long x) {
     return x < 0LL ? -x : x;
+}
+static inline long long div_floor_ll(long long x, long long k) {
+  // k > 0 no nosso caso
+  if (x >= 0) return x / k;
+  // floor para negativo
+  return -(( -x + k - 1 ) / k);
+}
+static inline long long div_ceil_ll(long long x, long long k) {
+  if (x >= 0) return (x + k - 1) / k; // ceil para positivo
+  return x / k;                        // trunc(a/b) já é ceil quando x<0
 }
 
 /* Camada afim em ponto fixo sobre um box de entrada: mantém o invólucro s_lb <= s_out <= s_ub */
@@ -44,13 +54,15 @@ static void check_affine_bounds_fixed(const long long in_[INPUT_SIZE])
         const long long eps = abs_tol + (rel_tol_num * range) / rel_tol_den;
         
         int j = 0;
-        __invariant(0 <= j && j <= INPUT_SIZE);
-        __invariant(s_lb <= s_out && s_out <= s_ub);
+        //__invariant(0 <= j && j <= INPUT_SIZE);
+        //__invariant(s_lb <= s_out && s_out <= s_ub);
         
+        //__ESBMC_loop_invariant(0 <= j && j <= INPUT_SIZE && s_lb <= s_out && s_out <= s_ub);
+        loop_invariant(0 <= j && j <= INPUT_SIZE);
+        loop_invariant(s_lb <= s_out && s_out <= s_ub);
         while (j < INPUT_SIZE)
         {
-            //__ESBMC_loop_invariant(0 <= j && j <= INPUT_SIZE &&
-            //                       s_lb <= s_out && s_out <= s_ub);
+        _decreases(INPUT_SIZE - j);
             
             const long long w  = weights[i][j];
             const long long lo = input_bounds_low[j];
@@ -70,14 +82,19 @@ static void check_affine_bounds_fixed(const long long in_[INPUT_SIZE])
         }
         
         /* Rescale e adiciona bias */
-        s_out = (s_out / SCALE_FACTOR) + biases[i];
-        s_lb  = (s_lb  / SCALE_FACTOR) + biases[i];
-        s_ub  = (s_ub  / SCALE_FACTOR) + biases[i];
+         const long long s_out_q = (s_out / SCALE_FACTOR) + biases[i];
+    const long long s_lb_q  = div_floor_ll(s_lb, SCALE_FACTOR) + biases[i];
+    const long long s_ub_q  = div_ceil_ll (s_ub, SCALE_FACTOR) + biases[i];
+
         
         /* verifica se a saida esta dentro da preimagem esperada */
-        __ESBMC_assert(s_out >= pre_lo - eps && s_out <= pre_hi + eps,
-                       "affine output not within tolerated preimage");
-    }
+        __ESBMC_assert(s_lb_q <= s_out_q && s_out_q <= s_ub_q,
+                   "internal box image invariant broken after rescale");
+        __ESBMC_assert(s_out_q >= pre_lo - eps && s_out_q <= pre_hi + eps,
+                   "affine output not within tolerated preimage");
+      
+                    }
+
 }
 
 int main(void)
