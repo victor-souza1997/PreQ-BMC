@@ -9,6 +9,12 @@ import time                                  # Medição de tempo de execução
 import numpy as np                           # Operações numéricas e arrays
 import pdb
 import logging
+from utils.logs import LogFile
+
+# Configuração do logger para o módulo
+log_instance = LogFile(log_file_path='logs/quadapter_esbmc_output.log', log_name='quadapter_esbmc_output')
+log_esbmc = log_instance.get_logger()
+
 
 logging.basicConfig(filename='logs/quadapter_encoding_robustness.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 # ==================== CLASSE PARA CODIFICAÇÃO DE CAMADAS ====================
@@ -1091,6 +1097,7 @@ class GPEncoding:
             "--no-pointer-check",              # Desabilita verificação de ponteiros
             "--timeout", "900",                # Timeout de 15 minutos por verificação
             "--verbosity", "10"                # Nível máximo de verbosidade para debug
+            , "--print-stack-traces"             # Imprime stack traces para facilitar debug
         ]
         
         try:
@@ -1109,9 +1116,14 @@ class GPEncoding:
             # Imprime informações de debug para monitoramento
             print(f"Result stdout: {result.stdout[-500:]}")  # Últimos 500 chars para debug
             print("ESBMC return code:", result.returncode)
-            print("--- STDOUT (tail) ---\n", (result.stdout or "")[-2000:])
-            print("--- STDERR (tail) ---\n", (result.stderr or "")[-2000:])
-            
+            print("--- STDOUT (tail) ---\n", (result.stdout or "")[-8000:])
+            print("--- STDERR (tail) ---\n", (result.stderr or "")[-8000:])
+            log_esbmc.debug(f"Result stdout: {result.stdout[-5000:]}")  # Últimos 500 chars para debug
+            log_esbmc.debug(f"ESBMC return code: {result.returncode}")
+            log_esbmc.debug(f"--- STDOUT (tail) ---\n {(result.stdout or '')[-20000:]}")
+            log_esbmc.debug(f"--- STDERR (tail) ---\n {(result.stderr or '')[-20000:]}")
+        
+
             # ==================== ANÁLISE DOS RESULTADOS ====================
             # Parseia a saída do ESBMC para determinar o resultado da verificação
             if "VERIFICATION SUCCESSFUL" in result.stderr:

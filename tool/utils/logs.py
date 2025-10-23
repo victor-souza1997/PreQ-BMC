@@ -11,7 +11,7 @@ class LogFile:
         self,
         log_file_path: str,
         log_name: str = __name__,
-        log_level: int = logging.INFO,
+        log_level: int = logging.DEBUG,
         log_format: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         max_bytes: int = 10*1024*1024,  # 10 MB
         backup_count: int = 5
