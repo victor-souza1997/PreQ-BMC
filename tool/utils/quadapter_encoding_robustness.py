@@ -7,7 +7,7 @@ from gurobipy import GRB                     # Constantes e tipos do Gurobi
 import gurobipy as gp                        # Solver MILP (Mixed Integer Linear Programming)
 import time                                  # Medição de tempo de execução
 import numpy as np                           # Operações numéricas e arrays
-
+import pdb
 import logging
 
 logging.basicConfig(filename='logs/quadapter_encoding_robustness.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -800,6 +800,8 @@ class GPEncoding:
         in_layer_index = -1
 
         for cur_layer in nonInputLayers:
+
+            logging.info(f"This neural network has {nonInputLayers} hidden layers and the current in_layer_index is {cur_layer}")
             in_layer_index += 1
             
             if cur_layer.layer_index == 1:
