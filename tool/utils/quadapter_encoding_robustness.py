@@ -950,7 +950,14 @@ class GPEncoding:
         # ==================== SELEÇÃO DO TEMPLATE DE VERIFICAÇÃO ====================
         # Determina se é camada de saída ou camada oculta
         is_output_layer = (cur_layer.layer_index == len(self.dense_layers) + 1)
-
+        #pdb.set_trace()
+        return innerlayer_fixed_int(
+                cur_layer.layer_size, 4,   # Tamanhos das camadas
+                weights_c_int, biases_c_int,                 # Parâmetros quantizados
+                preimage_low_c_int, preimage_high_c_int,     # Pré-imagem relaxada
+                input_bounds_low_int, input_bounds_high_int, # Bounds da região de entrada
+                SCALE                                        # Fator de escala
+            )
         if is_output_layer:
             
             # ==================== CAMADA DE SAÍDA ====================
