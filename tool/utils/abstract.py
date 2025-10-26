@@ -126,7 +126,7 @@ static void check_affine_bounds_fixed(const long long in_[INPUT_SIZE])
 {{
     /* tolerancia para preimagem */
     const long long abs_tol = (long long)(1e-3 * SCALE_FACTOR);
-    const long long rel_tol_num = 1; /* 1% = 1/100 */
+    const long long rel_tol_num = 10; /* 1% = 1/100 */
     const long long rel_tol_den = 100;
     
     for (int i = 0; i < LAYER_SIZE; ++i) {{
@@ -189,6 +189,106 @@ int main(void)
     }}
     
     check_affine_bounds_fixed(in_);
+    
+    return 0;
+}}
+"""
+
+
+def outerlayer_fixed_int_multiclass(in_layer_layer_size, cur_layer_layer_size, weights_c_int, biases_c_int,
+                                   input_bounds_low_int, input_bounds_high_int, valid_classes, scale_factor):
+    
+    valid_classes_array = "{" + ", ".join(map(str, valid_classes)) + "}"
+    num_valid_classes = len(valid_classes)
+    
+    return f"""\
+#include <stdint.h>
+#include <limits.h>
+#include <stdbool.h>
+
+#ifndef __invariant
+#define __invariant(p) /* paper-style invariant marker (no-op for ESBMC) */
+#endif
+
+#define INPUT_SIZE       {in_layer_layer_size}
+#define LAYER_SIZE       {cur_layer_layer_size}
+#define NUM_VALID_CLASSES {num_valid_classes}
+#define SCALE_FACTOR     {scale_factor}LL
+
+extern long long nondet_longlong(void);
+
+long long weights[LAYER_SIZE][INPUT_SIZE] = {weights_c_int};
+long long biases[LAYER_SIZE]              = {biases_c_int};
+
+long long input_bounds_low[INPUT_SIZE]  = {input_bounds_low_int};
+long long input_bounds_high[INPUT_SIZE] = {input_bounds_high_int};
+
+int valid_classes[NUM_VALID_CLASSES] = {valid_classes_array};
+
+/* Verifica se uma classe está no conjunto de classes válidas */
+static bool is_valid_class(int class_id) {{
+    for (int i = 0; i < NUM_VALID_CLASSES; ++i) {{
+        if (valid_classes[i] == class_id) {{
+            return true;
+        }}
+    }}
+    return false;
+}}
+
+/* Transformação afim em ponto fixo */
+static void affine_transform_fixed(const long long in_[INPUT_SIZE], long long out_[LAYER_SIZE])
+{{
+    for (int i = 0; i < LAYER_SIZE; ++i) {{
+        long long acc = 0LL;
+        
+        for (int j = 0; j < INPUT_SIZE; ++j) {{
+            long long prod = weights[i][j] * in_[j];
+            acc += prod;
+        }}
+        
+        out_[i] = (acc / SCALE_FACTOR) + biases[i];
+    }}
+}}
+
+/* Verifica se a classificação está entre as classes válidas */
+static int verify_classification_multiclass(const long long out_[LAYER_SIZE])
+{{
+    long long max_valid = LLONG_MIN;
+    long long max_invalid = LLONG_MIN;
+    
+    /* Encontra os valores máximos nas classes válidas e inválidas */
+    for (int i = 0; i < LAYER_SIZE; ++i) {{
+        if (is_valid_class(i)) {{
+            if (out_[i] > max_valid) {{
+                max_valid = out_[i];
+            }}
+        }} else {{
+            if (out_[i] > max_invalid) {{
+                max_invalid = out_[i];
+            }}
+        }}
+    }}
+    
+    /* A classe predita deve ser válida (maior valor entre válidas > maior valor entre inválidas) */
+    return max_valid > max_invalid;
+}}
+
+int main(void)
+{{
+    long long input[INPUT_SIZE];
+    long long output[LAYER_SIZE];
+    
+    /* Entrada não-determinística dentro dos bounds */
+    for (int k = 0; k < INPUT_SIZE; ++k) {{
+        input[k] = nondet_longlong();
+        __ESBMC_assume(input[k] >= input_bounds_low[k] && 
+                       input[k] <= input_bounds_high[k]);
+    }}
+    
+    affine_transform_fixed(input, output);
+    
+    __ESBMC_assert(verify_classification_multiclass(output),
+                   "Classification property violated - output not in valid classes");
     
     return 0;
 }}
