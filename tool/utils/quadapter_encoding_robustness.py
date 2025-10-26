@@ -15,6 +15,8 @@ from utils.logs import LogFile
 log_instance = LogFile(log_file_path='logs/quadapter_esbmc_output.log', log_name='quadapter_esbmc_output')
 log_esbmc = log_instance.get_logger()
 
+log_instance_parameters = LogFile(log_file_path='logs/quadapater_parameters.log', log_name='quadapater_parameters')
+log_parameters = log_instance_parameters.get_logger()
 
 logging.basicConfig(filename='logs/quadapter_encoding_robustness.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 # ==================== CLASSE PARA CODIFICAÇÃO DE CAMADAS ====================
@@ -369,6 +371,7 @@ class GPEncoding:
             ub = self.deepPolyNets_DNN.layers[-1].neurons[out_index].concrete_upper_noClip
             self.output_layer.lb[out_index] = lb
             self.output_layer.ub[out_index] = ub
+            logging.debug(f"self.output_layer.lb[{out_index}] = {lb}, self.output_layer.ub[{out_index}] = {ub}")
 
     # TODO: Design a composition method (Currently Not in use)
     # if abstraction-based method compute a relatively tight preimage, we turn to use MILP-based method
@@ -804,7 +807,8 @@ class GPEncoding:
         nonInputLayers = self.dense_layers.copy()
         nonInputLayers.append(self.output_layer)
         in_layer_index = -1
-
+        previous_layer = self.input_layer
+        pdb.set_trace()
         for cur_layer in nonInputLayers:
 
             logging.info(f"This neural network has {nonInputLayers} hidden layers and the current in_layer_index is {cur_layer}")
@@ -821,7 +825,6 @@ class GPEncoding:
             lower_bit = self.bit_lb
             upper_bit = self.bit_ub
             ifFound = False
-
             for rela_bit in range(upper_bit - lower_bit + 1):
                 if ifFound:
                     break
@@ -844,6 +847,12 @@ class GPEncoding:
                 logging.debug(f"cur_layer: {cur_layer}, in_layer: {in_layer}, qu_w: {qu_w_float}, qu_b: {qu_b_float}, frac_bit: {frac_bit}, all_bit: {all_bit}, in_layer_index: {in_layer_index}")
                 # === ESBMC VERIFICATION REPLACEMENT ===
                 # Instead of Gurobi optimization, call ESBMC
+
+                log_parameters.info(f"===========================================")
+                log_parameters.info(f"ESBMC Verification for Layer {cur_layer.layer_index-1}")
+                log_parameters.debug(f"For the layer {cur_layer.layer_index-1}, preimage bounds are: {cur_layer.lb}")
+                # Calculate values without scaling
+
                 esbmc_result = self.verify_layer_with_esbmc(
                     cur_layer, in_layer, qu_w_int, qu_b_int, 
                     frac_bit, all_bit, in_layer_index
@@ -858,6 +867,7 @@ class GPEncoding:
                     qu_int_list.append(cur_layer.int_bit)
                     qu_list.append(all_bit)
                     ifFound = True
+                    last_layer = cur_layer
 
                     # Update weights and algebra (same as original)
                     self.update_quantized_weights_affine(in_layer, cur_layer, all_bit, frac_bit, frac_bit, in_layer_index)
@@ -868,6 +878,7 @@ class GPEncoding:
                 return False, None, None, None
 
         return True, qu_list, qu_frac_list, qu_int_list
+    
     def verify_layer_with_esbmc(self, cur_layer, in_layer, qu_w, qu_b, frac_bit, all_bit, layer_index):
         """Replace Gurobi optimization with ESBMC verification"""
         
@@ -887,7 +898,7 @@ class GPEncoding:
         temp_file = f"esbmc_verify_layer_{layer_index}_Q{all_bit}_F{frac_bit}.c"
         with open(temp_file, 'w') as f:
             f.write(esbmc_code)
-        
+
         # Run ESBMC
         result = self.run_esbmc_verification(temp_file, layer_index)
         
@@ -896,7 +907,7 @@ class GPEncoding:
         os.remove(temp_file)
         
         return result
-
+    
     def generate_esbmc_verification_code(self, cur_layer, in_layer, qu_w_int, qu_b_int,
                                         frac_bit, all_bit, layer_index):
         """
@@ -928,7 +939,7 @@ class GPEncoding:
             # Usa bounds concretos (obtidos via DeepPoly)
             pre_lo = np.array(cur_layer.lb, dtype=np.float64)
             pre_hi = np.array(cur_layer.ub, dtype=np.float64)
-
+            
         # Converte para inteiros de forma conservadora (floor/ceil para ampliar intervalo)
         pre_lo_int = np.floor(pre_lo * SCALE).astype(np.int64)  # Floor para limite inferior
         pre_hi_int = np.ceil(pre_hi * SCALE).astype(np.int64)   # Ceil para limite superior
@@ -954,12 +965,28 @@ class GPEncoding:
         input_bounds_low_int  = self.numpy_to_c_int_array(x_lo_int)
         input_bounds_high_int = self.numpy_to_c_int_array(x_hi_int)
 
+        targetCls = self.targetCls
+
         # ==================== SELEÇÃO DO TEMPLATE DE VERIFICAÇÃO ====================
         # Determina se é camada de saída ou camada oculta
         is_output_layer = (cur_layer.layer_index == len(self.dense_layers) + 1)
-        #pdb.set_trace()
+        if is_output_layer:
+
+            # ==================== PRIMEIRA CAMADA OCULTA ====================
+            # Verifica se saída afim fica dentro da pré-imagem relaxada
+            return outerlayer_fixed_int_multiclass(in_layer.layer_size,
+                cur_layer.layer_size,   # Tamanhos das camadas
+                weights_c_int, biases_c_int,                 # Parâmetros quantizados
+                input_bounds_low_int, input_bounds_high_int, [0,1,2], # Bounds da região de entrada
+                SCALE )  
+            return outerlayer_fixed_int(in_layer.layer_size,
+                cur_layer.layer_size,   # Tamanhos das camadas
+                weights_c_int, biases_c_int,                 # Parâmetros quantizados
+                input_bounds_low_int, input_bounds_high_int, targetCls, # Bounds da região de entrada
+                SCALE )                                       # Fator de escala
+
         return innerlayer_fixed_int(
-                cur_layer.layer_size, 4,   # Tamanhos das camadas
+                cur_layer.layer_size, in_layer.layer_size,   # Tamanhos das camadas
                 weights_c_int, biases_c_int,                 # Parâmetros quantizados
                 preimage_low_c_int, preimage_high_c_int,     # Pré-imagem relaxada
                 input_bounds_low_int, input_bounds_high_int, # Bounds da região de entrada
