@@ -940,8 +940,15 @@ class GPEncoding:
         # ==================== CONFIGURAÇÃO DOS BOUNDS DE ENTRADA ====================
         # Converte bounds da região de entrada para inteiros escalados
         # Alarga ligeiramente para ser conservativo
-        x_lo = np.array(self.x_low_real, dtype=np.float64)        # Limite inferior da entrada
-        x_hi = np.array(self.x_high_real, dtype=np.float64)       # Limite superior da entrada
+        if cur_layer.layer_index == 1:
+            # Primeira camada: usa bounds da entrada original
+            x_lo = np.array(self.x_low_real, dtype=np.float64)  # Limite inferior da entrada
+            x_hi = np.array(self.x_high_real, dtype=np.float64)  # Limite superior da entrada
+        else:
+            x_lo = np.array(in_layer.clipped_lb, dtype=np.float64)        # Limite inferior da entrada
+            x_hi = np.array(in_layer.clipped_ub, dtype=np.float64)       # Limite superior da entrada
+    
+
         x_lo_int = np.floor(x_lo * SCALE).astype(np.int32)        # Floor para ser conservativo
         x_hi_int = np.ceil(x_hi * SCALE).astype(np.int32)         # Ceil para ser conservativo
         input_bounds_low_int  = self.numpy_to_c_int_array(x_lo_int)
