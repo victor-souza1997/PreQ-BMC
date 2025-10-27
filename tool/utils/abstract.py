@@ -5,9 +5,6 @@ def outerlayer_fixed_int(in_layer_layer_size, cur_layer_layer_size, weights_c_in
 #include <stdint.h>
 #include <limits.h>
 
-#ifndef __invariant
-#define __invariant(p) /* paper-style invariant marker (no-op for ESBMC) */
-#endif
 
 #define INPUT_SIZE   {in_layer_layer_size}
 #define LAYER_SIZE   {cur_layer_layer_size}
@@ -48,11 +45,9 @@ static int verify_classification(const long long out_[LAYER_SIZE])
 {{
     const int T = TARGET_CLASS;
     const long long target = out_[T];
-    long long max_other = LLONG_MIN / 2; /* evita overflow nas comparações */
+    long long max_other = LLONG_MIN / 2;
     
     int i = 0;
-    loop_invariant(0 <= i && i <= LAYER_SIZE);
-    loop_invariant(max_other <= target);
     
     while (i < LAYER_SIZE)
     {{
@@ -98,9 +93,6 @@ def innerlayer_fixed_int(cur_layer_layer_size, in_layer_layer_size, weights_c_in
 #include <stdint.h>
 #include <limits.h>
 
-#ifndef __invariant
-#define __invariant(p) /* paper-style invariant marker (no-op for ESBMC) */
-#endif
 
 #define INPUT_SIZE   {in_layer_layer_size}
 #define LAYER_SIZE   {cur_layer_layer_size}
@@ -126,7 +118,7 @@ static void check_affine_bounds_fixed(const long long in_[INPUT_SIZE])
 {{
     /* tolerancia para preimagem */
     const long long abs_tol = (long long)(1e-3 * SCALE_FACTOR);
-    const long long rel_tol_num = 10; /* 1% = 1/100 */
+    const long long rel_tol_num = 1; /* 1% = 1/100 */
     const long long rel_tol_den = 100;
     
     for (int i = 0; i < LAYER_SIZE; ++i) {{
@@ -141,8 +133,6 @@ static void check_affine_bounds_fixed(const long long in_[INPUT_SIZE])
         const long long eps = abs_tol + (rel_tol_num * range) / rel_tol_den;
         
         int j = 0;
-        __invariant(0 <= j && j <= INPUT_SIZE);
-        __invariant(s_lb <= s_out && s_out <= s_ub);
         
         while (j < INPUT_SIZE)
         {{
@@ -206,9 +196,6 @@ def outerlayer_fixed_int_multiclass(in_layer_layer_size, cur_layer_layer_size, w
 #include <limits.h>
 #include <stdbool.h>
 
-#ifndef __invariant
-#define __invariant(p) /* paper-style invariant marker (no-op for ESBMC) */
-#endif
 
 #define INPUT_SIZE       {in_layer_layer_size}
 #define LAYER_SIZE       {cur_layer_layer_size}
