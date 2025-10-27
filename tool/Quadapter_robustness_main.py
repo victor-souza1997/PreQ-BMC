@@ -250,13 +250,11 @@ model = DeepModel(
 # - Otimizador: Adam com learning rate baixo
 # - Função de perda: Cross-entropy categórica esparsa (logits não normalizados)
 # - Métrica: Acurácia categórica esparsa
-"""
 model.compile(
     optimizer=tf.keras.optimizers.Adam(0.0001),
     loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
     metrics=[tf.keras.metrics.SparseCategoricalAccuracy()],
 )
-"""
 #if args.dataset == "iris":
 #    scaler = MinMaxScaler()
 #    x_train = scaler.fit_transform(x_train)
@@ -387,7 +385,6 @@ if ifSucc:
     # Avalia a rede neural original (ponto flutuante) no conjunto de teste
     # para estabelecer linha de base de performance
     loss_DNN, accu_DNN = model.evaluate(x_test, y_test)
-    
     # ==================== APLICAÇÃO DA QUANTIZAÇÃO AO MODELO ====================
     # Itera sobre cada camada para aplicar a quantização de ponto fixo encontrada
     for i in range(len(blkset)):
