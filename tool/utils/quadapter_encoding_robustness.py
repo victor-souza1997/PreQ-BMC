@@ -178,7 +178,7 @@ class GPEncoding:
         self.outputPath = args.outputPath                   # Caminho para salvar resultados
         self.ifRelax = args.ifRelax                         # Flag de relaxação
         self.scaleValueSet = []                             # Armazena valores de escala para cada camada
-
+        self.verify_mode = args.verify_mode
         # ==================== ESTATÍSTICAS DE PERFORMANCE ====================
         # Dicionário para rastrear tempos de execução de diferentes fases
         self._stats = {
@@ -294,10 +294,15 @@ class GPEncoding:
             backward_end_time = time.time()
             print("Backward Time is: ", backward_end_time - backward_start_time)
 
+            if self.verify_mode == "esbmc":
+                ifSucc, qu_list, qu_frac_list, qu_int_list = self.forward_quantization_with_esbmc()
+            else:
+                ifSucc, qu_list, qu_frac_list, qu_int_list = self.forward_quantization()
+            
+            forward_end_time = time.time()
+
             # ==================== QUANTIZAÇÃO FORWARD COM ESBMC ====================
             # Busca estratégia de quantização usando verificação ESBMC
-            ifSucc, qu_list, qu_frac_list, qu_int_list = self.forward_quantization_with_esbmc()
-            forward_end_time = time.time()
             print("Forward time is: ", forward_end_time - backward_end_time)
 
             # ==================== ATUALIZAÇÃO DAS ESTATÍSTICAS ====================
@@ -808,7 +813,7 @@ class GPEncoding:
         nonInputLayers.append(self.output_layer)
         in_layer_index = -1
         previous_layer = self.input_layer
-        pdb.set_trace()
+        #.set_trace()
         for cur_layer in nonInputLayers:
 
             logging.info(f"This neural network has {nonInputLayers} hidden layers and the current in_layer_index is {cur_layer}")
@@ -1126,9 +1131,9 @@ class GPEncoding:
         esbmc_cmd = [
             "esbmc", c_file,                    # Arquivo C a ser verificado
             "--loop-invariant",                 # Usa invariantes de loop para melhor verificação
-            "--function", "main",               # Verifica função main
-            "--z3",                            # Usa solver Z3 SMT
-            "--interval-analysis",             # Análise de intervalos para otimização
+            "--function", "main",
+            "--interval-analysis",
+            "--ir",                         # Análise de intervalos para otimização
             "--incremental-bmc",               # BMC incremental para melhor performance
             "--no-unwinding-assertions",       # Desabilita assertions de unwinding de loops
             "--state-hashing",                 # Hashing de estados para reduzir exploração
@@ -1191,3 +1196,272 @@ class GPEncoding:
             return "ERROR"                                # Erro na execução
         
     
+    # forward quantization procedure
+    def forward_quantization(self):
+        print("\nNow we begin to do the forward quantization!")
+        qu_list = []
+        qu_frac_list = []
+        qu_int_list = []
+
+        nonInputLayers = self.dense_layers.copy()
+        nonInputLayers.append(self.output_layer)
+
+        in_layer_index = -1
+
+        for cur_layer in nonInputLayers:
+            in_layer_index += 1
+
+            if cur_layer.layer_index == 1:
+                in_layer = self.input_layer
+            else:
+                in_layer = self.dense_layers[cur_layer.layer_index - 2]
+
+            w = cur_layer.layer_paras[0]
+            b = cur_layer.layer_paras[1]
+
+            # test for all bit:
+            lower_bit = self.bit_lb
+            upper_bit = self.bit_ub
+
+            ifFound = False
+
+            for rela_bit in range(upper_bit - lower_bit + 1):
+                pre_mul_qu_lb_deepPoly = []
+                pre_mul_qu_ub_deepPoly = []
+
+                if ifFound:
+                    break
+
+                model_cstr_ll = []
+                prop_cstr_ll = []
+                var_ll = []
+
+                frac_bit = rela_bit + lower_bit
+                int_bit = cur_layer.int_bit
+                all_bit = frac_bit + int_bit
+
+                # get_quantized_paras
+                qu_w = quantize_int(w, all_bit, frac_bit) / (2 ** frac_bit)
+                qu_b = quantize_int(b, all_bit, frac_bit) / (2 ** frac_bit)
+
+                # for last layer
+                target_lb = 0
+                other_ubs = []
+
+                # quantized_concrete_algebra_lower
+                quantized_concrete_algebra_lower = []
+                quantized_concrete_algebra_upper = []
+
+                sumOfK = 0
+                numOfK = 0
+
+                for out_index in range(cur_layer.layer_size):
+                    qu_weights = qu_w[out_index]
+                    qu_bias = qu_b[out_index]
+
+                    tmp_acc_lower = 0
+                    tmp_acc_upper = 0
+
+                    # for var_index_poly in range(self.bit_ub - self.bit_lb + 1):
+                    lower_bound = np.append(qu_weights, qu_bias)  # cur_layer's paras (size of input_layer)
+                    upper_bound = np.append(qu_weights, qu_bias)  # cur_layer's paras (size of input_layer)
+
+                    # reverse, from cur_layer's affine layer to input layer
+                    cur_neuron_concrete_algebra_lower = None
+                    cur_neuron_concrete_algebra_upper = None
+
+                    if in_layer_index == 0:
+                        cur_neuron_concrete_algebra_lower = deepcopy(lower_bound)
+                        cur_neuron_concrete_algebra_upper = deepcopy(upper_bound)
+                        quantized_concrete_algebra_lower.append(cur_neuron_concrete_algebra_lower)
+                        quantized_concrete_algebra_upper.append(cur_neuron_concrete_algebra_upper)
+
+                    # reverse, from cur_layer's affine layer to input layer
+                    for kk in range(2 * (in_layer_index + 1) - 1)[::-1]:
+                        # size of input
+                        tmp_lower = np.zeros(len(self.deepPolyNets_DNN.layers[kk].neurons[0].algebra_lower))
+                        tmp_upper = np.zeros(len(self.deepPolyNets_DNN.layers[kk].neurons[0].algebra_lower))
+
+                        assert (self.deepPolyNets_DNN.layers[kk].size + 1 == len(lower_bound))
+                        assert (self.deepPolyNets_DNN.layers[kk].size + 1 == len(upper_bound))
+
+                        for pp in range(self.deepPolyNets_DNN.layers[kk].size):
+                            if lower_bound[pp] >= 0:
+                                tmp_lower += np.float32(
+                                    lower_bound[pp] * self.deepPolyNets_DNN.layers[kk].neurons[
+                                        pp].algebra_lower)
+                            else:
+                                tmp_lower += np.float32(
+                                    lower_bound[pp] * self.deepPolyNets_DNN.layers[kk].neurons[
+                                        pp].algebra_upper)
+
+                            if upper_bound[pp] >= 0:
+                                tmp_upper += np.float32(
+                                    upper_bound[pp] * self.deepPolyNets_DNN.layers[kk].neurons[
+                                        pp].algebra_upper)
+                            else:
+                                tmp_upper += np.float32(
+                                    upper_bound[pp] * self.deepPolyNets_DNN.layers[kk].neurons[
+                                        pp].algebra_lower)
+
+                        tmp_lower[-1] += lower_bound[-1]
+                        tmp_upper[-1] += upper_bound[-1]
+                        lower_bound = deepcopy(tmp_lower)
+                        upper_bound = deepcopy(tmp_upper)
+                        #
+                        if kk == 1:
+                            cur_neuron_concrete_algebra_lower = deepcopy(lower_bound)
+                            cur_neuron_concrete_algebra_upper = deepcopy(upper_bound)
+                            quantized_concrete_algebra_lower.append(cur_neuron_concrete_algebra_lower)
+                            quantized_concrete_algebra_upper.append(cur_neuron_concrete_algebra_upper)
+
+                    assert (len(lower_bound) == 1)
+                    assert (len(upper_bound) == 1)
+
+                    cur_neuron_concrete_lower = lower_bound[0]
+                    cur_neuron_concrete_upper = upper_bound[0]
+
+                    tmp_acc_lower += cur_neuron_concrete_lower
+                    tmp_acc_upper += cur_neuron_concrete_upper
+
+                    pre_mul_qu_lb_deepPoly.append(tmp_acc_lower)
+                    pre_mul_qu_ub_deepPoly.append(tmp_acc_upper)
+
+                    # generate property constraints
+                    # get quantized_ub_expression from backward-procedure
+                    quantized_lb_expression = np.dot(cur_neuron_concrete_algebra_lower[:-1],
+                                                     self.input_gp_vars)
+                    quantized_lb_expression = quantized_lb_expression + cur_neuron_concrete_algebra_lower[
+                        -1]
+
+                    quantized_ub_expression = np.dot(cur_neuron_concrete_algebra_upper[:-1],
+                                                     self.input_gp_vars)
+                    quantized_ub_expression = quantized_ub_expression + cur_neuron_concrete_algebra_upper[
+                        -1]
+
+                    # either lower or higher
+                    if cur_layer.layer_index == (len(self.dense_layers) + 1):
+                        if out_index == self.targetCls:
+                            target_lb = quantized_lb_expression
+                        else:
+                            other_ubs.append(quantized_ub_expression)
+                    else:
+                        k_i_lb = self.gp_model.addVar(vtype=GRB.BINARY)
+                        var_ll.append(k_i_lb)
+
+                        if cur_layer.relaxed_ub[out_index] > 0:
+                            prop_cstr_ll.append(self.gp_model.addConstr(
+                                quantized_lb_expression <= cur_layer.relaxed_lb_expression[out_index] - 1000 * (
+                                        k_i_lb - 1) - self.tole))
+                            prop_cstr_ll.append(self.gp_model.addConstr(
+                                quantized_lb_expression >= cur_layer.relaxed_lb_expression[
+                                    out_index] - 1000 * k_i_lb + self.tole))
+                            sumOfK = sumOfK + k_i_lb
+                            numOfK += 1
+
+                        # k_i encodes: is not included
+                        # for upper bounds
+                        k_i_ub = self.gp_model.addVar(vtype=GRB.BINARY)
+                        var_ll.append(k_i_ub)
+                        prop_cstr_ll.append(self.gp_model.addConstr(
+                            quantized_ub_expression >= cur_layer.relaxed_ub_expression[out_index] + 1000 * (
+                                    k_i_ub - 1) + self.tole))
+                        prop_cstr_ll.append(self.gp_model.addConstr(
+                            quantized_ub_expression <= cur_layer.relaxed_ub_expression[
+                                out_index] + 1000 * k_i_ub - self.tole))
+
+                        numOfK += 1
+                        sumOfK = sumOfK + k_i_ub
+
+                if len(other_ubs) > 0:  # output layer
+                    # k_i encodes: is not included
+                    # for upper bounds
+                    for other_single_ub in other_ubs:
+                        k_i_ub = self.gp_model.addVar(vtype=GRB.BINARY)
+                        var_ll.append(k_i_ub)
+                        prop_cstr_ll.append(self.gp_model.addConstr(
+                            other_single_ub >= target_lb + 1000 * (
+                                    k_i_ub - 1) + self.tole))
+                        prop_cstr_ll.append(self.gp_model.addConstr(
+                            other_single_ub <= target_lb + 1000 * k_i_ub - self.tole))
+
+                        sumOfK = sumOfK + k_i_ub
+                        numOfK += 1
+
+                # for relaxed version of Quadapter
+                if len(other_ubs) == 0 and self.ifRelax == 1:
+
+                    scale = 0.25
+
+                    # # for better performance, can try this relaxation
+                    # if self.scaleValueSet[in_layer_index] <= 0.01 and in_layer_index > 0:
+                    #     scale = 0.35
+
+                    prop_cstr_ll.append(self.gp_model.addConstr(sumOfK >= int(numOfK * scale) + 1))
+                else:
+                    prop_cstr_ll.append(self.gp_model.addConstr(sumOfK >= 1))
+
+                self.gp_model.update()
+                self.gp_model.setParam('DualReductions', 0)
+
+                self.gp_model.optimize()
+
+                ifgpUNSat = self.gp_model.status == GRB.INFEASIBLE
+
+                if ifgpUNSat:
+                    print("We find a quantization configuration [ Q , F ] for the Layer", cur_layer.layer_index,
+                          "as: [", all_bit, ",", frac_bit, '].')
+
+                    cur_layer.frac_bit = frac_bit
+
+                    qu_frac_list.append(cur_layer.frac_bit)
+                    qu_int_list.append(cur_layer.int_bit)
+                    qu_list.append(all_bit)
+
+                    ifFound = True
+
+                    self.gp_model.remove(model_cstr_ll)
+                    self.gp_model.remove(prop_cstr_ll)
+
+                    self.gp_model.remove(var_ll)
+
+                    self.gp_model.update()
+
+                    self.update_quantized_weights_affine(in_layer, cur_layer, all_bit, frac_bit, frac_bit,
+                                                         in_layer_index)
+
+                    # if hidden layer, then update next relu's algebra for the abstract element cf. DeepPoly
+                    if cur_layer.layer_index < (len(self.dense_layers) + 1):
+                        for out_index in range(cur_layer.layer_size):
+                            lb_new = pre_mul_qu_lb_deepPoly[out_index]
+                            ub_new = pre_mul_qu_ub_deepPoly[out_index]
+                            cur_neuron = self.deepPolyNets_DNN.layers[2 * (in_layer_index + 1)].neurons[out_index]
+                            if lb_new >= 0:
+                                cur_neuron.algebra_lower = np.zeros(cur_layer.layer_size + 1)
+                                cur_neuron.algebra_upper = np.zeros(cur_layer.layer_size + 1)
+                                cur_neuron.algebra_lower[out_index] = 1
+                                cur_neuron.algebra_upper[out_index] = 1
+                            elif ub_new <= 0:
+                                cur_neuron.algebra_lower = np.zeros(cur_layer.layer_size + 1)
+                                cur_neuron.algebra_upper = np.zeros(cur_layer.layer_size + 1)
+                            elif lb_new + ub_new <= 0:
+                                cur_neuron.algebra_lower = np.zeros(cur_layer.layer_size + 1)
+                                k_new = ub_new / (ub_new - lb_new)
+                                cur_neuron.algebra_upper = np.zeros(cur_layer.layer_size + 1)
+                                cur_neuron.algebra_upper[out_index] = k_new
+                                cur_neuron.algebra_upper[-1] = - k_new * lb_new
+                            else:
+                                cur_neuron.algebra_lower = np.zeros(cur_layer.layer_size + 1)
+                                cur_neuron.algebra_lower[out_index] = 1
+                                k_new = ub_new / (ub_new - lb_new)
+                                cur_neuron.algebra_upper = np.zeros(cur_layer.layer_size + 1)
+                                cur_neuron.algebra_upper[out_index] = k_new
+                                cur_neuron.algebra_upper[-1] = - k_new * lb_new
+                    else:
+                        self.output_layer.qu_lb = pre_mul_qu_lb_deepPoly
+                        self.output_layer.qu_ub = pre_mul_qu_ub_deepPoly
+            if not ifFound:
+                print("Cannot find a quantization strategy for the cur_layer with index as: ", cur_layer.layer_index)
+                return False, None, None, None
+
+        return True, qu_list, qu_frac_list, qu_int_list

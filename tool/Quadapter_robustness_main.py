@@ -53,6 +53,7 @@ parser.add_argument("--ifRelax", type=int, default=0)
 # 'comp' = composição dos dois métodos
 parser.add_argument("--preimg_mode", default="milp")
 
+parser.add_argument("--verify_mode", default="milp")
 # Processa os argumentos fornecidos pela linha de comando
 args = parser.parse_args()
 
@@ -120,7 +121,7 @@ elif args.dataset == "mnist64":
     # MNIST 64x64: versão redimensionada do MNIST (64x64, 10 classes)
     (x_train, x_test), (y_train, y_test) = load_train_test_data_mnist64()
     print(f"x_train shape: {x_train.shape}, x_test shape: {x_test.shape}")
-elif args.dataset == "iris":
+elif "iris" in args.dataset:
     # Iris: dataset clássico de flores Iris (4 features, 3 classes)
     (x_train, x_test), (y_train, y_test) = load_train_test_data()
     input_scale = 1.0
@@ -129,7 +130,7 @@ elif args.dataset == "iris":
     logging.debug(f"x_test data shape: {x_test.shape}")
     logging.debug(f"y_test data shape: {y_test.shape}")
     #input()
-elif args.dataset == "seeds":
+elif "seeds" in args.dataset:
     # Seeds: dataset de sementes de trigo (7 features, 3 classes)
     (x_train, x_test), (y_train, y_test) = load_train_test_data_seeds()
     input_scale = 1.0
@@ -175,8 +176,8 @@ else:
 
 num_classes = int(np.max(y_train)) + 1
 
-if args.dataset == "iris" or args.dataset == "seeds" or args.dataset == "mnist64":
-    weight_path = Path(f"benchmark/{args.dataset}/{args.dataset}_weight.h5")
+if "iris" in args.dataset or "seeds" in args.dataset or args.dataset == "mnist64":
+    weight_path = Path(f"benchmark/{args.dataset.split('_')[0]}/{args.dataset}_weight.h5")
 
 else:
     weight_path = Path(f"benchmark/{args.dataset}/{args.dataset}_{args.arch}_weight.h5")
@@ -374,7 +375,7 @@ print("\n******************** Total running time is: ", running_time, " ********
 
 # Define o nome do arquivo de saída com base nos parâmetros de execução
 # Formato: Attack_{epsilon}_ID_{sample_id}_{método}.txt
-fileName = args.outputPath + "/" + "Attack_" + str(args.eps) + "_ID_" + str(args.sample_id) + "_" + str(args.preimg_mode)+ ".txt"
+fileName = args.outputPath + "/" + "Attack_" + str(args.eps) + "_ID_" + str(args.sample_id) + "_" + str(args.preimg_mode)+ "_"+str(args.verify_mode)+ "_"+args.dataset+".txt"
 
 # ==================== CASO DE SUCESSO: QUANTIZAÇÃO VÁLIDA ENCONTRADA ====================
 if ifSucc:
