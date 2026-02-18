@@ -23,7 +23,7 @@ static inline long long llabs(long long x) {{
     return x < 0LL ? -x : x;
 }}
 
-/* Transformação afim em ponto fixo: out[i] = (W[i] · in + b[i]) / SCALE */
+/* Transformacao afim em ponto fixo: out[i] = (W[i] · in + b[i]) / SCALE */
 static void affine_transform_fixed(const long long in_[INPUT_SIZE], long long out_[LAYER_SIZE])
 {{
     for (int i = 0; i < LAYER_SIZE; ++i) {{
@@ -113,7 +113,7 @@ static inline long long llabs(long long x) {{
     return x < 0LL ? -x : x;
 }}
 
-/* Camada afim em ponto fixo sobre um box de entrada: mantém o invólucro s_lb <= s_out <= s_ub */
+/* Camada afim em ponto fixo sobre um box de entrada: s_lb <= s_out <= s_ub */
 static void check_affine_bounds_fixed(const long long in_[INPUT_SIZE])
 {{
     /* tolerancia para preimagem */
@@ -126,7 +126,7 @@ static void check_affine_bounds_fixed(const long long in_[INPUT_SIZE])
         long long s_lb  = 0LL;  /* limite inferior usando box */
         long long s_ub  = 0LL;  /* limite superior usando box */
         
-        /* Tolerância ao redor do intervalo de pré-imagem */
+        /* Tolerance ao redor do intervalo de preimagem */
         const long long pre_lo = preimage_low[i];
         const long long pre_hi = preimage_high[i];
         const long long range = llabs(pre_hi - pre_lo);
@@ -171,7 +171,7 @@ int main(void)
 {{
     long long in_[INPUT_SIZE];
     
-    /* Entrada nao determinística dentro do box */
+    /* Entrada nao deterministica dentro do conjunto de entrada */
     for (int j = 0; j < INPUT_SIZE; ++j) {{
         in_[j] = nondet_longlong();
         __ESBMC_assume(in_[j] >= input_bounds_low[j] && 
@@ -222,7 +222,7 @@ static bool is_valid_class(int class_id) {{
     return false;
 }}
 
-/* Transformação afim em ponto fixo */
+/* Transformacao na funcao afim em ponto fixo */
 static void affine_transform_fixed(const long long in_[INPUT_SIZE], long long out_[LAYER_SIZE])
 {{
     for (int i = 0; i < LAYER_SIZE; ++i) {{
@@ -237,13 +237,13 @@ static void affine_transform_fixed(const long long in_[INPUT_SIZE], long long ou
     }}
 }}
 
-/* Verifica se a classificação está entre as classes válidas */
+/* Verifica se a classificacao esta entre as classes validas */
 static int verify_classification_multiclass(const long long out_[LAYER_SIZE])
 {{
     long long max_valid = LLONG_MIN;
     long long max_invalid = LLONG_MIN;
     
-    /* Encontra os valores máximos nas classes válidas e inválidas */
+    /* Encontra os valores maximos nas classes validas e invalidas */
     for (int i = 0; i < LAYER_SIZE; ++i) {{
         if (is_valid_class(i)) {{
             if (out_[i] > max_valid) {{
@@ -256,7 +256,7 @@ static int verify_classification_multiclass(const long long out_[LAYER_SIZE])
         }}
     }}
     
-    /* A classe predita deve ser válida (maior valor entre válidas > maior valor entre inválidas) */
+    /* (maior valor entre validas > maior valor entre invalidas) */
     return max_valid > max_invalid;
 }}
 
@@ -265,7 +265,7 @@ int main(void)
     long long input[INPUT_SIZE];
     long long output[LAYER_SIZE];
     
-    /* Entrada não-determinística dentro dos bounds */
+    /* Entrada nao-deterministica dentro dos bounds */
     for (int k = 0; k < INPUT_SIZE; ++k) {{
         input[k] = nondet_longlong();
         __ESBMC_assume(input[k] >= input_bounds_low[k] && 
