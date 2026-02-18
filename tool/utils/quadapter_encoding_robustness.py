@@ -1133,7 +1133,6 @@ class GPEncoding:
             "--loop-invariant",                 # Usa invariantes de loop para melhor verificação
             "--function", "main",
             "--interval-analysis",
-            "--ir",                         # Análise de intervalos para otimização
             "--incremental-bmc",               # BMC incremental para melhor performance
             "--no-unwinding-assertions",       # Desabilita assertions de unwinding de loops
             "--state-hashing",                 # Hashing de estados para reduzir exploração
@@ -1145,6 +1144,7 @@ class GPEncoding:
             "--verbosity", "10"                # Nível máximo de verbosidade para debug
             , "--print-stack-traces"             # Imprime stack traces para facilitar debug
         ]
+            #"--ir",                         # Análise de intervalos para otimização
         
         try:
             # ==================== EXECUÇÃO DO ESBMC ====================
