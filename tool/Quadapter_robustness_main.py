@@ -271,6 +271,7 @@ model.compile(
 print("input dim is: ", input_dim)
 model.build((None, input_dim))
 # Carrega os pesos pré-treinados do arquivo .h5
+_ = model(tf.zeros((1, input_dim), dtype=tf.float32))
 model.load_weights(str(weight_path))  # input: 0~255
 
 
@@ -399,7 +400,7 @@ if ifSucc:
         assert Q == I_W + F_W
 
         # Obtém os pesos e biases originais (ponto flutuante) da camada
-        paras = model.layers[i].get_weights()
+        paras = model.dense_layers[i].get_weights()
         
         # ==================== QUANTIZAÇÃO DOS PESOS ====================
         new_weight = []
@@ -426,8 +427,7 @@ if ifSucc:
         bias = np.asarray(bias)
         
         # Atualiza a camada com os pesos e biases quantizados
-        model.layers[i].set_weights([new_weight, bias])
-
+        model.dense_layers[i].set_weights([new_weight, bias])
     # ==================== AVALIAÇÃO DA ACURÁCIA DA QNN ====================
     # Avalia a rede quantizada no conjunto de teste
     # Compara com a acurácia original para medir degradação

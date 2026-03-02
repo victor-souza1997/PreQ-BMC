@@ -965,8 +965,8 @@ class GPEncoding:
             x_hi = np.array(in_layer.clipped_ub, dtype=np.float64)       # Limite superior da entrada
     
 
-        x_lo_int = np.floor(x_lo * SCALE).astype(np.int32)        # Floor para ser conservativo
-        x_hi_int = np.ceil(x_hi * SCALE).astype(np.int32)         # Ceil para ser conservativo
+        x_lo_int = np.floor(x_lo * SCALE).astype(np.int64)        # Floor para ser conservativo
+        x_hi_int = np.ceil(x_hi * SCALE).astype(np.int64)         # Ceil para ser conservativo
         input_bounds_low_int  = self.numpy_to_c_int_array(x_lo_int)
         input_bounds_high_int = self.numpy_to_c_int_array(x_hi_int)
 
@@ -990,7 +990,7 @@ class GPEncoding:
                 input_bounds_low_int, input_bounds_high_int, targetCls, # Bounds da região de entrada
                 SCALE )                                       # Fator de escala
 
-        return innerlayer_fixed_int(
+        return innerlayer_fixed_int_bounds_only(
                 cur_layer.layer_size, in_layer.layer_size,   # Tamanhos das camadas
                 weights_c_int, biases_c_int,                 # Parâmetros quantizados
                 preimage_low_c_int, preimage_high_c_int,     # Pré-imagem relaxada
@@ -1011,7 +1011,7 @@ class GPEncoding:
         else:
             # ==================== CAMADA OCULTA ====================
             # Verifica se saída afim fica dentro da pré-imagem relaxada
-            return innerlayer_fixed_int(
+            return innerlayer_fixed_int_bounds_only(
                 cur_layer.layer_size, in_layer.layer_size,   # Tamanhos das camadas
                 weights_c_int, biases_c_int,                 # Parâmetros quantizados
                 preimage_low_c_int, preimage_high_c_int,     # Pré-imagem relaxada
@@ -1123,18 +1123,35 @@ class GPEncoding:
         ESBMC (Efficient SMT-based Bounded Model Checker) é usado para verificar
         se a propriedade de quantização é preservada em cada camada.
         """
+
+
+        # Configuração otimizada para verificação de redes neurais
         import subprocess
         import re
         
         # ==================== CONFIGURAÇÃO DO COMANDO ESBMC ====================
-        # Configuração otimizada para verificação de redes neurais
+        # Importante: garantir unwind suficiente para a prova ser sound.
+        # Inferimos INPUT_SIZE/LAYER_SIZE do código C gerado e usamos --unwind >= max(iter).
+        unwind = 0
+        try:
+            with open(c_file, "r", encoding="utf-8", errors="ignore") as f:
+                csrc = f.read()
+            m_in = re.search(r"#define\s+INPUT_SIZE\s+(\d+)", csrc)
+            m_la = re.search(r"#define\s+LAYER_SIZE\s+(\d+)", csrc)
+            if m_in:
+                unwind = max(unwind, int(m_in.group(1)))
+            if m_la:
+                unwind = max(unwind, int(m_la.group(1)))
+        except Exception:
+            unwind = 0
+        unwind = max(unwind, 1) + 1
         esbmc_cmd = [
             "esbmc", c_file,                    # Arquivo C a ser verificado
             "--loop-invariant",                 # Usa invariantes de loop para melhor verificação
             "--function", "main",
             "--interval-analysis",
+            "--unwind", str(unwind),
             "--incremental-bmc",               # BMC incremental para melhor performance
-            "--no-unwinding-assertions",       # Desabilita assertions de unwinding de loops
             "--state-hashing",                 # Hashing de estados para reduzir exploração
             "--force-malloc-success",          # Assume que malloc sempre sucede
             "--no-bounds-check",               # Desabilita verificação de bounds de arrays

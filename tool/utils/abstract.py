@@ -185,6 +185,98 @@ int main(void)
 """
 
 
+def innerlayer_fixed_int_bounds_only(cur_layer_layer_size, in_layer_layer_size, weights_c_int, biases_c_int,
+                                     preimage_low_int, preimage_high_int,
+                                     input_bounds_low_int, input_bounds_high_int,
+                                     scale_factor):
+    """
+    Variante SEM nondet:
+      - Calcula apenas o intervalo de saída [out_lb, out_ub] da camada afim sobre o box de entrada.
+      - Verifica inclusão desse intervalo na pré-imagem (com tolerância).
+
+    Pontos de soundness:
+      - Usa floor/ceil na divisão por SCALE_FACTOR (C trunca para zero e pode quebrar bounds com negativos).
+      - Usa acumuladores em __int128 para reduzir risco de overflow em somatórios grandes.
+    """
+    return f"""\
+#include <stdint.h>
+#include <limits.h>
+
+#define INPUT_SIZE   {in_layer_layer_size}
+#define LAYER_SIZE   {cur_layer_layer_size}
+#define SCALE_FACTOR {scale_factor}LL
+
+long long weights[LAYER_SIZE][INPUT_SIZE] = {weights_c_int};
+long long biases[LAYER_SIZE]              = {biases_c_int};
+
+long long preimage_low[LAYER_SIZE]  = {preimage_low_int};
+long long preimage_high[LAYER_SIZE] = {preimage_high_int};
+
+long long input_bounds_low[INPUT_SIZE]  = {input_bounds_low_int};
+long long input_bounds_high[INPUT_SIZE] = {input_bounds_high_int};
+
+static inline long long llabs_ll(long long x) {{
+    return x < 0LL ? -x : x;
+}}
+
+/* floor(a/d) para d>0 */
+static inline __int128 div_floor_i128(__int128 a, long long d) {{
+    if (a >= 0) return a / d;
+    return -(((-a) + (d - 1)) / d);
+}}
+
+/* ceil(a/d) para d>0 */
+static inline __int128 div_ceil_i128(__int128 a, long long d) {{
+    if (a >= 0) return (a + (d - 1)) / d;
+    return -(((-a)) / d);
+}}
+
+static void check_affine_bounds_fixed_bounds_only(void)
+{{
+    /* tolerância ao redor da pré-imagem (em unidades escaladas) */
+    const long long abs_tol = (long long)(1e-3 * SCALE_FACTOR);
+    const long long rel_tol_num = 1;   /* 1% = 1/100 */
+    const long long rel_tol_den = 100;
+
+    for (int i = 0; i < LAYER_SIZE; ++i) {{
+        __int128 s_lb = 0;  /* bound inferior do somatório w*x (antes do /SCALE) */
+        __int128 s_ub = 0;  /* bound superior do somatório w*x (antes do /SCALE) */
+
+        const long long pre_lo = preimage_low[i];
+        const long long pre_hi = preimage_high[i];
+        const long long range = llabs_ll(pre_hi - pre_lo);
+        const long long eps = abs_tol + (rel_tol_num * range) / rel_tol_den;
+
+        for (int j = 0; j < INPUT_SIZE; ++j) {{
+            const __int128 w  = (__int128)weights[i][j];
+            const __int128 lo = (__int128)input_bounds_low[j];
+            const __int128 hi = (__int128)input_bounds_high[j];
+
+            /* contribuição mínima/máxima de w*x no box [lo, hi] */
+            const __int128 cmin = (w >= 0) ? (w * lo) : (w * hi);
+            const __int128 cmax = (w >= 0) ? (w * hi) : (w * lo);
+
+            s_lb += cmin;
+            s_ub += cmax;
+        }}
+
+        /* Rescale (sound): lb usa floor; ub usa ceil */
+        __int128 out_lb = div_floor_i128(s_lb, SCALE_FACTOR) + (__int128)biases[i];
+        __int128 out_ub = div_ceil_i128 (s_ub, SCALE_FACTOR) + (__int128)biases[i];
+
+        __ESBMC_assert(out_lb >= (__int128)(pre_lo - eps) &&
+                       out_ub <= (__int128)(pre_hi + eps),
+                       "affine bounds not within tolerated preimage");
+    }}
+}}
+
+int main(void)
+{{
+    check_affine_bounds_fixed_bounds_only();
+    return 0;
+}}
+"""
+
 def outerlayer_fixed_int_multiclass(in_layer_layer_size, cur_layer_layer_size, weights_c_int, biases_c_int,
                                    input_bounds_low_int, input_bounds_high_int, valid_classes, scale_factor):
     
