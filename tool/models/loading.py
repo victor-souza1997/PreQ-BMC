@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import h5py
@@ -7,6 +8,17 @@ import numpy as np
 import tensorflow as tf
 
 from .deep_model import DeepModel
+
+SUPPORTED_DATASETS = ("mnist", "fashion-mnist", "iris", "seeds", "mnist64", "mnist_onnx")
+
+
+@dataclass(frozen=True)
+class DatasetSelection:
+    """Normalized dataset request for benchmark aliases such as `iris_4x2`."""
+
+    requested_name: str
+    base_name: str
+    benchmark_name: str | None = None
 
 
 def infer_dense_architecture_from_h5(weight_file: str | Path) -> list[int]:
@@ -65,18 +77,68 @@ def parse_architecture(arch: str, num_classes: int) -> list[int]:
     return widths
 
 
+def normalize_dataset_selection(dataset_name: str) -> DatasetSelection:
+    """Map benchmark aliases like `iris_4x2` to their base dataset."""
+
+    if dataset_name in SUPPORTED_DATASETS:
+        return DatasetSelection(
+            requested_name=dataset_name,
+            base_name=dataset_name,
+            benchmark_name=None,
+        )
+
+    for base_name in sorted(SUPPORTED_DATASETS, key=len, reverse=True):
+        prefix = f"{base_name}_"
+        if dataset_name.startswith(prefix):
+            return DatasetSelection(
+                requested_name=dataset_name,
+                base_name=base_name,
+                benchmark_name=dataset_name,
+            )
+
+    supported = ", ".join(SUPPORTED_DATASETS)
+    raise ValueError(
+        f"Unsupported dataset '{dataset_name}'. "
+        f"Use a base dataset ({supported}) or a benchmark alias like 'iris_4x2' or 'seeds_4x1'."
+    )
+
+
+def list_available_benchmarks(root_dir: Path, base_name: str) -> list[str]:
+    """List available benchmark weight stems for a base dataset directory."""
+
+    dataset_dir = root_dir / "benchmark" / base_name
+    if not dataset_dir.exists():
+        return []
+    names: list[str] = []
+    for path in sorted(dataset_dir.glob("*_weight.h5")):
+        stem = path.name.removesuffix("_weight.h5")
+        names.append(stem)
+    return names
+
+
 def resolve_weight_path(root_dir: Path, dataset_name: str, arch: str) -> Path:
     """Resolve the benchmark weights path for the requested dataset and architecture."""
 
-    dataset_dir = root_dir / "benchmark" / dataset_name
+    selection = normalize_dataset_selection(dataset_name)
+    if selection.benchmark_name is not None:
+        benchmark_path = root_dir / "benchmark" / selection.base_name / f"{selection.benchmark_name}_weight.h5"
+        if benchmark_path.exists():
+            return benchmark_path
+        available = ", ".join(list_available_benchmarks(root_dir, selection.base_name))
+        raise FileNotFoundError(
+            f"Benchmark '{selection.benchmark_name}' was not found under benchmark/{selection.base_name}. "
+            f"Available benchmarks: {available or '(none)'}"
+        )
+
+    dataset_dir = root_dir / "benchmark" / selection.base_name
     if not dataset_dir.exists():
-        dataset_dir = root_dir / "benchmark" / dataset_name.split("_")[0]
-    if dataset_name in {"iris", "seeds", "mnist64", "mnist_onnx"}:
-        arch_candidate = dataset_dir / f"{dataset_name}_{arch}_weight.h5"
+        dataset_dir = root_dir / "benchmark" / selection.base_name.split("_")[0]
+    if selection.base_name in {"iris", "seeds", "mnist64", "mnist_onnx"}:
+        arch_candidate = dataset_dir / f"{selection.base_name}_{arch}_weight.h5"
         if arch_candidate.exists():
             return arch_candidate
-        return dataset_dir / f"{dataset_name}_weight.h5"
-    return dataset_dir / f"{dataset_name}_{arch}_weight.h5"
+        return dataset_dir / f"{selection.base_name}_weight.h5"
+    return dataset_dir / f"{selection.base_name}_{arch}_weight.h5"
 
 
 def build_and_load_deep_model(

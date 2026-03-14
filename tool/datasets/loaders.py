@@ -47,7 +47,7 @@ def _flatten_if_image(x: np.ndarray) -> np.ndarray:
     return x.astype(np.float32)
 
 
-def load_dataset(name: DatasetName) -> DatasetBundle:
+def load_dataset(name: str) -> DatasetBundle:
     """Load one of the supported benchmark datasets with consistent preprocessing."""
 
     if name == "fashion-mnist":

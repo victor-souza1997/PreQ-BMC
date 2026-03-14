@@ -17,7 +17,14 @@ def _parse_valid_labels(raw_value: str | None) -> tuple[int, ...] | None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the Quadapter robustness synthesis pipeline.")
-    parser.add_argument("--dataset", default="mnist", choices=["mnist", "fashion-mnist", "iris", "seeds", "mnist64", "mnist_onnx"])
+    parser.add_argument(
+        "--dataset",
+        default="mnist",
+        help=(
+            "Base dataset name or benchmark alias. Examples: mnist, fashion-mnist, iris, seeds, "
+            "iris_4x2, seeds_4x1."
+        ),
+    )
     parser.add_argument("--arch", default="1blk_100")
     parser.add_argument("--sample-id", "--sample_id", dest="sample_id", type=int, default=0)
     parser.add_argument("--bit-lb", "--bit_lb", dest="bit_lb", type=int, default=1)

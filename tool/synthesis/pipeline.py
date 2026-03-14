@@ -20,6 +20,7 @@ from datasets.loaders import DatasetBundle, load_dataset, select_split
 from models.loading import (
     build_and_load_deep_model,
     infer_dense_architecture_from_h5,
+    normalize_dataset_selection,
     parse_architecture,
     resolve_weight_path,
 )
@@ -205,7 +206,8 @@ def compare_qnn_to_keras(
 def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -> dict[str, Any]:
     """Run the full robustness synthesis pipeline and return a structured summary."""
 
-    dataset = load_dataset(config.dataset)  # type: ignore[arg-type]
+    selection = normalize_dataset_selection(config.dataset)
+    dataset = load_dataset(selection.base_name)
     weights_path = resolve_weight_path(repo_root, config.dataset, config.arch)
     if not weights_path.exists():
         raise FileNotFoundError(f"Could not resolve benchmark weights at {weights_path}")
@@ -273,6 +275,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
 
     summary: dict[str, Any] = {
         "dataset": config.dataset,
+        "base_dataset": selection.base_name,
         "arch": config.arch,
         "weights_path": str(weights_path),
         "sample_id": config.sample_id,

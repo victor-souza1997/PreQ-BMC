@@ -7,7 +7,13 @@ from pathlib import Path
 
 from backends.fixed_point import LayerQuantizationSpec, build_fixed_point_network, clone_quantized_keras_model
 from datasets.loaders import load_dataset
-from models.loading import build_and_load_deep_model, infer_dense_architecture_from_h5, parse_architecture, resolve_weight_path
+from models.loading import (
+    build_and_load_deep_model,
+    infer_dense_architecture_from_h5,
+    normalize_dataset_selection,
+    parse_architecture,
+    resolve_weight_path,
+)
 from synthesis.pipeline import compare_qnn_to_keras
 from utils.logging_utils import configure_logging
 
@@ -50,7 +56,8 @@ def main(argv: list[str] | None = None) -> None:
 
     dataset_name, arch, layer_specs = _load_quantization_specs(args.quant_config)
     repo_root = Path(__file__).resolve().parent.parent
-    dataset = load_dataset(dataset_name)  # type: ignore[arg-type]
+    selection = normalize_dataset_selection(dataset_name)
+    dataset = load_dataset(selection.base_name)
     weights_path = resolve_weight_path(repo_root, dataset_name, arch)
     inferred_arch = infer_dense_architecture_from_h5(weights_path)
     input_dim = inferred_arch[0] if inferred_arch else dataset.input_dim
