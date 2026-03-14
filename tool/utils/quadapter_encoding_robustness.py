@@ -1159,9 +1159,9 @@ class GPEncoding:
             "--no-pointer-check",              # Desabilita verificação de ponteiros
             "--timeout", "900",                # Timeout de 15 minutos por verificação
             "--verbosity", "10"                # Nível máximo de verbosidade para debug
-            , "--print-stack-traces"             # Imprime stack traces para facilitar debug
+            , "--print-stack-traces",             # Imprime stack traces para facilitar debug
+            "--ir",                         # Análise de intervalos para otimização
         ]
-            #"--ir",                         # Análise de intervalos para otimização
         
         try:
             # ==================== EXECUÇÃO DO ESBMC ====================
