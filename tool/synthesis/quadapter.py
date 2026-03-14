@@ -707,9 +707,16 @@ class GPEncoding:
         )
         layers_dir = self.output_dir / "layers"
         layers_dir.mkdir(parents=True, exist_ok=True)
-        c_file = layers_dir / f"layer_{layer_index}_Q{all_bit}_F{frac_bit}.c"
-        c_file.write_text(c_source, encoding="utf-8")
-        result = self.esbmc_runner.run_file(c_file)
+        archived_file = layers_dir / f"layer_{layer_index}_Q{all_bit}_F{frac_bit}.c"
+        archived_file.write_text(c_source, encoding="utf-8")
+
+        temp_file = Path(f"esbmc_verify_layer_{layer_index}_Q{all_bit}_F{frac_bit}.c")
+        temp_file.write_text(c_source, encoding="utf-8")
+        try:
+            result = self.esbmc_runner.run_file(temp_file)
+        finally:
+            if temp_file.exists():
+                temp_file.unlink()
         LOGGER.info("ESBMC layer=%s bits(Q=%s,F=%s) status=%s", cur_layer.layer_index, all_bit, frac_bit, result.status)
         return result
 
