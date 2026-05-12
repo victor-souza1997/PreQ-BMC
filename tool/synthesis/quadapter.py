@@ -8,11 +8,10 @@ from pathlib import Path
 import time
 from typing import Any
 
-import gurobipy as gp
-from gurobipy import GRB
 import numpy as np
 
 from symbolic_pp.DeepPoly_quadapter import DP_DNN_network
+from synthesis.preimage_cache import load_preimage_cache, save_preimage_cache
 from utils.fixed_point import int_get_min_max, quantize_int
 from utils.logging_utils import get_logger
 from verification.c_templates import (
@@ -24,6 +23,22 @@ from verification.esbmc import ESBMCConfig, ESBMCRunner, ESBMCResult
 from verification.properties import ClassificationProperty
 
 LOGGER = get_logger(__name__)
+
+try:
+    import gurobipy as gp
+    from gurobipy import GRB
+except ImportError:  # pragma: no cover - depends on host licensing/install.
+    gp = None  # type: ignore[assignment]
+    GRB = None  # type: ignore[assignment]
+
+
+def _require_gurobi() -> None:
+    if gp is None or GRB is None:
+        raise RuntimeError(
+            "gurobipy is required for this pipeline mode. "
+            "Use --no-gurobi with --verify-mode esbmc and a preimage cache, "
+            "or install/configure Gurobi."
+        )
 
 
 @dataclass(frozen=True)
@@ -39,6 +54,11 @@ class QuadapterConfig:
     output_dir: Path
     if_relax: bool = False
     esbmc: ESBMCConfig = ESBMCConfig()
+    no_gurobi: bool = False
+    save_preimage_cache: bool = False
+    preimage_cache_dir: Path | None = None
+    preimage_cache_key: str | None = None
+    preimage_cache_metadata: dict[str, Any] | None = None
 
     @classmethod
     def from_namespace(cls, args: Any) -> "QuadapterConfig":
@@ -51,6 +71,14 @@ class QuadapterConfig:
             eps=float(args.eps),
             output_dir=Path(getattr(args, "output_dir", getattr(args, "outputPath", "output"))),
             if_relax=bool(int(getattr(args, "if_relax", getattr(args, "ifRelax", 0)))),
+            no_gurobi=bool(getattr(args, "no_gurobi", False)),
+            save_preimage_cache=bool(getattr(args, "save_preimage_cache", False)),
+            preimage_cache_dir=(
+                Path(getattr(args, "preimage_cache_dir"))
+                if getattr(args, "preimage_cache_dir", None) is not None
+                else None
+            ),
+            preimage_cache_key=getattr(args, "preimage_cache_key", None),
         )
 
 
@@ -79,7 +107,7 @@ class LayerEncoding:
 
     def __init__(
         self,
-        gp_model: gp.Model,
+        gp_model: Any | None,
         preimg_mode: str,
         layer_index: int,
         layer_size: int,
@@ -97,9 +125,6 @@ class LayerEncoding:
         self.grad = None
         self.realVal = None
 
-        neuron_lb_after = 0 if if_hid else -GRB.MAXINT
-        neuron_lb_before = -GRB.MAXINT
-
         self.lb = np.zeros(layer_size, dtype=np.float32)
         self.ub = np.zeros(layer_size, dtype=np.float32)
         self.clipped_lb = np.zeros(layer_size, dtype=np.float32)
@@ -108,8 +133,6 @@ class LayerEncoding:
         self.qu_ub = np.zeros(layer_size, dtype=np.float32)
         self.qu_clipped_lb = np.zeros(layer_size, dtype=np.float32)
         self.qu_clipped_ub = np.zeros(layer_size, dtype=np.float32)
-
-        self.bit_vars = [gp_model.addVar(vtype=GRB.BINARY) for _ in range(self.bit_ub - self.bit_lb + 1)]
 
         if layer_index > 0:
             self.max_weight = np.round(max(np.max(layer_paras[0]), np.max(layer_paras[1])))
@@ -129,6 +152,26 @@ class LayerEncoding:
         self.relaxed_ub = np.zeros(layer_size, dtype=np.float32)
         self.relaxed_ub_expression = [1 for _ in range(layer_size)]
         self.actMode = np.zeros(layer_size, dtype=np.float32)
+        self.bit_vars: list[Any] = []
+        self.gp_vars_before: list[Any] = []
+        self.gp_vars_after: list[Any] = []
+        self.alpha: list[Any] = []
+        self.beta: list[Any] = []
+        self.gp_vars_lb_before: list[Any] = []
+        self.gp_vars_ub_before: list[Any] = []
+        self.alpha_before: list[Any] = []
+        self.alpha_after: list[Any] = []
+        self.beta_before: list[Any] = []
+        self.beta_after: list[Any] = []
+
+        if gp_model is None:
+            return
+
+        _require_gurobi()
+        neuron_lb_after = 0 if if_hid else -GRB.MAXINT
+        neuron_lb_before = -GRB.MAXINT
+
+        self.bit_vars = [gp_model.addVar(vtype=GRB.BINARY) for _ in range(self.bit_ub - self.bit_lb + 1)]
 
         if preimg_mode in {"milp", "comp"}:
             self.gp_vars_before = [
@@ -177,13 +220,7 @@ class GPEncoding:
         property_spec: ClassificationProperty | None = None,
     ) -> None:
         self.config = config if isinstance(config, QuadapterConfig) else QuadapterConfig.from_namespace(config)
-        self.gp_model = gp.Model("gp_encoding")
         self.tole = 1e-6
-        self.gp_model.Params.IntFeasTol = 1e-9
-        self.gp_model.Params.FeasibilityTol = self.tole
-        self.gp_model.setParam(GRB.Param.Threads, 30)
-        self.gp_model.setParam(GRB.Param.OutputFlag, 0)
-
         self.bit_lb = self.config.bit_lb
         self.bit_ub = self.config.bit_ub
         self.preimg_mode = self.config.preimg_mode
@@ -196,6 +233,19 @@ class GPEncoding:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.ifRelax = int(self.config.if_relax)
         self.scaleValueSet: list[float] = []
+
+        if self.config.no_gurobi and self.verify_mode != "esbmc":
+            raise ValueError("--no-gurobi requires --verify-mode esbmc because MILP forward verification uses Gurobi.")
+
+        if self.config.no_gurobi:
+            self.gp_model = None
+        else:
+            _require_gurobi()
+            self.gp_model = gp.Model("gp_encoding")
+            self.gp_model.Params.IntFeasTol = 1e-9
+            self.gp_model.Params.FeasibilityTol = self.tole
+            self.gp_model.setParam(GRB.Param.Threads, 30)
+            self.gp_model.setParam(GRB.Param.OutputFlag, 0)
 
         self._stats = {
             "encoding_time": 0.0,
@@ -264,7 +314,8 @@ class GPEncoding:
         for input_index in range(self.input_layer.layer_size):
             x_lb = x_low_real[input_index]
             x_ub = x_high_real[input_index]
-            self.input_gp_vars.append(self.gp_model.addVar(lb=x_lb, ub=x_ub, vtype=GRB.CONTINUOUS))
+            if self.gp_model is not None:
+                self.input_gp_vars.append(self.gp_model.addVar(lb=x_lb, ub=x_ub, vtype=GRB.CONTINUOUS))
 
     def verified_quant(self, lb: np.ndarray, ub: np.ndarray) -> tuple[bool, Any, Any, Any]:
         result = self.run(lb, ub)
@@ -287,7 +338,12 @@ class GPEncoding:
             raise ValueError("The property does not hold in the original DNN for the selected input region.")
 
         backward_start_time = time.time()
-        self.backward_preimage_computation()
+        if self.config.no_gurobi:
+            self.load_cached_preimage()
+        else:
+            self.backward_preimage_computation()
+            if self.config.save_preimage_cache:
+                self.save_cached_preimage()
         backward_end_time = time.time()
 
         if self.verify_mode == "esbmc":
@@ -341,7 +397,68 @@ class GPEncoding:
             self.output_layer.lb[out_index] = neuron.concrete_lower_noClip
             self.output_layer.ub[out_index] = neuron.concrete_upper_noClip
 
+    def _preimage_cache_root(self) -> Path:
+        return self.config.preimage_cache_dir or (self.output_dir / "preimage_cache")
+
+    def _preimage_cache_key(self) -> str:
+        if not self.config.preimage_cache_key:
+            raise ValueError(
+                "A preimage cache key is required. Use --preimage-cache-key or run through "
+                "scripts/run_robustness_pipeline.py so the key can be derived from the benchmark."
+            )
+        return self.config.preimage_cache_key
+
+    def save_cached_preimage(self) -> Path:
+        layers = [
+            {
+                "layer_index": int(layer.layer_index),
+                "layer_size": int(layer.layer_size),
+                "relaxed_lb": np.asarray(layer.relaxed_lb, dtype=np.float64),
+                "relaxed_ub": np.asarray(layer.relaxed_ub, dtype=np.float64),
+            }
+            for layer in self.dense_layers
+        ]
+        cache_path = save_preimage_cache(
+            cache_root=self._preimage_cache_root(),
+            cache_key=self._preimage_cache_key(),
+            layers=layers,
+            scale_values=np.asarray(self.scaleValueSet, dtype=np.float64),
+            metadata=self.config.preimage_cache_metadata or {},
+        )
+        LOGGER.info("Saved Gurobi preimage cache to %s", cache_path)
+        return cache_path
+
+    def load_cached_preimage(self) -> None:
+        metadata, arrays = load_preimage_cache(
+            cache_root=self._preimage_cache_root(),
+            cache_key=self._preimage_cache_key(),
+        )
+        layer_indices = arrays["layer_indices"].astype(np.int64)
+        layer_sizes = arrays["layer_sizes"].astype(np.int64)
+        if len(layer_indices) != len(self.dense_layers):
+            raise ValueError(
+                f"Preimage cache has {len(layer_indices)} hidden layer(s), "
+                f"but this model has {len(self.dense_layers)}."
+            )
+
+        for offset, layer in enumerate(self.dense_layers):
+            cached_index = int(layer_indices[offset])
+            cached_size = int(layer_sizes[offset])
+            if cached_index != int(layer.layer_index) or cached_size != int(layer.layer_size):
+                raise ValueError(
+                    "Preimage cache does not match this model: "
+                    f"cache layer {offset} has index/size {cached_index}/{cached_size}, "
+                    f"model has {layer.layer_index}/{layer.layer_size}."
+                )
+            layer.relaxed_lb = arrays[f"relaxed_lb_{offset}"].astype(np.float32)
+            layer.relaxed_ub = arrays[f"relaxed_ub_{offset}"].astype(np.float32)
+
+        self.scaleValueSet = arrays["scale_values"].astype(np.float64).tolist()
+        LOGGER.info("Loaded Gurobi preimage cache %s (%s)", self._preimage_cache_key(), metadata.get("format"))
+
     def backward_preimage_computation(self) -> None:
+        if self.gp_model is None:
+            raise RuntimeError("Cannot compute a preimage without Gurobi. Use load_cached_preimage() instead.")
         cur_layer = self.output_layer
         in_layer_index = len(self.dense_layers)
         for in_layer in reversed(self.dense_layers):
@@ -843,6 +960,8 @@ class GPEncoding:
         path.write_text(json.dumps(text, indent=2), encoding="utf-8")
 
     def forward_quantization(self) -> tuple[bool, Any, Any, Any]:
+        if self.gp_model is None:
+            raise RuntimeError("--verify-mode milp requires Gurobi; use --verify-mode esbmc with --no-gurobi.")
         qu_list: list[int] = []
         qu_frac_list: list[int] = []
         qu_int_list: list[int] = []

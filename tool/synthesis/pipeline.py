@@ -25,6 +25,7 @@ from models.loading import (
     resolve_weight_path,
 )
 from synthesis.forward import forward_dnn
+from synthesis.preimage_cache import build_preimage_cache_identity
 from synthesis.quadapter import GPEncoding, QuadapterConfig, SynthesisResult
 from utils.logging_utils import get_logger
 from verification.properties import ClassificationProperty
@@ -52,6 +53,10 @@ class RobustnessPipelineConfig:
     compare_limit: int | None = 100
     compile_c_backend: bool = True
     compiler: str = "gcc"
+    no_gurobi: bool = False
+    save_preimage_cache: bool = False
+    preimage_cache_dir: Path | None = None
+    preimage_cache_key: str | None = None
 
 
 def _predict_logits(model: Any, features: np.ndarray) -> np.ndarray:
@@ -106,6 +111,13 @@ def _save_mismatches_csv(path: Path, rows: list[dict[str, Any]]) -> Path:
         for row in rows:
             writer.writerow(row)
     return path
+
+
+def _format_architecture_from_layers(layer_units: list[int]) -> str:
+    hidden_units = layer_units[:-1]
+    if hidden_units:
+        return f"{len(hidden_units)}blk_" + "_".join(str(width) for width in hidden_units)
+    return f"1blk_{layer_units[-1]}"
 
 
 def compare_qnn_to_keras(
@@ -220,6 +232,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         input_dim = inferred_arch[0]
         layer_units = inferred_arch[1:]
         num_classes = layer_units[-1]
+    cache_arch = _format_architecture_from_layers(layer_units) if selection.benchmark_name is not None else config.arch
 
     model = build_and_load_deep_model(
         input_dim=input_dim,
@@ -246,6 +259,21 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         valid_labels=config.valid_labels,
     )
     property_spec.validate(num_classes)
+    preimage_cache_key = config.preimage_cache_key
+    preimage_cache_metadata: dict[str, Any] | None = None
+    if config.no_gurobi or config.save_preimage_cache:
+        derived_key, preimage_cache_metadata = build_preimage_cache_identity(
+            dataset=config.dataset,
+            arch=cache_arch,
+            sample_id=config.sample_id,
+            eps=config.eps,
+            preimg_mode=config.preimg_mode,
+            if_relax=config.if_relax,
+            target_label=int(property_spec.target_label if property_spec.target_label is not None else predicted_label),
+            valid_labels=property_spec.valid_labels,
+            weights_path=weights_path,
+        )
+        preimage_cache_key = preimage_cache_key or derived_key
 
     synth_config = QuadapterConfig(
         bit_lb=config.bit_lb,
@@ -256,6 +284,11 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         eps=config.eps,
         output_dir=config.output_dir,
         if_relax=config.if_relax,
+        no_gurobi=config.no_gurobi,
+        save_preimage_cache=config.save_preimage_cache,
+        preimage_cache_dir=config.preimage_cache_dir,
+        preimage_cache_key=preimage_cache_key,
+        preimage_cache_metadata=preimage_cache_metadata,
     )
     synthesizer = GPEncoding(
         arch=[input_dim] + layer_units,
@@ -284,6 +317,12 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         "sample_logits": sample_logits.tolist(),
         "synthesis": synthesis_result.to_dict(),
     }
+    if preimage_cache_key:
+        summary["preimage_cache"] = {
+            "key": preimage_cache_key,
+            "dir": str(config.preimage_cache_dir or (config.output_dir / "preimage_cache")),
+            "mode": "load" if config.no_gurobi else "save" if config.save_preimage_cache else "unused",
+        }
 
     quant_config_path = _save_json(config.output_dir / "reports" / "quantization_config.json", summary)
     summary["artifacts"] = {"quantization_config": str(quant_config_path)}

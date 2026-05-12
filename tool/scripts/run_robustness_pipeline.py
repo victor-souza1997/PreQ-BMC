@@ -4,6 +4,10 @@ import argparse
 import json
 import logging
 from pathlib import Path
+import sys
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from synthesis.pipeline import RobustnessPipelineConfig, run_robustness_pipeline
 from utils.logging_utils import configure_logging
@@ -40,6 +44,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--compare-limit", type=int, default=100, help="Number of samples to compare for the QNN-vs-Keras report. Use 0 for all.")
     parser.add_argument("--skip-c-backend", action="store_true", help="Skip gcc compilation and C shared-library execution.")
     parser.add_argument("--compiler", default="gcc")
+    parser.add_argument(
+        "--no-gurobi",
+        "--no_gurobi",
+        action="store_true",
+        help="Load cached preimage bounds instead of calling Gurobi. Requires --verify-mode esbmc.",
+    )
+    parser.add_argument(
+        "--save-preimage-cache",
+        "--save_preimage_cache",
+        action="store_true",
+        help="After computing the preimage with Gurobi, save it for later --no-gurobi runs.",
+    )
+    parser.add_argument(
+        "--preimage-cache-dir",
+        "--preimage_cache_dir",
+        dest="preimage_cache_dir",
+        default=None,
+        help="Directory containing/exporting preimage cache entries. Defaults to OUTPUT_DIR/preimage_cache.",
+    )
+    parser.add_argument(
+        "--preimage-cache-key",
+        "--preimage_cache_key",
+        dest="preimage_cache_key",
+        default=None,
+        help="Optional explicit preimage cache key. By default it is derived from dataset/arch/sample/eps/model.",
+    )
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return parser
 
@@ -66,6 +96,10 @@ def main(argv: list[str] | None = None) -> None:
         compare_limit=None if args.compare_limit == 0 else args.compare_limit,
         compile_c_backend=not args.skip_c_backend,
         compiler=args.compiler,
+        no_gurobi=args.no_gurobi,
+        save_preimage_cache=args.save_preimage_cache,
+        preimage_cache_dir=Path(args.preimage_cache_dir) if args.preimage_cache_dir is not None else None,
+        preimage_cache_key=args.preimage_cache_key,
     )
 
     summary = run_robustness_pipeline(Path(__file__).resolve().parent.parent, config)

@@ -42,3 +42,43 @@ python Quadapter_robustness_main.py --dataset mnist --arch 1blk_100 --sample_id 
 
 python Quadapter_backdoor_main.py --dataset mnist --arch 1blk_100 --bit_lb 2 --loc_row 1  --loc_col 1  --stamp_size 3 --targetCls 8 --originalCls 10 --K 5 --delta 0.05 --preimg_mode milp --ifRelax 1  --outputPath ./output/
 ```
+
+
+Running Script
+
+```
+# Notas de Execucao
+
+
+// Gerar cache
+python scripts/export_gurobi_preimage_cache.py \
+  --datasets mnist \
+  --archs 1blk_100 \
+  --sample-ids 0 \
+  --eps 1.0 \
+  --preimage-mode milp \
+  --cache-dir output/preimage_cache
+
+// Executar lendo cache
+python scripts/run_robustness_pipeline.py \
+  --dataset iris_15x2  \
+  --arch 2blk_15_15 \
+  --sample-id 0 \
+  --eps 1.0 \
+  --preimage-mode milp \
+  --verify-mode esbmc \
+  --no-gurobi \
+  --preimage-cache-dir output/preimage_cache
+
+// Execucao normal
+python3 Quadapter_robustness_main.py --dataset iris_15x2 --arch 1blk_10 --sample_id 25 --eps 0.05 --preimg_mode milp --verify_mode esbmc --ifRelax 0 --outputPath ./output/
+
+
+python scripts/export_gurobi_preimage_cache.py \
+  --datasets iris_15x2 \
+  --sample-ids 27 \
+  --eps 0.05 \
+  --preimage-mode milp \
+  --cache-dir output/preimage_cache
+
+```
