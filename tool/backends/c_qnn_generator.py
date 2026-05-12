@@ -52,7 +52,9 @@ static const int64_t LAYER_{index}_BIASES[{layer.biases_int.shape[0]}] = {_c_arr
         for (int in_idx = 0; in_idx < LAYER_{index}_IN; ++in_idx) {{
             acc += (__int128)LAYER_{index}_WEIGHTS[out_idx][in_idx] * (__int128){in_buffer}[in_idx];
         }}
-        __int128 value = div_round_half_away_from_zero_i128(acc, 1LL << {current_input_frac}) + (__int128)LAYER_{index}_BIASES[out_idx];
+        __int128 value = div_round_half_away_from_zero_i128(
+            acc, ((__int128)1 << {current_input_frac})) + (__int128)LAYER_{index}_BIASES[out_idx];
+        
         value = clamp_to_signed_range(value, LAYER_{index}_Q);
         {relu_clause}
         {out_buffer}[out_idx] = (int64_t)clamp_to_signed_range(value, LAYER_{index}_Q);
@@ -65,6 +67,14 @@ static const int64_t LAYER_{index}_BIASES[{layer.biases_int.shape[0]}] = {_c_arr
 
     return f"""\
 #include <stdint.h>
+#include <limits.h>
+
+#ifdef QNN_VERIFY_WITH_ESBMC
+void __ESBMC_assert(_Bool, const char *);
+#define QNN_ASSERT(cond, msg) __ESBMC_assert((cond), (msg))
+#else
+#define QNN_ASSERT(cond, msg) ((void)0)
+#endif
 
 static inline __int128 clamp_to_signed_range(__int128 value, int total_bits) {{
     const __int128 lower = -((__int128)1 << (total_bits - 1));
@@ -74,7 +84,8 @@ static inline __int128 clamp_to_signed_range(__int128 value, int total_bits) {{
     return value;
 }}
 
-static inline __int128 div_round_half_away_from_zero_i128(__int128 numerator, int64_t denominator) {{
+static inline __int128 div_round_half_away_from_zero_i128(__int128 numerator, __int128 denominator){{
+    QNN_ASSERT(denominator > 0, "denominator must be positive");
     if (numerator >= 0) {{
         return (numerator + denominator / 2) / denominator;
     }}
