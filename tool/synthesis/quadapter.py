@@ -810,6 +810,71 @@ class GPEncoding:
 
         return True, qu_list, qu_frac_list, qu_int_list
 
+    def verify_exported_quantization_with_esbmc(
+        self,
+        total_bits: list[int],
+        fractional_bits: list[int],
+        integer_bits: list[int],
+    ) -> tuple[bool, list[dict[str, Any]]]:
+        """Run the existing ESBMC layer checks for an explicit exported Q/I/F configuration.
+
+        `integer_bits` follows the backend/export convention and excludes the sign bit.
+        This method does not change the preimage methodology; it reuses the same generated
+        layer contracts used by `forward_quantization_with_esbmc`.
+        """
+
+        non_input_layers = self.dense_layers.copy()
+        non_input_layers.append(self.output_layer)
+        if not (len(total_bits) == len(fractional_bits) == len(integer_bits) == len(non_input_layers)):
+            raise ValueError("Expected one Q/I/F entry per non-input layer.")
+
+        records: list[dict[str, Any]] = []
+        self.deepPolyNets_DNN.load_dnn(self.deep_model)
+
+        for layer_index, cur_layer in enumerate(non_input_layers):
+            in_layer = self.input_layer if cur_layer.layer_index == 1 else self.dense_layers[cur_layer.layer_index - 2]
+            q_bits = int(total_bits[layer_index])
+            f_bits = int(fractional_bits[layer_index])
+            i_bits = int(integer_bits[layer_index])
+            if q_bits != i_bits + f_bits + 1:
+                records.append(
+                    {
+                        "layer_index": int(layer_index),
+                        "total_bits": q_bits,
+                        "integer_bits": i_bits,
+                        "fractional_bits": f_bits,
+                        "status": "INVALID_QIF",
+                    }
+                )
+                return False, records
+
+            qu_w_int = quantize_int(cur_layer.layer_paras[0], q_bits, f_bits)
+            qu_b_int = quantize_int(cur_layer.layer_paras[1], q_bits, f_bits)
+            esbmc_result = self.verify_layer_with_esbmc(
+                cur_layer=cur_layer,
+                in_layer=in_layer,
+                qu_w_int=np.asarray(qu_w_int),
+                qu_b_int=np.asarray(qu_b_int),
+                frac_bit=f_bits,
+                all_bit=q_bits,
+                layer_index=layer_index,
+            )
+            records.append(
+                {
+                    "layer_index": int(layer_index),
+                    "total_bits": q_bits,
+                    "integer_bits": i_bits,
+                    "fractional_bits": f_bits,
+                    "status": esbmc_result.status,
+                }
+            )
+            if esbmc_result.status != "VERIFIED":
+                return False, records
+
+            self.update_quantized_weights_affine(in_layer, cur_layer, q_bits, f_bits, f_bits, layer_index)
+
+        return True, records
+
     def verify_layer_with_esbmc(
         self,
         cur_layer: LayerEncoding,
