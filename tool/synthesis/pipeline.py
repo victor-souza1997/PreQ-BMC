@@ -8,13 +8,19 @@ from typing import Any
 
 import numpy as np
 
-from backends.c_qnn_generator import CompiledCQNN, compile_c_qnn_shared_library, write_c_qnn_source
+from backends.c_qnn_generator import (
+    CompiledCQNN,
+    compare_python_c_fixed_point_outputs,
+    compile_c_qnn_shared_library,
+    write_c_qnn_source,
+)
 from backends.fixed_point import (
     FixedPointNetwork,
     LayerQuantizationSpec,
     build_fixed_point_network,
     clone_quantized_keras_model,
     forward_fixed_point_batch,
+    forward_fixed_point_batch_with_diagnostics,
 )
 from datasets.loaders import DatasetBundle, load_dataset, select_split
 from models.loading import (
@@ -53,6 +59,7 @@ class RobustnessPipelineConfig:
     compare_limit: int | None = 100
     compile_c_backend: bool = True
     compiler: str = "gcc"
+    enable_diagnostics: bool = True
     no_gurobi: bool = False
     save_preimage_cache: bool = False
     preimage_cache_dir: Path | None = None
@@ -130,6 +137,7 @@ def compare_qnn_to_keras(
     output_dir: Path,
     compile_c_backend: bool,
     compiler: str,
+    enable_diagnostics: bool = True,
 ) -> dict[str, Any]:
     """Compare Python and generated-C QNN execution against the quantized Keras model."""
 
@@ -138,16 +146,22 @@ def compare_qnn_to_keras(
         features = features[:limit]
         labels = labels[:limit]
 
+    normalized_features = _normalize_features(features, dataset.input_scale)
     keras_logits = _predict_logits(quantized_model, features)
-    python_qnn_logits = forward_fixed_point_batch(
-        fixed_point_network,
-        _normalize_features(features, dataset.input_scale),
-    )
+    if enable_diagnostics:
+        python_qnn_logits, python_diagnostics = forward_fixed_point_batch_with_diagnostics(
+            fixed_point_network,
+            normalized_features,
+        )
+    else:
+        python_qnn_logits = forward_fixed_point_batch(fixed_point_network, normalized_features)
+        python_diagnostics = {"enabled": False, "samples": int(labels.shape[0]), "layers": []}
 
     c_qnn_logits: np.ndarray | None = None
     c_backend_status = "SKIPPED"
     c_source_path: Path | None = None
     c_shared_path: Path | None = None
+    python_c_integer_comparison: dict[str, Any] | None = None
     if compile_c_backend:
         try:
             c_source_path = write_c_qnn_source(fixed_point_network, output_dir / "c_export" / "qnn_model.c")
@@ -158,11 +172,15 @@ def compare_qnn_to_keras(
             )
             compiled_qnn = CompiledCQNN(fixed_point_network, c_shared_path)
             c_outputs = []
-            normalized_features = _normalize_features(features, dataset.input_scale)
             for sample in normalized_features:
                 output_int = compiled_qnn.forward(sample)
                 c_outputs.append(output_int.astype(np.float64) / float(2 ** fixed_point_network.output_fractional_bits))
             c_qnn_logits = np.asarray(c_outputs, dtype=np.float64)
+            python_c_integer_comparison = compare_python_c_fixed_point_outputs(
+                fixed_point_network,
+                normalized_features,
+                compiled_qnn,
+            )
             c_backend_status = "OK"
         except Exception as exc:
             c_backend_status = f"ERROR: {exc}"
@@ -174,6 +192,28 @@ def compare_qnn_to_keras(
 
     abs_error = np.abs(python_qnn_logits - keras_logits)
     mismatch_mask = python_pred != keras_pred
+    keras_vs_python_mismatch_rate = float(np.mean(mismatch_mask))
+    keras_vs_c_mismatch_rate = float(np.mean(c_pred != keras_pred)) if c_pred is not None else None
+    keras_quantized_accuracy = _compute_accuracy(keras_logits, labels)
+    python_qnn_accuracy = _compute_accuracy(python_qnn_logits, labels)
+    c_qnn_accuracy = _compute_accuracy(c_qnn_logits, labels) if c_qnn_logits is not None else None
+    warnings: list[str] = []
+    if keras_quantized_accuracy - python_qnn_accuracy > 0.05:
+        warnings.append(
+            "Fixed-point accuracy is more than 5 percentage points below quantized Keras accuracy; "
+            "inspect saturation, scaling, and layer-wise diagnostics."
+        )
+    for layer_diag in python_diagnostics.get("layers", []):
+        if float(layer_diag.get("saturation_rate", 0.0)) > 0.01:
+            warnings.append(
+                f"Layer {int(layer_diag['layer_index'])} has saturation_rate > 1%; "
+                "consider increasing integer_bits for that layer."
+            )
+    if python_c_integer_comparison is not None and not python_c_integer_comparison.get("exact_match", False):
+        warnings.append(
+            "Generated C fixed-point outputs differ from Python fixed-point outputs; "
+            f"max integer difference is {python_c_integer_comparison.get('max_integer_difference')}."
+        )
     mismatch_indices = np.flatnonzero(mismatch_mask)
     mismatch_rows: list[dict[str, Any]] = []
     for index in mismatch_indices[:25]:
@@ -193,15 +233,26 @@ def compare_qnn_to_keras(
 
     metrics = {
         "samples_evaluated": int(labels.shape[0]),
-        "keras_quantized_accuracy": _compute_accuracy(keras_logits, labels),
-        "python_qnn_accuracy": _compute_accuracy(python_qnn_logits, labels),
-        "python_qnn_mismatch_rate_vs_keras": float(np.mean(mismatch_mask)),
+        "keras_quantized_accuracy": keras_quantized_accuracy,
+        "python_qnn_accuracy": python_qnn_accuracy,
+        "python_qnn_mismatch_rate_vs_keras": keras_vs_python_mismatch_rate,
         "python_qnn_max_abs_error": float(np.max(abs_error)),
         "python_qnn_mean_abs_error": float(np.mean(abs_error)),
         "python_qnn_max_abs_error_per_output": np.max(abs_error, axis=0).tolist(),
         "c_backend_status": c_backend_status,
-        "c_qnn_accuracy": _compute_accuracy(c_qnn_logits, labels) if c_qnn_logits is not None else None,
-        "c_qnn_mismatch_rate_vs_keras": float(np.mean(c_pred != keras_pred)) if c_pred is not None else None,
+        "c_qnn_accuracy": c_qnn_accuracy,
+        "c_qnn_mismatch_rate_vs_keras": keras_vs_c_mismatch_rate,
+        "python_c_integer_comparison": python_c_integer_comparison,
+        "fixed_point_diagnostics": {
+            "python": python_diagnostics,
+        },
+        "semantic_gap": {
+            "keras_vs_python_mismatch_rate": keras_vs_python_mismatch_rate,
+            "keras_vs_c_mismatch_rate": keras_vs_c_mismatch_rate,
+            "max_abs_logit_error": float(np.max(abs_error)),
+            "mean_abs_logit_error": float(np.mean(abs_error)),
+        },
+        "warnings": warnings,
         "artifacts": {
             "c_source": str(c_source_path) if c_source_path is not None else None,
             "c_shared_library": str(c_shared_path) if c_shared_path is not None else None,
@@ -342,6 +393,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         output_dir=config.output_dir,
         compile_c_backend=config.compile_c_backend,
         compiler=config.compiler,
+        enable_diagnostics=config.enable_diagnostics,
     )
     summary["comparison"] = comparison
 

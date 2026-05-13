@@ -7,6 +7,8 @@ from .fixed_point import (
     build_fixed_point_network,
     clone_quantized_keras_model,
     forward_fixed_point_batch,
+    forward_fixed_point_batch_with_diagnostics,
+    forward_fixed_point_single_trace,
 )
 
 __all__ = [
@@ -16,4 +18,6 @@ __all__ = [
     "build_fixed_point_network",
     "clone_quantized_keras_model",
     "forward_fixed_point_batch",
+    "forward_fixed_point_batch_with_diagnostics",
+    "forward_fixed_point_single_trace",
 ]

@@ -41,6 +41,12 @@ def _require_gurobi() -> None:
         )
 
 
+def _export_integer_bits(internal_integer_bits: int) -> int:
+    """Convert Quadapter's internal sign-inclusive integer width to exported magnitude bits."""
+
+    return max(int(internal_integer_bits) - 1, 0)
+
+
 @dataclass(frozen=True)
 class QuadapterConfig:
     """Configuration for the robustness quantization search."""
@@ -794,7 +800,7 @@ class GPEncoding:
                 if esbmc_result.status == "VERIFIED":
                     cur_layer.frac_bit = frac_bit
                     qu_frac_list.append(frac_bit)
-                    qu_int_list.append(int_bit)
+                    qu_int_list.append(_export_integer_bits(int_bit))
                     qu_list.append(all_bit)
                     if_found = True
                     self.update_quantized_weights_affine(in_layer, cur_layer, all_bit, frac_bit, frac_bit, in_layer_index)
@@ -942,13 +948,15 @@ class GPEncoding:
         frac_qu_list: list[int] = []
         int_qu_list: list[int] = []
         for i, _ in enumerate(self.dense_layers):
-            real_qu_list.append(qu_frac_list[i] + int(self.dense_layers[i].int_bit))
+            exported_int_bits = _export_integer_bits(int(self.dense_layers[i].int_bit))
+            real_qu_list.append(qu_frac_list[i] + exported_int_bits + 1)
             frac_qu_list.append(qu_frac_list[i])
-            int_qu_list.append(int(self.dense_layers[i].int_bit))
+            int_qu_list.append(exported_int_bits)
 
-        real_qu_list.append(qu_frac_list[-1] + int(self.output_layer.int_bit))
+        exported_output_int_bits = _export_integer_bits(int(self.output_layer.int_bit))
+        real_qu_list.append(qu_frac_list[-1] + exported_output_int_bits + 1)
         frac_qu_list.append(qu_frac_list[-1])
-        int_qu_list.append(int(self.output_layer.int_bit))
+        int_qu_list.append(exported_output_int_bits)
 
         text = {
             "Solving Result": True,
@@ -1105,7 +1113,7 @@ class GPEncoding:
                 if self.gp_model.status == GRB.INFEASIBLE:
                     cur_layer.frac_bit = frac_bit
                     qu_frac_list.append(frac_bit)
-                    qu_int_list.append(int_bit)
+                    qu_int_list.append(_export_integer_bits(int_bit))
                     qu_list.append(all_bit)
                     ifFound = True
                     self.gp_model.remove(model_cstr_ll)

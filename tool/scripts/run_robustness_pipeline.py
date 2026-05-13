@@ -42,6 +42,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--valid-labels", default=None, help="Comma-separated valid output labels for the output property.")
     parser.add_argument("--compare-split", default="test", choices=["train", "test"])
     parser.add_argument("--compare-limit", type=int, default=100, help="Number of samples to compare for the QNN-vs-Keras report. Use 0 for all.")
+    parser.add_argument(
+        "--enable-diagnostics",
+        dest="enable_diagnostics",
+        action="store_true",
+        default=True,
+        help="Include fixed-point saturation and semantic-gap diagnostics in the QNN-vs-Keras report.",
+    )
+    parser.add_argument(
+        "--disable-diagnostics",
+        dest="enable_diagnostics",
+        action="store_false",
+        help="Skip detailed fixed-point diagnostics in the QNN-vs-Keras report.",
+    )
     parser.add_argument("--skip-c-backend", action="store_true", help="Skip gcc compilation and C shared-library execution.")
     parser.add_argument("--compiler", default="gcc")
     parser.add_argument(
@@ -96,6 +109,7 @@ def main(argv: list[str] | None = None) -> None:
         compare_limit=None if args.compare_limit == 0 else args.compare_limit,
         compile_c_backend=not args.skip_c_backend,
         compiler=args.compiler,
+        enable_diagnostics=args.enable_diagnostics,
         no_gurobi=args.no_gurobi,
         save_preimage_cache=args.save_preimage_cache,
         preimage_cache_dir=Path(args.preimage_cache_dir) if args.preimage_cache_dir is not None else None,
