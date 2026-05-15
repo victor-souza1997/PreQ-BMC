@@ -66,6 +66,32 @@ def deployment_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _formal_saturation_controls(
+    pipeline_summary: dict[str, Any],
+    layers_override: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    verification = pipeline_summary.get("formal_saturation_verification", {})
+    enabled = bool(verification.get("enabled", pipeline_summary.get("formal_saturation_check_enabled", False)))
+    empirical_enabled = bool(pipeline_summary.get("empirical_saturation_check_enabled", True))
+    layers = layers_override if layers_override is not None else verification.get("layers", [])
+    failed_layers = [
+        int(layer.get("layer_index", index))
+        for index, layer in enumerate(layers)
+        if layer.get("no_saturation_status") not in {"VERIFIED", "DISABLED"}
+    ]
+    verified_all = bool(
+        enabled
+        and layers
+        and all(layer.get("no_saturation_status") == "VERIFIED" for layer in layers)
+    )
+    return {
+        "formal_saturation_check_enabled": enabled,
+        "empirical_saturation_check_enabled": empirical_enabled,
+        "no_saturation_verified_all_layers": verified_all,
+        "no_saturation_failed_layers": failed_layers,
+    }
+
+
 def build_experiment_summary(
     *,
     pipeline_summary: dict[str, Any],
@@ -90,6 +116,17 @@ def build_experiment_summary(
     formal_stats = formal_synthesis.get("stats", {})
     refined_stats = synthesis.get("stats", {})
     samples_evaluated = comparison.get("samples_evaluated")
+    refinement_steps = quality.get("steps", [])
+    formal_esbmc_layers = (
+        refinement_steps[0].get("esbmc", {}).get("layers", [])
+        if refinement_steps
+        else pipeline_summary.get("formal_saturation_verification", {}).get("layers", [])
+    )
+    refined_esbmc_layers = _final_esbmc_layers(quality) or pipeline_summary.get(
+        "formal_saturation_verification", {}
+    ).get("layers", [])
+    formal_saturation_controls = _formal_saturation_controls(pipeline_summary, formal_esbmc_layers)
+    refined_saturation_controls = _formal_saturation_controls(pipeline_summary, refined_esbmc_layers)
 
     formal_section = {
         "success": bool(formal_synthesis.get("success", False)),
@@ -103,6 +140,7 @@ def build_experiment_summary(
         },
         "deployment_metrics": deployment_metrics(formal_metrics),
         "resource_metrics": formal_resource_metrics or {},
+        **formal_saturation_controls,
     }
 
     refined_section = {
@@ -120,6 +158,7 @@ def build_experiment_summary(
         },
         "deployment_metrics": deployment_metrics(refined_metrics),
         "resource_metrics": refined_resource_metrics or {},
+        **refined_saturation_controls,
     }
 
     return {
@@ -139,6 +178,7 @@ def build_experiment_summary(
         },
         "formal_only": formal_section,
         "quality_refined": refined_section,
+        **refined_saturation_controls,
         "external_baselines": external_baselines,
         "artifacts": artifacts,
     }

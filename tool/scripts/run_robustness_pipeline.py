@@ -60,6 +60,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip detailed fixed-point diagnostics in the QNN-vs-Keras report.",
     )
     parser.add_argument(
+        "--formal-saturation-check",
+        dest="formal_saturation_check",
+        action="store_true",
+        default=True,
+        help="Require ESBMC no-saturation verification for fixed-point affine layers.",
+    )
+    parser.add_argument(
+        "--no-formal-saturation-check",
+        dest="formal_saturation_check",
+        action="store_false",
+        help="Disable ESBMC no-saturation verification as an acceptance criterion.",
+    )
+    parser.add_argument(
+        "--empirical-saturation-check",
+        dest="empirical_saturation_check",
+        action="store_true",
+        default=True,
+        help="Use Python fixed-point saturation diagnostics as a deployment-quality acceptance criterion.",
+    )
+    parser.add_argument(
+        "--no-empirical-saturation-check",
+        dest="empirical_saturation_check",
+        action="store_false",
+        help="Do not reject/refine candidates based on empirical saturation diagnostics.",
+    )
+    parser.add_argument(
         "--accuracy-drop-threshold",
         type=float,
         default=0.05,
@@ -157,6 +183,8 @@ def main(argv: list[str] | None = None) -> None:
         compile_c_backend=not args.skip_c_backend,
         compiler=args.compiler,
         enable_diagnostics=args.enable_diagnostics,
+        formal_saturation_check=args.formal_saturation_check,
+        empirical_saturation_check=args.empirical_saturation_check,
         accuracy_drop_threshold=_optional_threshold(args.accuracy_drop_threshold),
         saturation_threshold=_optional_threshold(args.saturation_threshold),
         mismatch_threshold=_optional_threshold(args.mismatch_threshold),

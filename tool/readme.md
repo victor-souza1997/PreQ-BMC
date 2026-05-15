@@ -82,3 +82,125 @@ python scripts/export_gurobi_preimage_cache.py \
   --cache-dir output/preimage_cache
 
 ```
+
+# Run Experiments
+Run from the repo root:
+
+```bash
+cd /home/joao/code/Quadapter
+```
+
+**Single Experiment**
+Example for Iris, sample 25, eps 0.1, ESBMC verification:
+
+```bash
+python tool/scripts/run_robustness_pipeline.py \
+  --dataset iris_15x2 \
+  --arch 1blk_15 \
+  --sample-id 25 \
+  --eps 0.1 \
+  --bit-lb 1 \
+  --bit-ub 16 \
+  --preimage-mode milp \
+  --verify-mode esbmc \
+  --compare-limit 0 \
+  --output-dir output/iris_15x2_id25_eps0p1
+```
+
+By default this now runs:
+- existing DeepPoly/backward-preimage verification
+- existing ESBMC preimage/argmax checks
+- formal ESBMC no-saturation checks
+- empirical saturation diagnostics/gating
+- quality refinement
+- paper table export
+
+Main outputs:
+
+```text
+output/iris_15x2_id25_eps0p1/reports/pipeline_summary.json
+output/iris_15x2_id25_eps0p1/reports/experiment_summary.json
+output/iris_15x2_id25_eps0p1/reports/qnn_vs_keras_metrics.json
+output/iris_15x2_id25_eps0p1/reports/refinement_history.json
+output/iris_15x2_id25_eps0p1/reports/table_formal_vs_refined.csv
+output/iris_15x2_id25_eps0p1/reports/table_deployment_metrics.csv
+output/iris_15x2_id25_eps0p1/reports/table_resource_metrics.csv
+```
+
+**Useful Flags**
+Disable formal no-saturation ESBMC:
+
+```bash
+--no-formal-saturation-check
+```
+
+Disable empirical saturation rejection while still allowing diagnostics:
+
+```bash
+--no-empirical-saturation-check
+```
+
+Disable quality refinement entirely, closer to old behavior:
+
+```bash
+--max-quality-refinement-steps 0
+```
+
+Tune quality thresholds:
+
+```bash
+--accuracy-drop-threshold 0.05 \
+--saturation-threshold 0.01 \
+--mismatch-threshold 0.05 \
+--max-quality-refinement-steps 10
+```
+
+Add external baseline data:
+
+```bash
+--baseline-results-json path/to/baseline.json
+```
+
+**Batch Experiments**
+Create a config, for example:
+
+```json
+{
+  "runs": [
+    {
+      "dataset": "iris_15x2",
+      "arch": "1blk_15",
+      "sample_ids": [0, 5, 10, 15, 20, 25],
+      "eps_values": [0.05, 0.1, 0.2],
+      "bit_lb": 1,
+      "bit_ub": 16,
+      "verify_mode": "esbmc",
+      "preimg_mode": "milp",
+      "compare_limit": 0
+    }
+  ]
+}
+```
+
+Save it as, for example:
+
+```text
+experiments/sbesc_iris_seeds.json
+```
+
+Run:
+
+```bash
+python tool/scripts/run_paper_experiments.py \
+  --config experiments/sbesc_iris_seeds.json
+```
+
+Aggregate outputs:
+
+```text
+output/paper_results/all_experiments.json
+output/paper_results/all_experiments.csv
+output/paper_results/runs/.../reports/experiment_summary.json
+```
+
+You need ESBMC available on `PATH`. If using `preimg_mode=milp`, you also need Gurobi working.

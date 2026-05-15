@@ -64,6 +64,8 @@ class RobustnessPipelineConfig:
     compile_c_backend: bool = True
     compiler: str = "gcc"
     enable_diagnostics: bool = True
+    formal_saturation_check: bool = True
+    empirical_saturation_check: bool = True
     accuracy_drop_threshold: float | None = 0.05
     saturation_threshold: float | None = 0.01
     mismatch_threshold: float | None = 0.05
@@ -144,13 +146,16 @@ def _threshold_enabled(threshold: float | None) -> bool:
 
 
 def _quality_gate_enabled(config: RobustnessPipelineConfig) -> bool:
-    return config.max_quality_refinement_steps > 0 and any(
-        _threshold_enabled(threshold)
-        for threshold in (
-            config.accuracy_drop_threshold,
-            config.saturation_threshold,
-            config.mismatch_threshold,
+    threshold_enabled = (
+        _threshold_enabled(config.accuracy_drop_threshold)
+        or _threshold_enabled(config.mismatch_threshold)
+        or (
+            config.empirical_saturation_check
+            and _threshold_enabled(config.saturation_threshold)
         )
+    )
+    return config.max_quality_refinement_steps > 0 and (
+        config.formal_saturation_check or threshold_enabled
     )
 
 
@@ -160,6 +165,8 @@ def _quality_thresholds_payload(config: RobustnessPipelineConfig) -> dict[str, A
         "saturation_threshold": config.saturation_threshold,
         "mismatch_threshold": config.mismatch_threshold,
         "max_quality_refinement_steps": int(config.max_quality_refinement_steps),
+        "formal_saturation_check": bool(config.formal_saturation_check),
+        "empirical_saturation_check": bool(config.empirical_saturation_check),
     }
 
 
@@ -219,7 +226,7 @@ def _quality_failures(metrics: dict[str, Any], config: RobustnessPipelineConfig)
             }
         )
 
-    if _threshold_enabled(config.saturation_threshold):
+    if config.empirical_saturation_check and _threshold_enabled(config.saturation_threshold):
         for layer_diag in metrics.get("fixed_point_diagnostics", {}).get("python", {}).get("layers", []):
             saturation_rate = float(layer_diag.get("saturation_rate", 0.0))
             if saturation_rate > float(config.saturation_threshold):
@@ -291,6 +298,78 @@ def _refine_specs_after_failure(
     return next_specs, action
 
 
+def _refine_specs_after_formal_saturation_failure(
+    layer_specs: list[LayerQuantizationSpec],
+    esbmc_records: list[dict[str, Any]],
+    bit_ub: int,
+) -> tuple[list[LayerQuantizationSpec] | None, dict[str, Any]]:
+    failed_record = next(
+        (
+            record
+            for record in esbmc_records
+            if record.get("no_saturation_status") not in {"VERIFIED", "DISABLED"}
+        ),
+        None,
+    )
+    if failed_record is None:
+        return None, {"kind": "blocked", "reason": "formal_saturation_failure_without_layer_record"}
+
+    layer_index = int(failed_record["layer_index"])
+    next_specs = list(layer_specs)
+    current = next_specs[layer_index]
+    proposed = LayerQuantizationSpec(
+        total_bits=current.total_bits + 1,
+        integer_bits=current.integer_bits + 1,
+        fractional_bits=current.fractional_bits,
+    )
+    action: dict[str, Any] = {
+        "kind": "increase_integer_bits",
+        "layer_index": int(layer_index),
+        "from": _spec_to_dict(layer_index, current),
+        "to": _spec_to_dict(layer_index, proposed),
+        "reason": "formal_saturation_possible",
+    }
+    if proposed.total_bits > bit_ub:
+        action["kind"] = "blocked"
+        action["reason"] = f"refined total_bits would exceed bit_ub={bit_ub}"
+        return None, action
+
+    next_specs[layer_index] = proposed
+    return next_specs, action
+
+
+def _formal_saturation_failure(esbmc_records: list[dict[str, Any]]) -> bool:
+    return any(record.get("failure_type") == "formal_saturation_possible" for record in esbmc_records)
+
+
+def _formal_saturation_summary(
+    config: RobustnessPipelineConfig,
+    quality_summary: dict[str, Any],
+) -> dict[str, Any]:
+    layers: list[dict[str, Any]] = []
+    for step in reversed(quality_summary.get("steps", [])):
+        step_layers = step.get("esbmc", {}).get("layers")
+        if step_layers:
+            layers = [
+                {
+                    "layer_index": int(layer.get("layer_index", index)),
+                    "Q": layer.get("total_bits"),
+                    "I": layer.get("integer_bits"),
+                    "F": layer.get("fractional_bits"),
+                    "contract_status": layer.get("contract_status", layer.get("status")),
+                    "no_saturation_status": layer.get("no_saturation_status", "DISABLED"),
+                }
+                for index, layer in enumerate(step_layers)
+            ]
+            break
+
+    return {
+        "enabled": bool(config.formal_saturation_check),
+        "used_for_acceptance": bool(_quality_gate_enabled(config) and config.formal_saturation_check),
+        "layers": layers,
+    }
+
+
 def compare_qnn_to_keras(
     *,
     dataset: DatasetBundle,
@@ -305,6 +384,7 @@ def compare_qnn_to_keras(
     accuracy_drop_threshold: float | None = 0.05,
     saturation_threshold: float | None = 0.01,
     mismatch_threshold: float | None = 0.05,
+    empirical_saturation_check: bool = True,
 ) -> dict[str, Any]:
     """Compare Python and generated-C QNN execution against the quantized Keras model."""
 
@@ -373,8 +453,10 @@ def compare_qnn_to_keras(
             "inspect saturation, scaling, and layer-wise diagnostics."
         )
     for layer_diag in python_diagnostics.get("layers", []):
-        if _threshold_enabled(saturation_threshold) and float(layer_diag.get("saturation_rate", 0.0)) > float(
-            saturation_threshold
+        if (
+            empirical_saturation_check
+            and _threshold_enabled(saturation_threshold)
+            and float(layer_diag.get("saturation_rate", 0.0)) > float(saturation_threshold)
         ):
             warnings.append(
                 f"Layer {int(layer_diag['layer_index'])} has saturation_rate > {float(saturation_threshold):.2%}; "
@@ -469,6 +551,7 @@ def _compare_specs(
         accuracy_drop_threshold=config.accuracy_drop_threshold,
         saturation_threshold=config.saturation_threshold,
         mismatch_threshold=config.mismatch_threshold,
+        empirical_saturation_check=config.empirical_saturation_check,
     )
     return comparison, quantized_model, fixed_point_network
 
@@ -514,6 +597,7 @@ def _run_quality_refinement(
                 "esbmc": {
                     "required_for_acceptance": False,
                     "status": "NOT_RERUN_QUALITY_GATE_DISABLED",
+                    "no_saturation_enabled": False,
                 },
             }
         )
@@ -540,13 +624,14 @@ def _run_quality_refinement(
                 "accepted": False,
                 "esbmc": {
                     "required_for_acceptance": True,
+                    "no_saturation_enabled": bool(config.formal_saturation_check),
                     "status": "NOT_RUN_QUALITY_FAILED" if failures else "PENDING",
                 },
             }
             attempts.append(attempt)
 
             if not failures:
-                if step == 0 and config.verify_mode == "esbmc":
+                if step == 0 and config.verify_mode == "esbmc" and not config.formal_saturation_check:
                     esbmc_verified = True
                     esbmc_records = [
                         {
@@ -555,6 +640,8 @@ def _run_quality_refinement(
                             "integer_bits": int(spec.integer_bits),
                             "fractional_bits": int(spec.fractional_bits),
                             "status": "VERIFIED_BY_SYNTHESIS",
+                            "contract_status": "VERIFIED_BY_SYNTHESIS",
+                            "no_saturation_status": "DISABLED",
                         }
                         for index, spec in enumerate(current_specs)
                     ]
@@ -563,18 +650,45 @@ def _run_quality_refinement(
                         total_bits=[spec.total_bits for spec in current_specs],
                         fractional_bits=[spec.fractional_bits for spec in current_specs],
                         integer_bits=[spec.integer_bits for spec in current_specs],
+                        formal_saturation_check=config.formal_saturation_check,
                     )
                 attempt["esbmc"] = {
                     "required_for_acceptance": True,
+                    "no_saturation_enabled": bool(config.formal_saturation_check),
                     "status": "VERIFIED" if esbmc_verified else "FAILED",
                     "layers": esbmc_records,
                 }
+                formal_saturation_failed = _formal_saturation_failure(esbmc_records)
+                if formal_saturation_failed:
+                    attempt["esbmc"]["failure_type"] = "formal_saturation_possible"
                 attempt["accepted"] = bool(esbmc_verified)
                 if esbmc_verified:
                     accepted = True
                     final_reason = "accepted after ESBMC and deployment-quality checks"
                     break
-                final_reason = "quality checks passed but ESBMC verification failed"
+
+                if (
+                    config.formal_saturation_check
+                    and formal_saturation_failed
+                    and step < config.max_quality_refinement_steps
+                ):
+                    refined_specs, action = _refine_specs_after_formal_saturation_failure(
+                        current_specs,
+                        esbmc_records,
+                        config.bit_ub,
+                    )
+                    attempt["refinement_action"] = action
+                    if refined_specs is None:
+                        final_reason = str(action.get("reason", "formal saturation refinement blocked"))
+                        break
+                    current_specs = refined_specs
+                    final_reason = "refining formal no-saturation failure"
+                    continue
+
+                if formal_saturation_failed:
+                    final_reason = "formal no-saturation failed and max refinement steps was reached"
+                else:
+                    final_reason = "quality checks passed but ESBMC verification failed"
                 break
 
             if step >= config.max_quality_refinement_steps:
@@ -734,6 +848,13 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         "baseline": {
             "reference_accuracy": full_precision_accuracy,
         },
+        "formal_saturation_check_enabled": bool(config.formal_saturation_check),
+        "empirical_saturation_check_enabled": bool(config.empirical_saturation_check),
+        "formal_saturation_verification": {
+            "enabled": bool(config.formal_saturation_check),
+            "used_for_acceptance": False,
+            "layers": [],
+        },
     }
     if preimage_cache_key:
         summary["preimage_cache"] = {
@@ -793,6 +914,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         summary["formal_synthesis"] = synthesis_result.to_dict()
     summary["synthesis"] = final_synthesis_result.to_dict()
     summary["quality_refinement"] = quality_summary
+    summary["formal_saturation_verification"] = _formal_saturation_summary(config, quality_summary)
     summary["comparison"] = comparison
 
     quantized_logits = _predict_logits(quantized_model, dataset.x_test)

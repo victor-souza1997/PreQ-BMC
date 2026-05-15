@@ -16,6 +16,7 @@ from utils.fixed_point import int_get_min_max, quantize_int
 from utils.logging_utils import get_logger
 from verification.c_templates import (
     render_hidden_affine_bounds_program,
+    render_no_saturation_program,
     render_output_target_program,
     render_output_valid_set_program,
 )
@@ -815,12 +816,15 @@ class GPEncoding:
         total_bits: list[int],
         fractional_bits: list[int],
         integer_bits: list[int],
+        *,
+        formal_saturation_check: bool = False,
     ) -> tuple[bool, list[dict[str, Any]]]:
         """Run the existing ESBMC layer checks for an explicit exported Q/I/F configuration.
 
         `integer_bits` follows the backend/export convention and excludes the sign bit.
         This method does not change the preimage methodology; it reuses the same generated
-        layer contracts used by `forward_quantization_with_esbmc`.
+        layer contracts used by `forward_quantization_with_esbmc`. When requested, it also
+        checks the fixed-point affine layer for formal no-saturation before clamp.
         """
 
         non_input_layers = self.dense_layers.copy()
@@ -844,13 +848,16 @@ class GPEncoding:
                         "integer_bits": i_bits,
                         "fractional_bits": f_bits,
                         "status": "INVALID_QIF",
+                        "contract_status": "INVALID_QIF",
+                        "no_saturation_status": "NOT_RUN",
+                        "failure_type": "invalid_qif",
                     }
                 )
                 return False, records
 
             qu_w_int = quantize_int(cur_layer.layer_paras[0], q_bits, f_bits)
             qu_b_int = quantize_int(cur_layer.layer_paras[1], q_bits, f_bits)
-            esbmc_result = self.verify_layer_with_esbmc(
+            contract_result = self.verify_layer_with_esbmc(
                 cur_layer=cur_layer,
                 in_layer=in_layer,
                 qu_w_int=np.asarray(qu_w_int),
@@ -859,18 +866,39 @@ class GPEncoding:
                 all_bit=q_bits,
                 layer_index=layer_index,
             )
-            records.append(
-                {
-                    "layer_index": int(layer_index),
-                    "total_bits": q_bits,
-                    "integer_bits": i_bits,
-                    "fractional_bits": f_bits,
-                    "status": esbmc_result.status,
-                }
-            )
-            if esbmc_result.status != "VERIFIED":
+            record: dict[str, Any] = {
+                "layer_index": int(layer_index),
+                "total_bits": q_bits,
+                "integer_bits": i_bits,
+                "fractional_bits": f_bits,
+                "status": contract_result.status,
+                "contract_status": contract_result.status,
+                "no_saturation_status": "DISABLED" if not formal_saturation_check else "PENDING",
+            }
+            if contract_result.status != "VERIFIED":
+                record["no_saturation_status"] = "NOT_RUN"
+                records.append(record)
                 return False, records
 
+            if formal_saturation_check:
+                no_saturation_result = self.verify_layer_no_saturation_with_esbmc(
+                    cur_layer=cur_layer,
+                    in_layer=in_layer,
+                    qu_w_int=np.asarray(qu_w_int),
+                    qu_b_int=np.asarray(qu_b_int),
+                    frac_bit=f_bits,
+                    all_bit=q_bits,
+                    layer_index=layer_index,
+                )
+                record["no_saturation_status"] = no_saturation_result.status
+                if no_saturation_result.status != "VERIFIED":
+                    record["status"] = "FAILED"
+                    record["failure_type"] = "formal_saturation_possible"
+                    records.append(record)
+                    return False, records
+
+            record["status"] = "VERIFIED"
+            records.append(record)
             self.update_quantized_weights_affine(in_layer, cur_layer, q_bits, f_bits, f_bits, layer_index)
 
         return True, records
@@ -906,6 +934,46 @@ class GPEncoding:
             if temp_file.exists():
                 temp_file.unlink()
         LOGGER.info("ESBMC layer=%s bits(Q=%s,F=%s) status=%s", cur_layer.layer_index, all_bit, frac_bit, result.status)
+        return result
+
+    def verify_layer_no_saturation_with_esbmc(
+        self,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        qu_w_int: np.ndarray,
+        qu_b_int: np.ndarray,
+        frac_bit: int,
+        all_bit: int,
+        layer_index: int,
+    ) -> ESBMCResult:
+        c_source = self.generate_esbmc_no_saturation_code(
+            cur_layer=cur_layer,
+            in_layer=in_layer,
+            qu_w_int=qu_w_int,
+            qu_b_int=qu_b_int,
+            frac_bit=frac_bit,
+            all_bit=all_bit,
+            layer_index=layer_index,
+        )
+        layers_dir = self.output_dir / "layers"
+        layers_dir.mkdir(parents=True, exist_ok=True)
+        archived_file = layers_dir / f"layer_{layer_index}_Q{all_bit}_F{frac_bit}_no_saturation.c"
+        archived_file.write_text(c_source, encoding="utf-8")
+
+        temp_file = Path(f"esbmc_verify_layer_{layer_index}_Q{all_bit}_F{frac_bit}_no_saturation.c")
+        temp_file.write_text(c_source, encoding="utf-8")
+        try:
+            result = self.esbmc_runner.run_file(temp_file)
+        finally:
+            if temp_file.exists():
+                temp_file.unlink()
+        LOGGER.info(
+            "ESBMC no-saturation layer=%s bits(Q=%s,F=%s) status=%s",
+            cur_layer.layer_index,
+            all_bit,
+            frac_bit,
+            result.status,
+        )
         return result
 
     def generate_esbmc_verification_code(
@@ -970,6 +1038,41 @@ class GPEncoding:
             input_bounds_low_c_int=self.numpy_to_c_int_array(input_lo_int),
             input_bounds_high_c_int=self.numpy_to_c_int_array(input_hi_int),
             scale_factor=scale,
+        )
+
+    def generate_esbmc_no_saturation_code(
+        self,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        qu_w_int: np.ndarray,
+        qu_b_int: np.ndarray,
+        frac_bit: int,
+        all_bit: int,
+        layer_index: int,
+    ) -> str:
+        del layer_index
+        scale = 1 << int(frac_bit)
+        weights_c_int = self.numpy_to_c_int_array(qu_w_int)
+        biases_c_int = self.numpy_to_c_int_array(qu_b_int)
+
+        if cur_layer.layer_index == 1:
+            x_lo = np.array(self.x_low_real, dtype=np.float64)
+            x_hi = np.array(self.x_high_real, dtype=np.float64)
+        else:
+            x_lo = np.array(in_layer.clipped_lb, dtype=np.float64)
+            x_hi = np.array(in_layer.clipped_ub, dtype=np.float64)
+        input_lo_int = np.floor(x_lo * scale).astype(np.int64)
+        input_hi_int = np.ceil(x_hi * scale).astype(np.int64)
+
+        return render_no_saturation_program(
+            output_size=cur_layer.layer_size,
+            input_size=in_layer.layer_size,
+            weights_c_int=weights_c_int,
+            biases_c_int=biases_c_int,
+            input_bounds_low_c_int=self.numpy_to_c_int_array(input_lo_int),
+            input_bounds_high_c_int=self.numpy_to_c_int_array(input_hi_int),
+            scale_factor=scale,
+            total_bits=all_bit,
         )
 
     def numpy_to_c_int_array(self, np_array: np.ndarray) -> str:

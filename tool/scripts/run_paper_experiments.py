@@ -110,6 +110,8 @@ def _pipeline_config(spec: dict[str, Any], output_dir: Path) -> RobustnessPipeli
         compile_c_backend=bool(spec.get("compile_c_backend", not bool(spec.get("skip_c_backend", False)))),
         compiler=str(spec.get("compiler", "gcc")),
         enable_diagnostics=bool(spec.get("enable_diagnostics", True)),
+        formal_saturation_check=bool(spec.get("formal_saturation_check", True)),
+        empirical_saturation_check=bool(spec.get("empirical_saturation_check", True)),
         accuracy_drop_threshold=_optional_threshold(spec.get("accuracy_drop_threshold"), 0.05),
         saturation_threshold=_optional_threshold(spec.get("saturation_threshold"), 0.01),
         mismatch_threshold=_optional_threshold(spec.get("mismatch_threshold"), 0.05),

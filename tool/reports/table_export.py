@@ -50,6 +50,9 @@ def export_paper_tables(experiment_summary: dict[str, Any], output_dir: Path) ->
             "mean_abs_logit_error",
             "total_time",
             "refinement_steps",
+            "formal_saturation_check",
+            "empirical_saturation_check",
+            "no_saturation_status",
         ],
         [
             _formal_refined_row(benchmark, "formal_only", formal, formal.get("success"), 0),
@@ -181,6 +184,9 @@ def _formal_refined_row(
         "mean_abs_logit_error": deployment.get("mean_abs_logit_error"),
         "total_time": stats.get("total_time"),
         "refinement_steps": refinement_steps,
+        "formal_saturation_check": section.get("formal_saturation_check_enabled"),
+        "empirical_saturation_check": section.get("empirical_saturation_check_enabled"),
+        "no_saturation_status": _no_saturation_status(section),
     }
 
 
@@ -191,3 +197,13 @@ def _deployment_row(benchmark: dict[str, Any], method: str, section: dict[str, A
 
 def _resource_row(benchmark: dict[str, Any], method: str, resource: dict[str, Any]) -> dict[str, Any]:
     return {**_benchmark_cells(benchmark), "method": method, **resource}
+
+
+def _no_saturation_status(section: dict[str, Any]) -> str:
+    if not section.get("formal_saturation_check_enabled", False):
+        return "DISABLED"
+    if section.get("no_saturation_verified_all_layers", False):
+        return "VERIFIED"
+    if section.get("no_saturation_failed_layers"):
+        return "FAILED"
+    return "UNKNOWN"
