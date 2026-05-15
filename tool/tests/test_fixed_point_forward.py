@@ -10,6 +10,8 @@ from backends.fixed_point import (
     forward_fixed_point_batch_with_diagnostics,
     forward_fixed_point_single,
 )
+from reports.experiment_summary import summarize_saturation
+from reports.resource_metrics import compute_fixed_point_resource_metrics
 
 
 class _ToyDenseLayer:
@@ -84,6 +86,26 @@ class FixedPointForwardTest(unittest.TestCase):
             self.assertIn("saturation_rate", layer)
             self.assertIn("q_min", layer)
             self.assertIn("q_max", layer)
+
+        saturation = summarize_saturation(diagnostics)
+        self.assertIn("max_saturation_rate", saturation)
+        self.assertIn("mean_saturation_rate", saturation)
+
+    def test_resource_metrics_report_parameter_memory(self) -> None:
+        model = _build_toy_model()
+        specs = [
+            LayerQuantizationSpec(total_bits=8, integer_bits=3, fractional_bits=4),
+            LayerQuantizationSpec(total_bits=8, integer_bits=3, fractional_bits=4),
+        ]
+        network = build_fixed_point_network(model, specs)
+
+        metrics = compute_fixed_point_resource_metrics(network)
+
+        self.assertEqual(metrics["num_layers"], 2)
+        self.assertEqual(metrics["num_parameters"], 12)
+        self.assertEqual(metrics["float_parameter_memory_bytes"], 48)
+        self.assertEqual(metrics["fixed_parameter_memory_bytes"], 12)
+        self.assertEqual(metrics["weighted_avg_bits_per_parameter"], 8.0)
 
 
 if __name__ == "__main__":

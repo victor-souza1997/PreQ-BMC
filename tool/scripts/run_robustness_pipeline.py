@@ -83,6 +83,25 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Maximum deployment-quality bit refinement steps. Use 0 to keep the previous accept-after-synthesis behavior.",
     )
+    parser.add_argument(
+        "--export-paper-tables",
+        dest="export_paper_tables",
+        action="store_true",
+        default=True,
+        help="Export paper-ready experiment summary CSV tables.",
+    )
+    parser.add_argument(
+        "--no-export-paper-tables",
+        dest="export_paper_tables",
+        action="store_false",
+        help="Skip paper-ready CSV table export.",
+    )
+    parser.add_argument(
+        "--baseline-results-json",
+        type=Path,
+        default=None,
+        help="Optional JSON or CSV file with external Quadapter/CEG4N baseline results.",
+    )
     parser.add_argument("--skip-c-backend", action="store_true", help="Skip gcc compilation and C shared-library execution.")
     parser.add_argument("--compiler", default="gcc")
     parser.add_argument(
@@ -146,6 +165,8 @@ def main(argv: list[str] | None = None) -> None:
         save_preimage_cache=args.save_preimage_cache,
         preimage_cache_dir=Path(args.preimage_cache_dir) if args.preimage_cache_dir is not None else None,
         preimage_cache_key=args.preimage_cache_key,
+        export_paper_tables=args.export_paper_tables,
+        baseline_results_json=args.baseline_results_json,
     )
 
     summary = run_robustness_pipeline(Path(__file__).resolve().parent.parent, config)

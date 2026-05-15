@@ -30,6 +30,10 @@ from models.loading import (
     parse_architecture,
     resolve_weight_path,
 )
+from reports.baseline_import import load_external_baselines
+from reports.experiment_summary import build_experiment_summary
+from reports.resource_metrics import compute_fixed_point_resource_metrics
+from reports.table_export import export_paper_tables
 from synthesis.forward import forward_dnn
 from synthesis.preimage_cache import build_preimage_cache_identity
 from synthesis.quadapter import GPEncoding, QuadapterConfig, SynthesisResult
@@ -68,6 +72,8 @@ class RobustnessPipelineConfig:
     save_preimage_cache: bool = False
     preimage_cache_dir: Path | None = None
     preimage_cache_key: str | None = None
+    export_paper_tables: bool = True
+    baseline_results_json: Path | None = None
 
 
 def _predict_logits(model: Any, features: np.ndarray) -> np.ndarray:
@@ -658,6 +664,8 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
 
     x_low = np.clip(sample - config.eps, dataset.clip_low, dataset.clip_high)
     x_high = np.clip(sample + config.eps, dataset.clip_low, dataset.clip_high)
+    baseline_logits = _predict_logits(model, dataset.x_test)
+    full_precision_accuracy = _compute_accuracy(baseline_logits, dataset.y_test)
 
     property_spec = ClassificationProperty(
         target_label=config.target_label if config.target_label is not None else predicted_label,
@@ -717,10 +725,15 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         "arch": config.arch,
         "weights_path": str(weights_path),
         "sample_id": config.sample_id,
+        "eps": config.eps,
+        "compare_split": config.compare_split,
         "sample_label": sample_label,
         "predicted_label": predicted_label,
         "sample_logits": sample_logits.tolist(),
         "synthesis": synthesis_result.to_dict(),
+        "baseline": {
+            "reference_accuracy": full_precision_accuracy,
+        },
     }
     if preimage_cache_key:
         summary["preimage_cache"] = {
@@ -732,11 +745,38 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
     if not synthesis_result.success:
         quant_config_path = _save_json(config.output_dir / "reports" / "quantization_config.json", summary)
         summary["artifacts"] = {"quantization_config": str(quant_config_path)}
-        _save_json(config.output_dir / "reports" / "pipeline_summary.json", summary)
+        pipeline_summary_path = _save_json(config.output_dir / "reports" / "pipeline_summary.json", summary)
+        external_baselines = load_external_baselines(config.baseline_results_json)
+        experiment_artifacts = {
+            "pipeline_summary": str(pipeline_summary_path),
+            "qnn_vs_keras_metrics": None,
+            "mismatches_csv": None,
+            "refinement_history": None,
+            "c_source": None,
+            "c_shared_library": None,
+        }
+        experiment_summary = build_experiment_summary(
+            pipeline_summary=summary,
+            formal_metrics=None,
+            refined_metrics=None,
+            formal_resource_metrics=None,
+            refined_resource_metrics=None,
+            external_baselines=external_baselines,
+            artifacts=experiment_artifacts,
+        )
+        experiment_summary_path = _save_json(config.output_dir / "reports" / "experiment_summary.json", experiment_summary)
+        summary["artifacts"]["pipeline_summary"] = str(pipeline_summary_path)
+        summary["artifacts"]["experiment_summary"] = str(experiment_summary_path)
+        if config.export_paper_tables:
+            table_artifacts = export_paper_tables(experiment_summary, config.output_dir)
+            summary["artifacts"].update(table_artifacts)
+            experiment_summary["artifacts"].update(table_artifacts)
+            _save_json(experiment_summary_path, experiment_summary)
+        _save_json(pipeline_summary_path, summary)
         return summary
 
     layer_specs = _build_layer_specs(synthesis_result)
-    final_specs, comparison, quantized_model, quality_summary, _ = _run_quality_refinement(
+    final_specs, comparison, quantized_model, quality_summary, refinement_history = _run_quality_refinement(
         dataset=dataset,
         model=model,
         synthesizer=synthesizer,
@@ -755,13 +795,62 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
     summary["quality_refinement"] = quality_summary
     summary["comparison"] = comparison
 
-    baseline_logits = _predict_logits(model, dataset.x_test)
     quantized_logits = _predict_logits(quantized_model, dataset.x_test)
-    summary["baseline"] = {
-        "reference_accuracy": _compute_accuracy(baseline_logits, dataset.y_test),
-        "quantized_keras_accuracy": _compute_accuracy(quantized_logits, dataset.y_test),
-    }
+    summary["baseline"]["quantized_keras_accuracy"] = _compute_accuracy(quantized_logits, dataset.y_test)
+
+    formal_metrics = (
+        refinement_history.get("attempts", [{}])[0].get("comparison")
+        if refinement_history.get("attempts")
+        else comparison
+    )
+    final_network = build_fixed_point_network(model, final_specs)
+    formal_network = build_fixed_point_network(model, layer_specs)
+    final_artifacts = comparison.get("artifacts", {})
+    formal_artifacts = formal_metrics.get("artifacts", {}) if isinstance(formal_metrics, dict) else {}
+    formal_resource_metrics = compute_fixed_point_resource_metrics(
+        formal_network,
+        c_source_path=formal_artifacts.get("c_source"),
+        c_shared_library_path=formal_artifacts.get("c_shared_library"),
+    )
+    refined_resource_metrics = compute_fixed_point_resource_metrics(
+        final_network,
+        c_source_path=final_artifacts.get("c_source"),
+        c_shared_library_path=final_artifacts.get("c_shared_library"),
+    )
+
     quant_config_path = _save_json(config.output_dir / "reports" / "quantization_config.json", summary)
     summary["artifacts"] = {"quantization_config": str(quant_config_path)}
-    _save_json(config.output_dir / "reports" / "pipeline_summary.json", summary)
+    pipeline_summary_path = _save_json(config.output_dir / "reports" / "pipeline_summary.json", summary)
+    external_baselines = load_external_baselines(config.baseline_results_json)
+    experiment_artifacts = {
+        "pipeline_summary": str(pipeline_summary_path),
+        "qnn_vs_keras_metrics": final_artifacts.get("metrics_json"),
+        "mismatches_csv": final_artifacts.get("mismatches_csv"),
+        "refinement_history": refinement_history.get("artifacts", {}).get("refinement_history"),
+        "c_source": final_artifacts.get("c_source"),
+        "c_shared_library": final_artifacts.get("c_shared_library"),
+    }
+    experiment_summary = build_experiment_summary(
+        pipeline_summary=summary,
+        formal_metrics=formal_metrics,
+        refined_metrics=comparison,
+        formal_resource_metrics=formal_resource_metrics,
+        refined_resource_metrics=refined_resource_metrics,
+        external_baselines=external_baselines,
+        artifacts=experiment_artifacts,
+    )
+    experiment_summary_path = _save_json(config.output_dir / "reports" / "experiment_summary.json", experiment_summary)
+    summary["artifacts"].update(
+        {
+            "pipeline_summary": str(pipeline_summary_path),
+            "experiment_summary": str(experiment_summary_path),
+        }
+    )
+    _save_json(pipeline_summary_path, summary)
+    if config.export_paper_tables:
+        table_artifacts = export_paper_tables(experiment_summary, config.output_dir)
+        summary["artifacts"].update(table_artifacts)
+        experiment_summary["artifacts"].update(table_artifacts)
+        _save_json(experiment_summary_path, experiment_summary)
+        _save_json(pipeline_summary_path, summary)
     return summary
