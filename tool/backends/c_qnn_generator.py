@@ -4,10 +4,11 @@ import ctypes
 from dataclasses import dataclass
 from pathlib import Path
 import subprocess
+from typing import Any
 
 import numpy as np
 
-from .fixed_point import FixedPointNetwork, quantize_network_input
+from .fixed_point import FixedPointNetwork, forward_fixed_point_single, quantize_network_input
 
 
 def _c_array_1d(values: np.ndarray) -> str:
@@ -20,7 +21,16 @@ def _c_array_2d(values: np.ndarray) -> str:
 
 
 def generate_c_qnn_source(network: FixedPointNetwork) -> str:
-    """Generate a full-network C implementation for the fixed-point forward pass."""
+    """Generate a full-network C implementation for the fixed-point forward pass.
+
+    The generated reference backend mirrors Python exactly:
+    acc = sum(input_int * weight_int)
+    value = round_half_away_from_zero(acc / 2**F_in) + bias_int
+
+    Inputs have F_in fractional bits. Weights, biases, and outputs for a layer use
+    that layer's F_w fractional bits, so the accumulator has F_in + F_w fractional
+    bits and division by 2**F_in leaves values in F_w before adding bias.
+    """
 
     max_width = max(max(layer.weights_int.shape) for layer in network.layers)
     input_dim = int(network.layers[0].weights_int.shape[1])
@@ -33,6 +43,7 @@ def generate_c_qnn_source(network: FixedPointNetwork) -> str:
 static const int LAYER_{index}_IN = {layer.weights_int.shape[1]};
 static const int LAYER_{index}_OUT = {layer.weights_int.shape[0]};
 static const int LAYER_{index}_Q = {layer.spec.total_bits};
+static const int LAYER_{index}_I = {layer.spec.integer_bits};
 static const int LAYER_{index}_F = {layer.spec.fractional_bits};
 static const int64_t LAYER_{index}_WEIGHTS[{layer.weights_int.shape[0]}][{layer.weights_int.shape[1]}] = {_c_array_2d(layer.weights_int)};
 static const int64_t LAYER_{index}_BIASES[{layer.biases_int.shape[0]}] = {_c_array_1d(layer.biases_int)};
@@ -45,6 +56,7 @@ static const int64_t LAYER_{index}_BIASES[{layer.biases_int.shape[0]}] = {_c_arr
         in_buffer = "buffer_a" if index % 2 == 0 else "buffer_b"
         out_buffer = "buffer_b" if index % 2 == 0 else "buffer_a"
         relu_clause = "if (value < 0) value = 0;" if not layer.is_output_layer else ""
+        layer_input_frac = current_input_frac
         layer_steps.append(
             f"""
     for (int out_idx = 0; out_idx < LAYER_{index}_OUT; ++out_idx) {{
@@ -52,7 +64,11 @@ static const int64_t LAYER_{index}_BIASES[{layer.biases_int.shape[0]}] = {_c_arr
         for (int in_idx = 0; in_idx < LAYER_{index}_IN; ++in_idx) {{
             acc += (__int128)LAYER_{index}_WEIGHTS[out_idx][in_idx] * (__int128){in_buffer}[in_idx];
         }}
-        __int128 value = div_round_half_away_from_zero_i128(acc, 1LL << {current_input_frac}) + (__int128)LAYER_{index}_BIASES[out_idx];
+        /* acc has F_in({layer_input_frac}) + F_w(LAYER_{index}_F) fractional bits.
+           Divide by 2**F_in to keep LAYER_{index}_F, matching Python exactly. */
+        __int128 value = div_round_half_away_from_zero_i128(
+            acc, ((__int128)1 << {current_input_frac})) + (__int128)LAYER_{index}_BIASES[out_idx];
+        
         value = clamp_to_signed_range(value, LAYER_{index}_Q);
         {relu_clause}
         {out_buffer}[out_idx] = (int64_t)clamp_to_signed_range(value, LAYER_{index}_Q);
@@ -65,6 +81,14 @@ static const int64_t LAYER_{index}_BIASES[{layer.biases_int.shape[0]}] = {_c_arr
 
     return f"""\
 #include <stdint.h>
+#include <limits.h>
+
+#ifdef QNN_VERIFY_WITH_ESBMC
+void __ESBMC_assert(_Bool, const char *);
+#define QNN_ASSERT(cond, msg) __ESBMC_assert((cond), (msg))
+#else
+#define QNN_ASSERT(cond, msg) ((void)0)
+#endif
 
 static inline __int128 clamp_to_signed_range(__int128 value, int total_bits) {{
     const __int128 lower = -((__int128)1 << (total_bits - 1));
@@ -74,7 +98,8 @@ static inline __int128 clamp_to_signed_range(__int128 value, int total_bits) {{
     return value;
 }}
 
-static inline __int128 div_round_half_away_from_zero_i128(__int128 numerator, int64_t denominator) {{
+static inline __int128 div_round_half_away_from_zero_i128(__int128 numerator, __int128 denominator){{
+    QNN_ASSERT(denominator > 0, "denominator must be positive");
     if (numerator >= 0) {{
         return (numerator + denominator / 2) / denominator;
     }}
@@ -155,3 +180,41 @@ class CompiledCQNN:
         output_ptr = output.ctypes.data_as(ctypes.POINTER(ctypes.c_int64))
         self.library.qnn_forward_fixed(input_ptr, output_ptr)
         return output
+
+
+def compare_python_c_fixed_point_outputs(
+    network: FixedPointNetwork,
+    samples: np.ndarray,
+    compiled_qnn: CompiledCQNN,
+) -> dict[str, Any]:
+    """Compare final integer outputs from Python and compiled C fixed-point backends."""
+
+    total = 0
+    mismatch_count = 0
+    max_integer_difference = 0
+    first_mismatch: dict[str, Any] | None = None
+
+    for index, sample in enumerate(np.asarray(samples, dtype=np.float64)):
+        expected = np.asarray(forward_fixed_point_single(network, sample), dtype=np.int64)
+        actual = np.asarray(compiled_qnn.forward(sample), dtype=np.int64)
+        diff = np.abs(expected - actual)
+        sample_max_diff = int(np.max(diff)) if diff.size else 0
+        max_integer_difference = max(max_integer_difference, sample_max_diff)
+        total += 1
+        if not np.array_equal(expected, actual):
+            mismatch_count += 1
+            if first_mismatch is None:
+                first_mismatch = {
+                    "index": int(index),
+                    "python_output": expected.tolist(),
+                    "c_output": actual.tolist(),
+                    "max_integer_difference": sample_max_diff,
+                }
+
+    return {
+        "samples": int(total),
+        "exact_match": bool(mismatch_count == 0),
+        "mismatch_count": int(mismatch_count),
+        "max_integer_difference": int(max_integer_difference),
+        "first_mismatch": first_mismatch,
+    }

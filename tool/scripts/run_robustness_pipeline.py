@@ -19,6 +19,10 @@ def _parse_valid_labels(raw_value: str | None) -> tuple[int, ...] | None:
     return tuple(int(value.strip()) for value in raw_value.split(",") if value.strip())
 
 
+def _optional_threshold(raw_value: float) -> float | None:
+    return None if raw_value < 0 else float(raw_value)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the Quadapter robustness synthesis pipeline.")
     parser.add_argument(
@@ -42,6 +46,62 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--valid-labels", default=None, help="Comma-separated valid output labels for the output property.")
     parser.add_argument("--compare-split", default="test", choices=["train", "test"])
     parser.add_argument("--compare-limit", type=int, default=100, help="Number of samples to compare for the QNN-vs-Keras report. Use 0 for all.")
+    parser.add_argument(
+        "--enable-diagnostics",
+        dest="enable_diagnostics",
+        action="store_true",
+        default=True,
+        help="Include fixed-point saturation and semantic-gap diagnostics in the QNN-vs-Keras report.",
+    )
+    parser.add_argument(
+        "--disable-diagnostics",
+        dest="enable_diagnostics",
+        action="store_false",
+        help="Skip detailed fixed-point diagnostics in the QNN-vs-Keras report.",
+    )
+    parser.add_argument(
+        "--accuracy-drop-threshold",
+        type=float,
+        default=0.05,
+        help="Reject deployment candidates when Keras accuracy minus Python fixed-point accuracy exceeds this value. Use a negative value to disable.",
+    )
+    parser.add_argument(
+        "--saturation-threshold",
+        type=float,
+        default=0.01,
+        help="Reject deployment candidates when any layer saturation rate exceeds this value. Use a negative value to disable.",
+    )
+    parser.add_argument(
+        "--mismatch-threshold",
+        type=float,
+        default=0.05,
+        help="Reject deployment candidates when Python fixed-point mismatch rate versus quantized Keras exceeds this value. Use a negative value to disable.",
+    )
+    parser.add_argument(
+        "--max-quality-refinement-steps",
+        type=int,
+        default=10,
+        help="Maximum deployment-quality bit refinement steps. Use 0 to keep the previous accept-after-synthesis behavior.",
+    )
+    parser.add_argument(
+        "--export-paper-tables",
+        dest="export_paper_tables",
+        action="store_true",
+        default=True,
+        help="Export paper-ready experiment summary CSV tables.",
+    )
+    parser.add_argument(
+        "--no-export-paper-tables",
+        dest="export_paper_tables",
+        action="store_false",
+        help="Skip paper-ready CSV table export.",
+    )
+    parser.add_argument(
+        "--baseline-results-json",
+        type=Path,
+        default=None,
+        help="Optional JSON or CSV file with external Quadapter/CEG4N baseline results.",
+    )
     parser.add_argument("--skip-c-backend", action="store_true", help="Skip gcc compilation and C shared-library execution.")
     parser.add_argument("--compiler", default="gcc")
     parser.add_argument(
@@ -96,10 +156,17 @@ def main(argv: list[str] | None = None) -> None:
         compare_limit=None if args.compare_limit == 0 else args.compare_limit,
         compile_c_backend=not args.skip_c_backend,
         compiler=args.compiler,
+        enable_diagnostics=args.enable_diagnostics,
+        accuracy_drop_threshold=_optional_threshold(args.accuracy_drop_threshold),
+        saturation_threshold=_optional_threshold(args.saturation_threshold),
+        mismatch_threshold=_optional_threshold(args.mismatch_threshold),
+        max_quality_refinement_steps=max(0, int(args.max_quality_refinement_steps)),
         no_gurobi=args.no_gurobi,
         save_preimage_cache=args.save_preimage_cache,
         preimage_cache_dir=Path(args.preimage_cache_dir) if args.preimage_cache_dir is not None else None,
         preimage_cache_key=args.preimage_cache_key,
+        export_paper_tables=args.export_paper_tables,
+        baseline_results_json=args.baseline_results_json,
     )
 
     summary = run_robustness_pipeline(Path(__file__).resolve().parent.parent, config)
