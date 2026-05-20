@@ -96,8 +96,8 @@ class ESBMCRunner:
             "main",
             "--unwind",
             str(unwind),
-            "--incremental-bmc",
             "--state-hashing",
+            "--bitwuzla",
             "--timeout",
             str(self.config.timeout_seconds),
             "--verbosity",
@@ -149,7 +149,7 @@ class ESBMCRunner:
             selected_profile,
             unwind,
         )
-
+        print(command)
         try:
             completed = subprocess.run(
                 command,
