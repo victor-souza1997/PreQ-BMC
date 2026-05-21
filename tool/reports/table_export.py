@@ -143,11 +143,37 @@ def export_paper_tables(experiment_summary: dict[str, Any], output_dir: Path) ->
         ],
     )
 
+    semantics_path = _write_csv(
+        reports_dir / "table_fixed_point_semantics.csv",
+        [
+            "dataset",
+            "arch",
+            "method",
+            "layer_index",
+            "Q",
+            "I",
+            "F",
+            "scale_factor",
+            "q_min_int",
+            "q_max_int",
+            "real_min",
+            "real_max",
+            "overflow_mode",
+            "rounding_mode",
+            "max_abs_accumulator",
+            "fits_int64",
+            "max_saturation_rate",
+        ],
+        _fixed_point_semantics_rows(benchmark, "formal_only", formal)
+        + _fixed_point_semantics_rows(benchmark, "quality_refined", refined),
+    )
+
     return {
         "table_formal_vs_refined": str(formal_vs_refined_path),
         "table_deployment_metrics": str(deployment_path),
         "table_resource_metrics": str(resource_path),
         "table_refinement_history": str(history_path),
+        "table_fixed_point_semantics": str(semantics_path),
     }
 
 
@@ -197,6 +223,49 @@ def _deployment_row(benchmark: dict[str, Any], method: str, section: dict[str, A
 
 def _resource_row(benchmark: dict[str, Any], method: str, resource: dict[str, Any]) -> dict[str, Any]:
     return {**_benchmark_cells(benchmark), "method": method, **resource}
+
+
+def _fixed_point_semantics_rows(
+    benchmark: dict[str, Any],
+    method: str,
+    section: dict[str, Any],
+) -> list[dict[str, Any]]:
+    layers = section.get("fixed_point_semantics", {}).get("layers", [])
+    accumulator_by_layer = {
+        int(layer.get("layer_index", index)): layer
+        for index, layer in enumerate(section.get("accumulator_range", []))
+    }
+    saturation_rates = section.get("deployment_metrics", {}).get("per_layer_saturation_rates", [])
+    rows: list[dict[str, Any]] = []
+    for index, layer in enumerate(layers):
+        layer_index = int(layer.get("layer_index", index))
+        accumulator = accumulator_by_layer.get(layer_index, {})
+        saturation_rate = (
+            saturation_rates[layer_index]
+            if layer_index < len(saturation_rates)
+            else None
+        )
+        rows.append(
+            {
+                **_benchmark_cells(benchmark),
+                "method": method,
+                "layer_index": layer_index,
+                "Q": layer.get("total_bits"),
+                "I": layer.get("integer_bits"),
+                "F": layer.get("fractional_bits"),
+                "scale_factor": layer.get("scale_factor"),
+                "q_min_int": layer.get("q_min_int"),
+                "q_max_int": layer.get("q_max_int"),
+                "real_min": layer.get("real_min"),
+                "real_max": layer.get("real_max"),
+                "overflow_mode": layer.get("overflow_mode"),
+                "rounding_mode": layer.get("rounding_mode"),
+                "max_abs_accumulator": accumulator.get("max_abs_accumulator"),
+                "fits_int64": accumulator.get("fits_int64"),
+                "max_saturation_rate": saturation_rate,
+            }
+        )
+    return rows
 
 
 def _no_saturation_status(section: dict[str, Any]) -> str:

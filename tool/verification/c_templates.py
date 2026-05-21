@@ -542,6 +542,70 @@ int main(void)
 }}
 """
 
+
+def render_clamp_correctness_program(total_bits: int) -> str:
+    return f"""\
+#include <stdint.h>
+#include <limits.h>
+
+#define TOTAL_BITS {total_bits}
+
+extern long long nondet_longlong(void);
+
+/*
+ * Clamp correctness harness.
+ *
+ * The nondeterministic input is long long and then promoted to __int128.
+ * This verifies clamp behavior over the long long input domain, which covers
+ * the generated backend's int64_t storage interface.
+ */
+
+static inline __int128 clamp_to_signed_range_i128(__int128 value, int total_bits)
+{{
+    const __int128 q_min = -((__int128)1 << (total_bits - 1));
+    const __int128 q_max = (((__int128)1 << (total_bits - 1)) - 1);
+
+    if (value < q_min)
+    {{
+        return q_min;
+    }}
+    if (value > q_max)
+    {{
+        return q_max;
+    }}
+    return value;
+}}
+
+int main(void)
+{{
+    __ESBMC_assert(TOTAL_BITS > 1 && TOTAL_BITS < 127, "TOTAL_BITS must fit in __int128");
+
+    const __int128 q_min = -((__int128)1 << (TOTAL_BITS - 1));
+    const __int128 q_max = (((__int128)1 << (TOTAL_BITS - 1)) - 1);
+    const __int128 input = (__int128)nondet_longlong();
+    const __int128 output = clamp_to_signed_range_i128(input, TOTAL_BITS);
+
+    __ESBMC_assert(output >= q_min, "clamp output below q_min");
+    __ESBMC_assert(output <= q_max, "clamp output above q_max");
+
+    if (input >= q_min && input <= q_max)
+    {{
+        __ESBMC_assert(output == input, "clamp changed in-range input");
+    }}
+    if (input < q_min)
+    {{
+        __ESBMC_assert(output == q_min, "clamp did not saturate low input to q_min");
+    }}
+    if (input > q_max)
+    {{
+        __ESBMC_assert(output == q_max, "clamp did not saturate high input to q_max");
+    }}
+
+    return 0;
+}}
+"""
+
+
 def outerlayer_fixed_int_multiclass(
     in_layer_layer_size: int,
     cur_layer_layer_size: int,

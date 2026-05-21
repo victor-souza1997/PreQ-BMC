@@ -58,6 +58,35 @@ class LayerQuantizationSpec:
         scale = float(2**self.fractional_bits)
         return (q_min / scale, q_max / scale)
 
+    @property
+    def scale_factor(self) -> int:
+        """Return the fixed-point scale factor 2**F."""
+
+        return 1 << self.fractional_bits
+
+    @property
+    def semantic_metadata(self) -> dict:
+        """Return explicit fixed-point semantic metadata for reports."""
+
+        q_min, q_max = self.signed_range
+        real_min, real_max = self.real_range
+        return {
+            "signed": True,
+            "total_bits": int(self.total_bits),
+            "integer_bits": int(self.integer_bits),
+            "fractional_bits": int(self.fractional_bits),
+            "scale_factor": int(self.scale_factor),
+            "q_min_int": int(q_min),
+            "q_max_int": int(q_max),
+            "real_min": float(real_min),
+            "real_max": float(real_max),
+            "overflow_mode": "saturation",
+            "rounding_mode": "round_half_away_from_zero",
+            "interval_lower_rounding": "floor",
+            "interval_upper_rounding": "ceil",
+            "claim_type": "declared_backend_semantics",
+        }
+
 
 @dataclass(frozen=True)
 class QuantizedLayer:
@@ -289,3 +318,144 @@ def forward_fixed_point_single_trace(network: FixedPointNetwork, sample: np.ndar
         layer_outputs.append(np.asarray(dequantize_int(activations, layer.spec.fractional_bits), dtype=np.float64))
 
     return activations, layer_outputs
+
+
+def fixed_point_semantics_for_network(network: FixedPointNetwork) -> dict:
+    """Return explicit per-layer fixed-point semantics for reports."""
+
+    return {
+        "claim_type": "declared_backend_semantics",
+        "layers": [
+            {
+                "layer_index": int(index),
+                **layer.spec.semantic_metadata,
+            }
+            for index, layer in enumerate(network.layers)
+        ],
+    }
+
+
+def floor_div_i128_model(numerator: int, denominator: int) -> int:
+    """Floor division model used for lower interval rescaling in ESBMC harnesses."""
+
+    if denominator <= 0:
+        raise ValueError("denominator must be positive")
+    return int(numerator) // int(denominator)
+
+
+def ceil_div_i128_model(numerator: int, denominator: int) -> int:
+    """Ceil division model used for upper interval rescaling in ESBMC harnesses."""
+
+    if denominator <= 0:
+        raise ValueError("denominator must be positive")
+    return -((-int(numerator)) // int(denominator))
+
+
+def interval_rescale_bounds(accumulator_low: int, accumulator_high: int, scale_factor: int) -> tuple[int, int]:
+    """Rescale accumulator interval bounds using sound outward rounding."""
+
+    return (
+        floor_div_i128_model(accumulator_low, scale_factor),
+        ceil_div_i128_model(accumulator_high, scale_factor),
+    )
+
+
+def apply_fixed_point_affine_value(
+    accumulator: int,
+    input_fractional_bits: int,
+    bias_int: int,
+    total_bits: int,
+    *,
+    apply_relu: bool,
+) -> int:
+    """Apply backend rescale, bias, saturation, and optional ReLU to one accumulator."""
+
+    value = round_divide_half_away_from_zero(accumulator, 1 << input_fractional_bits) + int(bias_int)
+    value = clamp_to_signed_range(value, total_bits)
+    if apply_relu and value < 0:
+        value = 0
+    return clamp_to_signed_range(value, total_bits)
+
+
+def compute_accumulator_range_analysis(
+    network: FixedPointNetwork,
+    input_bounds: tuple[np.ndarray, np.ndarray] | None = None,
+) -> list[dict]:
+    """Conservatively bound integer accumulators for every layer and neuron.
+
+    The default input interval is the representable fixed-point input container.
+    Subsequent layer intervals use the post-clamp activation container, with ReLU
+    applied for hidden layers. This is static interval analysis, not an ESBMC proof.
+    """
+
+    if input_bounds is None:
+        input_low, input_high = signed_int_bounds(network.input_total_bits)
+        activation_low = np.full(network.layers[0].weights_int.shape[1], input_low, dtype=object)
+        activation_high = np.full(network.layers[0].weights_int.shape[1], input_high, dtype=object)
+    else:
+        activation_low = np.asarray(input_bounds[0], dtype=object)
+        activation_high = np.asarray(input_bounds[1], dtype=object)
+
+    int32_min, int32_max = -(1 << 31), (1 << 31) - 1
+    int64_min, int64_max = -(1 << 63), (1 << 63) - 1
+    int128_min, int128_max = -(1 << 127), (1 << 127) - 1
+    analysis: list[dict] = []
+
+    for layer_index, layer in enumerate(network.layers):
+        per_neuron: list[dict] = []
+        layer_max_abs = 0
+        for out_index in range(layer.weights_int.shape[0]):
+            acc_low = 0
+            acc_high = 0
+            for in_index in range(layer.weights_int.shape[1]):
+                weight = int(layer.weights_int[out_index, in_index])
+                low = int(activation_low[in_index])
+                high = int(activation_high[in_index])
+                if weight >= 0:
+                    contribution_low = weight * low
+                    contribution_high = weight * high
+                else:
+                    contribution_low = weight * high
+                    contribution_high = weight * low
+                acc_low += contribution_low
+                acc_high += contribution_high
+
+            max_abs = max(abs(acc_low), abs(acc_high))
+            layer_max_abs = max(layer_max_abs, max_abs)
+            per_neuron.append(
+                {
+                    "neuron_index": int(out_index),
+                    "accumulator_min": int(acc_low),
+                    "accumulator_max": int(acc_high),
+                    "max_abs_accumulator": int(max_abs),
+                    "fits_int32": bool(int32_min <= acc_low and acc_high <= int32_max),
+                    "fits_int64": bool(int64_min <= acc_low and acc_high <= int64_max),
+                    "fits_int128": bool(int128_min <= acc_low and acc_high <= int128_max),
+                    "claim_type": "static_interval_analysis",
+                }
+            )
+
+        layer_acc_low = min((neuron["accumulator_min"] for neuron in per_neuron), default=0)
+        layer_acc_high = max((neuron["accumulator_max"] for neuron in per_neuron), default=0)
+        analysis.append(
+            {
+                "layer_index": int(layer_index),
+                "accumulator_min": int(layer_acc_low),
+                "accumulator_max": int(layer_acc_high),
+                "max_abs_accumulator": int(layer_max_abs),
+                "fits_int32": bool(all(neuron["fits_int32"] for neuron in per_neuron)),
+                "fits_int64": bool(all(neuron["fits_int64"] for neuron in per_neuron)),
+                "fits_int128": bool(all(neuron["fits_int128"] for neuron in per_neuron)),
+                "per_neuron": per_neuron,
+                "claim_type": "static_interval_analysis",
+            }
+        )
+
+        q_min, q_max = layer.spec.signed_range
+        if layer.is_output_layer:
+            activation_low = np.full(layer.weights_int.shape[0], q_min, dtype=object)
+        else:
+            activation_low = np.zeros(layer.weights_int.shape[0], dtype=object)
+        activation_high = np.full(layer.weights_int.shape[0], q_max, dtype=object)
+
+    return analysis

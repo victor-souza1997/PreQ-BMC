@@ -19,6 +19,8 @@ from backends.fixed_point import (
     LayerQuantizationSpec,
     build_fixed_point_network,
     clone_quantized_keras_model,
+    compute_accumulator_range_analysis,
+    fixed_point_semantics_for_network,
     forward_fixed_point_batch,
     forward_fixed_point_batch_with_diagnostics,
 )
@@ -92,6 +94,18 @@ def _normalize_features(features: np.ndarray, input_scale: float) -> np.ndarray:
     if input_scale in (None, 0):
         return np.asarray(features, dtype=np.float64)
     return np.asarray(features, dtype=np.float64) / float(input_scale)
+
+
+def _fixed_point_input_bounds(
+    network: FixedPointNetwork,
+    x_low_real: np.ndarray,
+    x_high_real: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    scale = 1 << network.input_fractional_bits
+    return (
+        np.floor(np.asarray(x_low_real, dtype=np.float64) * scale).astype(object),
+        np.ceil(np.asarray(x_high_real, dtype=np.float64) * scale).astype(object),
+    )
 
 
 def _build_layer_specs(result: SynthesisResult) -> list[LayerQuantizationSpec]:
@@ -855,6 +869,17 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
             "used_for_acceptance": False,
             "layers": [],
         },
+        "fixed_point_semantics": {
+            "claim_type": "declared_backend_semantics",
+            "layers": [],
+        },
+        "accumulator_range": [],
+        "verification_claims": {
+            "fixed_point_semantics": "declared_backend_semantics",
+            "accumulator_range": "static_interval_analysis",
+            "deployment_metrics": "empirical_dataset_evaluation",
+            "formal_saturation_verification": "formal_esbmc_when_enabled",
+        },
     }
     if preimage_cache_key:
         summary["preimage_cache"] = {
@@ -927,6 +952,28 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
     )
     final_network = build_fixed_point_network(model, final_specs)
     formal_network = build_fixed_point_network(model, layer_specs)
+    formal_fixed_point_semantics = fixed_point_semantics_for_network(formal_network)
+    refined_fixed_point_semantics = fixed_point_semantics_for_network(final_network)
+    x_low_real = np.asarray(x_low / dataset.input_scale, dtype=np.float64)
+    x_high_real = np.asarray(x_high / dataset.input_scale, dtype=np.float64)
+    formal_accumulator_range = compute_accumulator_range_analysis(
+        formal_network,
+        input_bounds=_fixed_point_input_bounds(formal_network, x_low_real, x_high_real),
+    )
+    refined_accumulator_range = compute_accumulator_range_analysis(
+        final_network,
+        input_bounds=_fixed_point_input_bounds(final_network, x_low_real, x_high_real),
+    )
+    summary["fixed_point_semantics"] = refined_fixed_point_semantics
+    summary["accumulator_range"] = refined_accumulator_range
+    summary["fixed_point_semantics_by_method"] = {
+        "formal_only": formal_fixed_point_semantics,
+        "quality_refined": refined_fixed_point_semantics,
+    }
+    summary["accumulator_range_by_method"] = {
+        "formal_only": formal_accumulator_range,
+        "quality_refined": refined_accumulator_range,
+    }
     final_artifacts = comparison.get("artifacts", {})
     formal_artifacts = formal_metrics.get("artifacts", {}) if isinstance(formal_metrics, dict) else {}
     formal_resource_metrics = compute_fixed_point_resource_metrics(

@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 import unittest
 
-from verification.c_templates import render_no_saturation_program
+from verification.c_templates import render_clamp_correctness_program, render_no_saturation_program
 from verification.esbmc import ESBMCConfig, ESBMCRunner
 
 
@@ -29,6 +29,14 @@ class NoSaturationVerificationTest(unittest.TestCase):
         self.assertIn("__ESBMC_assert(lower_pre_clamp >= q_min", source)
         self.assertIn("__ESBMC_assert(upper_pre_clamp <= q_max", source)
         self.assertIn("fixed-point saturation possible", source)
+
+    def test_clamp_correctness_template_contains_branch_properties(self) -> None:
+        source = render_clamp_correctness_program(total_bits=8)
+
+        self.assertIn("clamp output below q_min", source)
+        self.assertIn("clamp changed in-range input", source)
+        self.assertIn("clamp did not saturate low input to q_min", source)
+        self.assertIn("clamp did not saturate high input to q_max", source)
 
     def test_cli_exposes_formal_and_empirical_saturation_flags(self) -> None:
         script = Path(__file__).resolve().parents[1] / "scripts" / "run_robustness_pipeline.py"

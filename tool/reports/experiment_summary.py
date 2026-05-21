@@ -59,6 +59,8 @@ def deployment_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "c_fixed_accuracy": metrics.get("c_qnn_accuracy"),
         "max_saturation_rate": saturation["max_saturation_rate"],
         "mean_saturation_rate": saturation["mean_saturation_rate"],
+        "layer_with_max_saturation": saturation["layer_with_max_saturation"],
+        "per_layer_saturation_rates": saturation["per_layer_saturation_rates"],
         "mismatch_rate_vs_keras": metrics.get("python_qnn_mismatch_rate_vs_keras"),
         "max_abs_logit_error": metrics.get("python_qnn_max_abs_error"),
         "mean_abs_logit_error": metrics.get("python_qnn_mean_abs_error"),
@@ -127,6 +129,15 @@ def build_experiment_summary(
     ).get("layers", [])
     formal_saturation_controls = _formal_saturation_controls(pipeline_summary, formal_esbmc_layers)
     refined_saturation_controls = _formal_saturation_controls(pipeline_summary, refined_esbmc_layers)
+    semantics_by_method = pipeline_summary.get("fixed_point_semantics_by_method", {})
+    accumulator_by_method = pipeline_summary.get("accumulator_range_by_method", {})
+    formal_semantics = semantics_by_method.get("formal_only", pipeline_summary.get("fixed_point_semantics", {}))
+    refined_semantics = semantics_by_method.get("quality_refined", pipeline_summary.get("fixed_point_semantics", {}))
+    formal_accumulator_range = accumulator_by_method.get("formal_only", pipeline_summary.get("accumulator_range", []))
+    refined_accumulator_range = accumulator_by_method.get(
+        "quality_refined",
+        pipeline_summary.get("accumulator_range", []),
+    )
 
     formal_section = {
         "success": bool(formal_synthesis.get("success", False)),
@@ -140,6 +151,8 @@ def build_experiment_summary(
         },
         "deployment_metrics": deployment_metrics(formal_metrics),
         "resource_metrics": formal_resource_metrics or {},
+        "fixed_point_semantics": formal_semantics,
+        "accumulator_range": formal_accumulator_range,
         **formal_saturation_controls,
     }
 
@@ -158,6 +171,8 @@ def build_experiment_summary(
         },
         "deployment_metrics": deployment_metrics(refined_metrics),
         "resource_metrics": refined_resource_metrics or {},
+        "fixed_point_semantics": refined_semantics,
+        "accumulator_range": refined_accumulator_range,
         **refined_saturation_controls,
     }
 
@@ -178,6 +193,17 @@ def build_experiment_summary(
         },
         "formal_only": formal_section,
         "quality_refined": refined_section,
+        "fixed_point_semantics": refined_semantics,
+        "accumulator_range": refined_accumulator_range,
+        "verification_claims": pipeline_summary.get(
+            "verification_claims",
+            {
+                "fixed_point_semantics": "declared_backend_semantics",
+                "accumulator_range": "static_interval_analysis",
+                "deployment_metrics": "empirical_dataset_evaluation",
+                "formal_saturation_verification": "formal_esbmc_when_enabled",
+            },
+        ),
         **refined_saturation_controls,
         "external_baselines": external_baselines,
         "artifacts": artifacts,
