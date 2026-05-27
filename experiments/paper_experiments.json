@@ -1,0 +1,212 @@
+{
+  "metadata": {
+    "description": "Default paper experiments for fixed-point QNN verification",
+    "note": "Each experiment is intended to run once. MNIST is intentionally limited to 25_25 for paper reproducibility; larger MNIST models can be run manually.",
+    "output_root": "output/paper_runs",
+    "aggregate_output_dir": "output/paper_results"
+  },
+  "defaults": {
+    "bit_lb": 2,
+    "bit_ub": 24,
+    "preimg_mode": "milp",
+    "verify_mode": "esbmc",
+    "compare_split": "test",
+    "compare_limit": 100,
+    "compile_c_backend": true,
+    "enable_diagnostics": true,
+    "accuracy_drop_threshold": 0.05,
+    "saturation_threshold": 0.01,
+    "mismatch_threshold": 0.05,
+    "max_quality_refinement_steps": 10,
+    "export_paper_tables": true,
+    "formal_saturation_check": true,
+    "empirical_saturation_check": true,
+    "incremental_bmc": false,
+    "interval_analysis": true
+  },
+  "runs": [
+    {
+      "name": "iris_default_sample0_eps001",
+      "dataset": "iris",
+      "arch": "1blk_10",
+      "sample_id": 0,
+      "eps": 0.1,
+      "enabled": true,
+      "compare_limit": 0,
+      "expected_difficulty": "low",
+      "notes": "Default Iris benchmark weights."
+    },
+    {
+      "name": "iris_3x2_sample0_eps01",
+      "dataset": "iris_3x2",
+      "arch": "2blk_3_3",
+      "sample_id": 0,
+      "eps": 0.1,
+      "enabled": true,
+      "compare_limit": 0,
+      "expected_difficulty": "low",
+      "notes": "Iris alias benchmark discovered under tool/benchmark/iris."
+    },
+    {
+      "name": "iris_4x2_sample0_eps01",
+      "dataset": "iris_4x2",
+      "arch": "2blk_4_4",
+      "sample_id": 0,
+      "eps": 0.1,
+      "enabled": true,
+      "compare_limit": 0,
+      "expected_difficulty": "low",
+      "notes": "Iris alias benchmark discovered under tool/benchmark/iris."
+    },
+    {
+      "name": "iris_10x2_sample0_eps01",
+      "dataset": "iris_10x2",
+      "arch": "2blk_10_10",
+      "sample_id": 0,
+      "eps": 0.1,
+      "enabled": true,
+      "compare_limit": 0,
+      "expected_difficulty": "medium",
+      "notes": "Iris alias benchmark discovered under tool/benchmark/iris."
+    },
+    {
+      "name": "iris_15x2_sample0_eps01",
+      "dataset": "iris_15x2",
+      "arch": "2blk_15_15",
+      "sample_id": 0,
+      "eps": 0.1,
+      "enabled": true,
+      "compare_limit": 0,
+      "expected_difficulty": "medium",
+      "notes": "Iris alias benchmark discovered under tool/benchmark/iris."
+    },
+    {
+      "name": "seeds_default_sample0_eps001",
+      "dataset": "seeds",
+      "arch": "1blk_10",
+      "sample_id": 0,
+      "eps": 0.01,
+      "enabled": true,
+      "compare_limit": 0,
+      "expected_difficulty": "low",
+      "notes": "Default Seeds benchmark weights."
+    },
+    {
+      "name": "seeds_2x1_sample0_eps001",
+      "dataset": "seeds_2x1",
+      "arch": "1blk_2",
+      "sample_id": 0,
+      "eps": 0.01,
+      "enabled": true,
+      "compare_limit": 0,
+      "expected_difficulty": "low",
+      "notes": "Seeds alias benchmark discovered under tool/benchmark/seeds."
+    },
+    {
+      "name": "seeds_4x1_sample0_eps001",
+      "dataset": "seeds_4x1",
+      "arch": "1blk_4",
+      "sample_id": 0,
+      "eps": 0.01,
+      "enabled": true,
+      "compare_limit": 0,
+      "expected_difficulty": "low",
+      "notes": "Seeds alias benchmark discovered under tool/benchmark/seeds."
+    },
+    {
+      "name": "seeds_5x1_sample0_eps001",
+      "dataset": "seeds_5x1",
+      "arch": "1blk_5",
+      "sample_id": 0,
+      "eps": 0.01,
+      "enabled": true,
+      "compare_limit": 0,
+      "expected_difficulty": "low",
+      "notes": "Seeds alias benchmark discovered under tool/benchmark/seeds."
+    },
+    {
+      "name": "seeds_6x1_sample0_eps001",
+      "dataset": "seeds_6x1",
+      "arch": "1blk_6",
+      "sample_id": 0,
+      "eps": 0.01,
+      "enabled": true,
+      "compare_limit": 0,
+      "expected_difficulty": "low",
+      "notes": "Seeds alias benchmark discovered under tool/benchmark/seeds."
+    },
+    {
+      "name": "seeds_10x1_sample0_eps001",
+      "dataset": "seeds_10x1",
+      "arch": "1blk_10",
+      "sample_id": 0,
+      "eps": 0.01,
+      "enabled": true,
+      "compare_limit": 0,
+      "expected_difficulty": "medium",
+      "notes": "Seeds alias benchmark discovered under tool/benchmark/seeds."
+    },
+    {
+      "name": "seeds_15x1_sample0_eps001",
+      "dataset": "seeds_15x1",
+      "arch": "1blk_15",
+      "sample_id": 0,
+      "eps": 0.01,
+      "enabled": true,
+      "compare_limit": 0,
+      "expected_difficulty": "medium",
+      "notes": "Seeds alias benchmark discovered under tool/benchmark/seeds."
+    },
+    {
+      "name": "mnist_1blk10_sample0_eps1",
+      "dataset": "mnist",
+      "arch": "1blk_10",
+      "sample_id": 0,
+      "eps": 1,
+      "enabled": true,
+      "expected_difficulty": "medium",
+      "notes": "MNIST default paper run. MNIST is intentionally capped at 25_25."
+    },
+    {
+      "name": "mnist_1blk25_sample0_eps1",
+      "dataset": "mnist",
+      "arch": "1blk_25",
+      "sample_id": 0,
+      "eps": 1,
+      "enabled": false,
+      "expected_difficulty": "medium",
+      "notes": "MNIST default paper run. MNIST is intentionally capped at 25_25."
+    },
+    {
+      "name": "mnist_2blk25_25_sample0_eps1",
+      "dataset": "mnist",
+      "arch": "2blk_25_25",
+      "sample_id": 0,
+      "eps": 1,
+      "enabled": false,
+      "expected_difficulty": "high",
+      "notes": "Largest MNIST architecture included in the default paper plan; larger MNIST models are intentionally excluded."
+    },
+    {
+      "name": "mnist64_default_sample0_eps1",
+      "dataset": "mnist64",
+      "arch": "1blk_10",
+      "sample_id": 0,
+      "eps": 1,
+      "enabled": true,
+      "expected_difficulty": "medium",
+      "notes": "MNIST64 benchmark weights."
+    },
+    {
+      "name": "mnist_onnx_default_sample0_eps1",
+      "dataset": "mnist_onnx",
+      "arch": "1blk_10",
+      "sample_id": 0,
+      "eps": 1,
+      "enabled": true,
+      "expected_difficulty": "medium",
+      "notes": "MNIST ONNX-derived benchmark weights."
+    }
+ 
+  ]
+}
