@@ -50,6 +50,43 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Split hidden affine ESBMC verification into blocks of N output neurons. Use 0 for full-layer verification.",
     )
+    parser.add_argument(
+        "--blockwise-fail-fast",
+        dest="blockwise_fail_fast",
+        action="store_true",
+        default=True,
+        help="Reject a shared-QIF block-wise candidate as soon as one block fails.",
+    )
+    parser.add_argument(
+        "--no-blockwise-fail-fast",
+        dest="blockwise_fail_fast",
+        action="store_false",
+        help="Do not fail fast on the first failed block.",
+    )
+    parser.add_argument(
+        "--blockwise-run-all-blocks-on-failure",
+        dest="blockwise_run_all_blocks_on_failure",
+        action="store_true",
+        default=False,
+        help="Run every block for a failing candidate for diagnostics.",
+    )
+    parser.add_argument(
+        "--no-blockwise-run-all-blocks-on-failure",
+        dest="blockwise_run_all_blocks_on_failure",
+        action="store_false",
+        help="Skip remaining blocks for a candidate after the first block failure.",
+    )
+    parser.add_argument("--esbmc-jobs", "--esbmc_jobs", dest="esbmc_jobs", type=int, default=1)
+    parser.add_argument("--esbmc-memlimit", "--esbmc_memlimit", dest="esbmc_memlimit", default="6g")
+    parser.add_argument(
+        "--esbmc-profile",
+        "--esbmc_profile",
+        dest="esbmc_profile",
+        default="paper-fast",
+        choices=["paper-fast", "debug", "fast", "preimage", "safety", "overflow"],
+    )
+    parser.add_argument("--esbmc-timeout", "--esbmc_timeout", dest="esbmc_timeout_seconds", type=int, default=900)
+    parser.add_argument("--gurobi-threads", "--gurobi_threads", dest="gurobi_threads", type=int, default=4)
     parser.add_argument("--target-label", type=int, default=None)
     parser.add_argument("--valid-labels", default=None, help="Comma-separated valid output labels for the output property.")
     parser.add_argument("--compare-split", default="test", choices=["train", "test"])
@@ -202,6 +239,13 @@ def main(argv: list[str] | None = None) -> None:
         preimage_cache_dir=Path(args.preimage_cache_dir) if args.preimage_cache_dir is not None else None,
         preimage_cache_key=args.preimage_cache_key,
         esbmc_layer_block_size=max(0, int(args.esbmc_layer_block_size)),
+        blockwise_fail_fast=bool(args.blockwise_fail_fast),
+        blockwise_run_all_blocks_on_failure=bool(args.blockwise_run_all_blocks_on_failure),
+        esbmc_jobs=max(1, int(args.esbmc_jobs)),
+        esbmc_memlimit=str(args.esbmc_memlimit),
+        esbmc_profile=args.esbmc_profile,
+        esbmc_timeout_seconds=max(1, int(args.esbmc_timeout_seconds)),
+        gurobi_threads=max(1, int(args.gurobi_threads)),
         export_paper_tables=args.export_paper_tables,
         baseline_results_json=args.baseline_results_json,
     )

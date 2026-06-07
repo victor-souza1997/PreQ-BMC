@@ -40,6 +40,7 @@ from synthesis.forward import forward_dnn
 from synthesis.preimage_cache import build_preimage_cache_identity
 from synthesis.quadapter import GPEncoding, QuadapterConfig, SynthesisResult
 from utils.logging_utils import get_logger
+from verification.esbmc import ESBMCConfig, ESBMCProfile
 from verification.properties import ClassificationProperty
 
 LOGGER = get_logger(__name__)
@@ -77,6 +78,13 @@ class RobustnessPipelineConfig:
     preimage_cache_dir: Path | None = None
     preimage_cache_key: str | None = None
     esbmc_layer_block_size: int = 0
+    blockwise_fail_fast: bool = True
+    blockwise_run_all_blocks_on_failure: bool = False
+    esbmc_jobs: int = 1
+    esbmc_memlimit: str = "6g"
+    esbmc_profile: ESBMCProfile = "paper-fast"
+    esbmc_timeout_seconds: int = 900
+    gurobi_threads: int = 4
     export_paper_tables: bool = True
     baseline_results_json: Path | None = None
 
@@ -183,6 +191,13 @@ def _quality_thresholds_payload(config: RobustnessPipelineConfig) -> dict[str, A
         "formal_saturation_check": bool(config.formal_saturation_check),
         "empirical_saturation_check": bool(config.empirical_saturation_check),
         "esbmc_layer_block_size": int(config.esbmc_layer_block_size),
+        "blockwise_fail_fast": bool(config.blockwise_fail_fast),
+        "blockwise_run_all_blocks_on_failure": bool(config.blockwise_run_all_blocks_on_failure),
+        "esbmc_jobs": int(config.esbmc_jobs),
+        "esbmc_memlimit": str(config.esbmc_memlimit),
+        "esbmc_profile": str(config.esbmc_profile),
+        "esbmc_timeout_seconds": int(config.esbmc_timeout_seconds),
+        "gurobi_threads": int(config.gurobi_threads),
     }
 
 
@@ -375,6 +390,8 @@ def _formal_saturation_summary(
                     "contract_status": layer.get("contract_status", layer.get("status")),
                     "no_saturation_status": layer.get("no_saturation_status", "DISABLED"),
                     "blocks": layer.get("blocks", []),
+                    "resource_control": layer.get("resource_control"),
+                    "no_saturation_resource_control": layer.get("no_saturation_resource_control"),
                 }
                 for index, layer in enumerate(step_layers)
             ]
@@ -834,6 +851,15 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         preimage_cache_key=preimage_cache_key,
         preimage_cache_metadata=preimage_cache_metadata,
         esbmc_layer_block_size=max(0, int(config.esbmc_layer_block_size)),
+        blockwise_fail_fast=bool(config.blockwise_fail_fast),
+        blockwise_run_all_blocks_on_failure=bool(config.blockwise_run_all_blocks_on_failure),
+        esbmc_jobs=max(1, int(config.esbmc_jobs)),
+        gurobi_threads=max(1, int(config.gurobi_threads)),
+        esbmc=ESBMCConfig(
+            timeout_seconds=max(1, int(config.esbmc_timeout_seconds)),
+            memlimit=str(config.esbmc_memlimit),
+            default_profile=config.esbmc_profile,
+        ),
     )
     synthesizer = GPEncoding(
         arch=[input_dim] + layer_units,

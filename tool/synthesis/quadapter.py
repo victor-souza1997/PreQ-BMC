@@ -68,6 +68,10 @@ class QuadapterConfig:
     preimage_cache_key: str | None = None
     preimage_cache_metadata: dict[str, Any] | None = None
     esbmc_layer_block_size: int = 0
+    blockwise_fail_fast: bool = True
+    blockwise_run_all_blocks_on_failure: bool = False
+    esbmc_jobs: int = 1
+    gurobi_threads: int = 4
 
     @classmethod
     def from_namespace(cls, args: Any) -> "QuadapterConfig":
@@ -80,6 +84,11 @@ class QuadapterConfig:
             eps=float(args.eps),
             output_dir=Path(getattr(args, "output_dir", getattr(args, "outputPath", "output"))),
             if_relax=bool(int(getattr(args, "if_relax", getattr(args, "ifRelax", 0)))),
+            esbmc=ESBMCConfig(
+                timeout_seconds=max(1, int(getattr(args, "esbmc_timeout_seconds", 900))),
+                memlimit=str(getattr(args, "esbmc_memlimit", "6g")),
+                default_profile=getattr(args, "esbmc_profile", "paper-fast"),
+            ),
             no_gurobi=bool(getattr(args, "no_gurobi", False)),
             save_preimage_cache=bool(getattr(args, "save_preimage_cache", False)),
             preimage_cache_dir=(
@@ -89,6 +98,12 @@ class QuadapterConfig:
             ),
             preimage_cache_key=getattr(args, "preimage_cache_key", None),
             esbmc_layer_block_size=max(0, int(getattr(args, "esbmc_layer_block_size", 0))),
+            blockwise_fail_fast=bool(getattr(args, "blockwise_fail_fast", True)),
+            blockwise_run_all_blocks_on_failure=bool(
+                getattr(args, "blockwise_run_all_blocks_on_failure", False)
+            ),
+            esbmc_jobs=max(1, int(getattr(args, "esbmc_jobs", 1))),
+            gurobi_threads=max(1, int(getattr(args, "gurobi_threads", 4))),
         )
 
 
@@ -244,7 +259,12 @@ class GPEncoding:
         self.ifRelax = int(self.config.if_relax)
         self.scaleValueSet: list[float] = []
         self.esbmc_layer_block_size = max(0, int(self.config.esbmc_layer_block_size))
+        self.blockwise_fail_fast = bool(self.config.blockwise_fail_fast)
+        self.blockwise_run_all_blocks_on_failure = bool(self.config.blockwise_run_all_blocks_on_failure)
+        self.esbmc_jobs = max(1, int(self.config.esbmc_jobs))
         self.esbmc_block_records: list[dict[str, Any]] = []
+        self.blockwise_skipped_blocks_due_to_fail_fast = 0
+        self.blockwise_first_failed_block: dict[str, Any] | None = None
 
         if self.config.no_gurobi and self.verify_mode != "esbmc":
             raise ValueError("--no-gurobi requires --verify-mode esbmc because MILP forward verification uses Gurobi.")
@@ -256,7 +276,7 @@ class GPEncoding:
             self.gp_model = gp.Model("gp_encoding")
             self.gp_model.Params.IntFeasTol = 1e-9
             self.gp_model.Params.FeasibilityTol = self.tole
-            self.gp_model.setParam(GRB.Param.Threads, 30)
+            self.gp_model.setParam(GRB.Param.Threads, max(1, int(self.config.gurobi_threads)))
             self.gp_model.setParam(GRB.Param.OutputFlag, 0)
 
         self._stats = {
@@ -882,6 +902,7 @@ class GPEncoding:
                 "contract_status": contract_result.status,
                 "no_saturation_status": "DISABLED" if not formal_saturation_check else "PENDING",
                 "blocks": [dict(block) for block in contract_result.blocks],
+                "resource_control": contract_result.resource_control,
             }
             if contract_result.status != "VERIFIED":
                 record["no_saturation_status"] = "NOT_RUN"
@@ -899,6 +920,7 @@ class GPEncoding:
                     layer_index=layer_index,
                 )
                 record["no_saturation_status"] = no_saturation_result.status
+                record["no_saturation_resource_control"] = no_saturation_result.resource_control
                 if no_saturation_result.status != "VERIFIED":
                     record["status"] = "FAILED"
                     record["failure_type"] = "formal_saturation_possible"
@@ -927,11 +949,72 @@ class GPEncoding:
 
     @staticmethod
     def _record_block_status(status: str) -> str:
-        if status == "VERIFIED":
+        if status in {"VERIFIED", "FAILED", "TIMEOUT", "MEMOUT", "UNKNOWN"}:
+            return status
+        return "UNKNOWN"
+
+    @staticmethod
+    def _candidate_rejection_status(records: list[dict[str, Any]]) -> str:
+        statuses = {str(record.get("status")) for record in records}
+        if statuses == {"VERIFIED"}:
             return "VERIFIED"
-        if status == "TIMEOUT":
-            return "TIMEOUT"
-        return "FAILED"
+        for status in ("MEMOUT", "TIMEOUT", "FAILED", "UNKNOWN"):
+            if status in statuses:
+                return status
+        return "UNKNOWN"
+
+    def _should_fail_fast_blocks(self) -> bool:
+        return bool(
+            self.blockwise_fail_fast
+            and not self.blockwise_run_all_blocks_on_failure
+        )
+
+    def _esbmc_call_record(
+        self,
+        *,
+        result: ESBMCResult,
+        layer_index: int,
+        block_index: int | None,
+        start_neuron: int | None,
+        end_neuron: int | None,
+        all_bit: int,
+        frac_bit: int,
+        harness: Path | None,
+        status: str | None = None,
+        reason: str | None = None,
+        skipped_due_to_fail_fast: bool = False,
+    ) -> dict[str, Any]:
+        record_status = status or self._record_block_status(result.status)
+        record: dict[str, Any] = {
+            "layer_index": int(layer_index),
+            "Q": int(all_bit),
+            "I": int(max(all_bit - frac_bit - 1, 0)),
+            "F": int(frac_bit),
+            "status": record_status,
+            "time": float(result.elapsed_seconds),
+            "elapsed_seconds": float(result.elapsed_seconds),
+            "return_code": int(result.return_code),
+            "timeout": f"{int(result.timeout_seconds)}s",
+            "memlimit": str(result.memlimit),
+            "command": list(result.command),
+            "stdout_log_path": result.stdout_log_path,
+            "stderr_log_path": result.stderr_log_path,
+            "resource_control": result.resource_control,
+            "harness": str(harness) if harness is not None else None,
+        }
+        if block_index is not None:
+            record["block_index"] = int(block_index)
+        if start_neuron is not None:
+            record["start_neuron"] = int(start_neuron)
+        if end_neuron is not None:
+            record["end_neuron"] = int(end_neuron)
+        if result.status != record_status:
+            record["raw_status"] = result.status
+        if reason:
+            record["reason"] = reason
+        if skipped_due_to_fail_fast:
+            record["skipped_due_to_fail_fast"] = True
+        return record
 
     def _layer_input_bounds_int(
         self,
@@ -996,13 +1079,7 @@ class GPEncoding:
         archived_file = layers_dir / f"layer_{layer_index}_Q{all_bit}_F{frac_bit}.c"
         archived_file.write_text(c_source, encoding="utf-8")
 
-        temp_file = Path(f"esbmc_verify_layer_{layer_index}_Q{all_bit}_F{frac_bit}.c")
-        temp_file.write_text(c_source, encoding="utf-8")
-        try:
-            result = self.esbmc_runner.run_file(temp_file)
-        finally:
-            if temp_file.exists():
-                temp_file.unlink()
+        result = self.esbmc_runner.run_file(archived_file)
         self._stats["esbmc_calls"] += 1.0
         LOGGER.info("ESBMC layer=%s bits(Q=%s,F=%s) status=%s", cur_layer.layer_index, all_bit, frac_bit, result.status)
         return result
@@ -1020,14 +1097,21 @@ class GPEncoding:
         layers_dir = self.output_dir / "layers" / "blocks"
         layers_dir.mkdir(parents=True, exist_ok=True)
 
+        if self.esbmc_jobs != 1:
+            LOGGER.warning(
+                "esbmc_jobs=%s requested; block-wise ESBMC verification is currently run sequentially.",
+                self.esbmc_jobs,
+            )
+
+        block_ranges = self._hidden_block_ranges(cur_layer.layer_size)
         records: list[dict[str, Any]] = []
-        commands: list[str] = []
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
         elapsed_total = 0.0
         aggregate_return_code = 0
+        first_failure: dict[str, Any] | None = None
 
-        for block_index, (start_neuron, end_neuron) in enumerate(self._hidden_block_ranges(cur_layer.layer_size)):
+        for block_index, (start_neuron, end_neuron) in enumerate(block_ranges):
             c_source = self.generate_esbmc_hidden_block_verification_code(
                 cur_layer=cur_layer,
                 in_layer=in_layer,
@@ -1044,40 +1128,27 @@ class GPEncoding:
             archived_file = layers_dir / harness_name
             archived_file.write_text(c_source, encoding="utf-8")
 
-            temp_file = Path(
-                f"esbmc_verify_layer_{layer_index}_block_{block_index}_"
-                f"Q{all_bit}_F{frac_bit}.c"
-            )
-            temp_file.write_text(c_source, encoding="utf-8")
-            try:
-                block_result = self.esbmc_runner.run_file(temp_file)
-            finally:
-                if temp_file.exists():
-                    temp_file.unlink()
+            block_result = self.esbmc_runner.run_file(archived_file)
 
             self._stats["esbmc_calls"] += 1.0
             self._stats["esbmc_block_calls"] += 1.0
             elapsed_total += float(block_result.elapsed_seconds)
             aggregate_return_code = max(aggregate_return_code, int(block_result.return_code))
-            commands.extend(block_result.command)
             stdout_parts.append(block_result.stdout)
             stderr_parts.append(block_result.stderr)
 
             record_status = self._record_block_status(block_result.status)
-            record: dict[str, Any] = {
-                "layer_index": int(layer_index),
-                "block_index": int(block_index),
-                "start_neuron": int(start_neuron),
-                "end_neuron": int(end_neuron),
-                "Q": int(all_bit),
-                "I": int(max(all_bit - frac_bit - 1, 0)),
-                "F": int(frac_bit),
-                "status": record_status,
-                "time": float(block_result.elapsed_seconds),
-                "harness": str(archived_file),
-            }
-            if block_result.status != record_status:
-                record["raw_status"] = block_result.status
+            record = self._esbmc_call_record(
+                result=block_result,
+                layer_index=layer_index,
+                block_index=block_index,
+                start_neuron=start_neuron,
+                end_neuron=end_neuron,
+                all_bit=all_bit,
+                frac_bit=frac_bit,
+                harness=archived_file,
+                status=record_status,
+            )
             records.append(record)
             self.esbmc_block_records.append(record)
 
@@ -1092,20 +1163,86 @@ class GPEncoding:
                 record_status,
             )
 
-        if all(record["status"] == "VERIFIED" for record in records):
+            if record_status != "VERIFIED":
+                skipped_count = len(block_ranges) - block_index - 1
+                record["reason"] = "candidate_rejected_by_block"
+                record["skipped_remaining_blocks"] = int(
+                    skipped_count if self._should_fail_fast_blocks() else 0
+                )
+                if first_failure is None:
+                    first_failure = dict(record)
+                if self.blockwise_first_failed_block is None:
+                    self.blockwise_first_failed_block = dict(record)
+
+                if self._should_fail_fast_blocks():
+                    self.blockwise_skipped_blocks_due_to_fail_fast += skipped_count
+                    for skipped_offset, (skip_start, skip_end) in enumerate(
+                        block_ranges[block_index + 1 :],
+                        start=block_index + 1,
+                    ):
+                        skipped_record: dict[str, Any] = {
+                            "layer_index": int(layer_index),
+                            "block_index": int(skipped_offset),
+                            "start_neuron": int(skip_start),
+                            "end_neuron": int(skip_end),
+                            "Q": int(all_bit),
+                            "I": int(max(all_bit - frac_bit - 1, 0)),
+                            "F": int(frac_bit),
+                            "status": "SKIPPED",
+                            "time": 0.0,
+                            "elapsed_seconds": 0.0,
+                            "return_code": 0,
+                            "timeout": f"{int(self.config.esbmc.timeout_seconds)}s",
+                            "memlimit": str(self.config.esbmc.memlimit),
+                            "command": [],
+                            "stdout_log_path": "",
+                            "stderr_log_path": "",
+                            "resource_control": {
+                                "timeout": f"{int(self.config.esbmc.timeout_seconds)}s",
+                                "memlimit": str(self.config.esbmc.memlimit),
+                                "status": "SKIPPED",
+                                "stdout_log_path": "",
+                                "stderr_log_path": "",
+                            },
+                            "harness": None,
+                            "reason": "skipped_due_to_fail_fast",
+                            "skipped_due_to_fail_fast": True,
+                        }
+                        records.append(skipped_record)
+                        self.esbmc_block_records.append(skipped_record)
+                    break
+
+        if all(record["status"] in {"VERIFIED", "SKIPPED"} for record in records) and not first_failure:
             aggregate_status = "VERIFIED"
-        elif any(record["status"] == "TIMEOUT" for record in records):
-            aggregate_status = "TIMEOUT"
         else:
-            aggregate_status = "FAILED"
+            aggregate_status = (
+                str(first_failure.get("status"))
+                if first_failure is not None
+                else self._candidate_rejection_status(records)
+            )
+        aggregate_resource_control = {
+            "timeout": f"{int(self.config.esbmc.timeout_seconds)}s",
+            "memlimit": str(self.config.esbmc.memlimit),
+            "elapsed_seconds": float(elapsed_total),
+            "return_code": int(0 if aggregate_status == "VERIFIED" else aggregate_return_code or 1),
+            "status": aggregate_status,
+            "stdout_log_path": "",
+            "stderr_log_path": "",
+            "fail_fast": bool(self._should_fail_fast_blocks()),
+            "run_all_blocks_on_failure": bool(self.blockwise_run_all_blocks_on_failure),
+            "first_failed_block": first_failure,
+        }
 
         return ESBMCResult(
             status=aggregate_status,
-            command=tuple(commands),
+            command=(),
             stdout="\n".join(stdout_parts),
             stderr="\n".join(stderr_parts),
             return_code=0 if aggregate_status == "VERIFIED" else aggregate_return_code or 1,
             elapsed_seconds=elapsed_total,
+            timeout_seconds=int(self.config.esbmc.timeout_seconds),
+            memlimit=str(self.config.esbmc.memlimit),
+            resource_control=aggregate_resource_control,
             blocks=tuple(records),
         )
 
@@ -1133,13 +1270,7 @@ class GPEncoding:
         archived_file = layers_dir / f"layer_{layer_index}_Q{all_bit}_F{frac_bit}_no_saturation.c"
         archived_file.write_text(c_source, encoding="utf-8")
 
-        temp_file = Path(f"esbmc_verify_layer_{layer_index}_Q{all_bit}_F{frac_bit}_no_saturation.c")
-        temp_file.write_text(c_source, encoding="utf-8")
-        try:
-            result = self.esbmc_runner.run_file(temp_file)
-        finally:
-            if temp_file.exists():
-                temp_file.unlink()
+        result = self.esbmc_runner.run_file(archived_file)
         self._stats["esbmc_calls"] += 1.0
         LOGGER.info(
             "ESBMC no-saturation layer=%s bits(Q=%s,F=%s) status=%s",
@@ -1277,6 +1408,9 @@ class GPEncoding:
         verified_blocks = sum(1 for record in records if record.get("status") == "VERIFIED")
         timeout_blocks = sum(1 for record in records if record.get("status") == "TIMEOUT")
         failed_blocks = sum(1 for record in records if record.get("status") == "FAILED")
+        memout_blocks = sum(1 for record in records if record.get("status") == "MEMOUT")
+        unknown_blocks = sum(1 for record in records if record.get("status") == "UNKNOWN")
+        skipped_blocks = sum(1 for record in records if record.get("status") == "SKIPPED")
 
         layers: list[dict[str, Any]] = []
         for layer_index in sorted({int(record["layer_index"]) for record in records}):
@@ -1295,10 +1429,18 @@ class GPEncoding:
             "enabled": bool(self.verify_mode == "esbmc" and self.esbmc_layer_block_size > 0),
             "block_size": int(self.esbmc_layer_block_size),
             "policy": "shared_layer_qif",
+            "fail_fast": bool(self.blockwise_fail_fast),
+            "run_all_blocks_on_failure": bool(self.blockwise_run_all_blocks_on_failure),
+            "esbmc_jobs": int(self.esbmc_jobs),
             "total_blocks": int(len(records)),
             "verified_blocks": int(verified_blocks),
             "failed_blocks": int(failed_blocks),
             "timeout_blocks": int(timeout_blocks),
+            "memout_blocks": int(memout_blocks),
+            "unknown_blocks": int(unknown_blocks),
+            "skipped_blocks": int(skipped_blocks),
+            "skipped_blocks_due_to_fail_fast": int(self.blockwise_skipped_blocks_due_to_fail_fast),
+            "first_failed_block": self.blockwise_first_failed_block,
             "layers": layers,
         }
 

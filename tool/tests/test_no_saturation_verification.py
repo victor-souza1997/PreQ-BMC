@@ -3,14 +3,18 @@ from __future__ import annotations
 import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 
+import numpy as np
+
+from synthesis.quadapter import GPEncoding
 from verification.c_templates import (
     render_clamp_correctness_program,
     render_hidden_affine_bounds_block_program,
     render_no_saturation_program,
 )
-from verification.esbmc import ESBMCConfig, ESBMCRunner
+from verification.esbmc import ESBMCConfig, ESBMCRunner, ESBMCResult
 
 
 def _single_neuron_program(total_bits: int) -> str:
@@ -69,6 +73,94 @@ class NoSaturationVerificationTest(unittest.TestCase):
         self.assertIn("--empirical-saturation-check", source)
         self.assertIn("--no-empirical-saturation-check", source)
         self.assertIn("--esbmc-layer-block-size", source)
+        self.assertIn("--blockwise-fail-fast", source)
+        self.assertIn("--blockwise-run-all-blocks-on-failure", source)
+        self.assertIn("--esbmc-memlimit", source)
+        self.assertIn("--esbmc-profile", source)
+        self.assertIn("--gurobi-threads", source)
+
+    def test_paper_fast_profile_uses_low_noise_resource_limited_flags(self) -> None:
+        runner = ESBMCRunner(ESBMCConfig())
+        command = runner.build_command(Path("harness.c"), unwind=4, profile="paper-fast")
+
+        self.assertIn("--bitwuzla", command)
+        self.assertIn("--bv", command)
+        self.assertIn("--memlimit", command)
+        self.assertIn("6g", command)
+        self.assertIn("--result-only", command)
+        self.assertIn("--interval-analysis", command)
+        self.assertIn("--interval-analysis-simplify", command)
+        self.assertNotIn("--verbosity", command)
+        self.assertNotIn("--print-stack-traces", command)
+        self.assertNotIn("--loop-invariant", command)
+
+    def test_debug_profile_keeps_verbose_diagnostics(self) -> None:
+        runner = ESBMCRunner(ESBMCConfig())
+        command = runner.build_command(Path("harness.c"), unwind=4, profile="debug")
+
+        self.assertIn("--verbosity", command)
+        self.assertIn("--print-stack-traces", command)
+        self.assertIn("--memstats", command)
+        self.assertIn("--show-claims", command)
+
+    def test_blockwise_verification_fail_fast_skips_remaining_blocks(self) -> None:
+        class FakeRunner:
+            def __init__(self) -> None:
+                self.calls: list[Path] = []
+
+            def run_file(self, c_file: Path) -> ESBMCResult:
+                self.calls.append(c_file)
+                return ESBMCResult(
+                    status="FAILED",
+                    command=("esbmc", str(c_file), "--memlimit", "6g"),
+                    stdout="VERIFICATION FAILED",
+                    stderr="",
+                    return_code=10,
+                    elapsed_seconds=0.1,
+                    timeout_seconds=900,
+                    memlimit="6g",
+                    stdout_log_path=f"{c_file}.stdout.log",
+                    stderr_log_path=f"{c_file}.stderr.log",
+                    resource_control={
+                        "timeout": "900s",
+                        "memlimit": "6g",
+                        "stdout_log_path": f"{c_file}.stdout.log",
+                        "stderr_log_path": f"{c_file}.stderr.log",
+                    },
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            encoder = object.__new__(GPEncoding)
+            encoder.output_dir = Path(temp_dir)
+            encoder.esbmc_layer_block_size = 1
+            encoder.blockwise_fail_fast = True
+            encoder.blockwise_run_all_blocks_on_failure = False
+            encoder.esbmc_jobs = 1
+            encoder.esbmc_block_records = []
+            encoder.blockwise_skipped_blocks_due_to_fail_fast = 0
+            encoder.blockwise_first_failed_block = None
+            encoder._stats = {"esbmc_calls": 0.0, "esbmc_block_calls": 0.0}
+            encoder.config = SimpleNamespace(esbmc=ESBMCConfig())
+            encoder.esbmc_runner = FakeRunner()
+            encoder.generate_esbmc_hidden_block_verification_code = lambda **_: "int main(void) { return 0; }"
+
+            result = encoder.verify_hidden_layer_blocks_with_esbmc(
+                cur_layer=SimpleNamespace(layer_size=3, layer_index=1),
+                in_layer=SimpleNamespace(layer_size=2),
+                qu_w_int=np.zeros((3, 2), dtype=np.int64),
+                qu_b_int=np.zeros(3, dtype=np.int64),
+                frac_bit=2,
+                all_bit=4,
+                layer_index=0,
+            )
+
+        self.assertEqual(result.status, "FAILED")
+        self.assertEqual(len(encoder.esbmc_runner.calls), 1)
+        self.assertEqual(encoder.blockwise_skipped_blocks_due_to_fail_fast, 2)
+        self.assertEqual(len(result.blocks), 3)
+        self.assertEqual(result.blocks[0]["status"], "FAILED")
+        self.assertEqual(result.blocks[1]["status"], "SKIPPED")
+        self.assertEqual(result.blocks[2]["status"], "SKIPPED")
 
     @unittest.skipUnless(shutil.which("esbmc"), "esbmc binary is not installed")
     def test_esbmc_no_saturation_fails_for_too_small_q_and_passes_for_larger_q(self) -> None:
