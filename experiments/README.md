@@ -101,3 +101,4 @@ It does not include `mnist_50`, `mnist_100`, `mnist_512`, `mnist_1024`, or large
 - The runner uses `subprocess` with argument lists and does not require Bash.
 - Missing fields in partial or failed runs are left empty in aggregate CSVs.
 - Failed, timed out, and skipped runs are still represented in `failed_runs.csv` and `all_experiments.csv`.
+- Block-wise ESBMC verification does not change the mathematical property. The hidden-layer contract is a conjunction over output neurons, so verifying all blocks with the same `<Q,I,F>` is equivalent to verifying the whole hidden layer.

@@ -736,6 +736,34 @@ def render_hidden_affine_bounds_program(
     )
 
 
+def render_hidden_affine_bounds_block_program(
+    block_size: int,
+    input_size: int,
+    weights_c_int: str,
+    biases_c_int: str,
+    preimage_low_c_int: str,
+    preimage_high_c_int: str,
+    input_bounds_low_c_int: str,
+    input_bounds_high_c_int: str,
+    scale_factor: int,
+    activation: str = "none",
+) -> str:
+    """Render a hidden affine contract harness for a contiguous output-neuron block."""
+
+    return render_hidden_affine_bounds_program(
+        output_size=block_size,
+        input_size=input_size,
+        weights_c_int=weights_c_int,
+        biases_c_int=biases_c_int,
+        preimage_low_c_int=preimage_low_c_int,
+        preimage_high_c_int=preimage_high_c_int,
+        input_bounds_low_c_int=input_bounds_low_c_int,
+        input_bounds_high_c_int=input_bounds_high_c_int,
+        scale_factor=scale_factor,
+        activation=activation,
+    )
+
+
 def render_output_target_program(
     output_size: int,
     input_size: int,

@@ -76,6 +76,7 @@ class RobustnessPipelineConfig:
     save_preimage_cache: bool = False
     preimage_cache_dir: Path | None = None
     preimage_cache_key: str | None = None
+    esbmc_layer_block_size: int = 0
     export_paper_tables: bool = True
     baseline_results_json: Path | None = None
 
@@ -181,6 +182,7 @@ def _quality_thresholds_payload(config: RobustnessPipelineConfig) -> dict[str, A
         "max_quality_refinement_steps": int(config.max_quality_refinement_steps),
         "formal_saturation_check": bool(config.formal_saturation_check),
         "empirical_saturation_check": bool(config.empirical_saturation_check),
+        "esbmc_layer_block_size": int(config.esbmc_layer_block_size),
     }
 
 
@@ -372,6 +374,7 @@ def _formal_saturation_summary(
                     "F": layer.get("fractional_bits"),
                     "contract_status": layer.get("contract_status", layer.get("status")),
                     "no_saturation_status": layer.get("no_saturation_status", "DISABLED"),
+                    "blocks": layer.get("blocks", []),
                 }
                 for index, layer in enumerate(step_layers)
             ]
@@ -830,6 +833,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         preimage_cache_dir=config.preimage_cache_dir,
         preimage_cache_key=preimage_cache_key,
         preimage_cache_metadata=preimage_cache_metadata,
+        esbmc_layer_block_size=max(0, int(config.esbmc_layer_block_size)),
     )
     synthesizer = GPEncoding(
         arch=[input_dim] + layer_units,
@@ -869,6 +873,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
             "used_for_acceptance": False,
             "layers": [],
         },
+        "blockwise_verification": synthesizer.blockwise_verification_summary(),
         "fixed_point_semantics": {
             "claim_type": "declared_backend_semantics",
             "layers": [],
@@ -879,6 +884,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
             "accumulator_range": "static_interval_analysis",
             "deployment_metrics": "empirical_dataset_evaluation",
             "formal_saturation_verification": "formal_esbmc_when_enabled",
+            "blockwise_verification": "equivalent_hidden_contract_decomposition_when_enabled",
         },
     }
     if preimage_cache_key:
@@ -889,6 +895,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         }
 
     if not synthesis_result.success:
+        summary["blockwise_verification"] = synthesizer.blockwise_verification_summary()
         quant_config_path = _save_json(config.output_dir / "reports" / "quantization_config.json", summary)
         summary["artifacts"] = {"quantization_config": str(quant_config_path)}
         pipeline_summary_path = _save_json(config.output_dir / "reports" / "pipeline_summary.json", summary)
@@ -940,6 +947,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
     summary["synthesis"] = final_synthesis_result.to_dict()
     summary["quality_refinement"] = quality_summary
     summary["formal_saturation_verification"] = _formal_saturation_summary(config, quality_summary)
+    summary["blockwise_verification"] = synthesizer.blockwise_verification_summary()
     summary["comparison"] = comparison
 
     quantized_logits = _predict_logits(quantized_model, dataset.x_test)

@@ -202,6 +202,7 @@ def _build_pipeline_command(
         ("--baseline-results-json", "baseline_results_json"),
         ("--preimage-cache-dir", "preimage_cache_dir"),
         ("--preimage-cache-key", "preimage_cache_key"),
+        ("--esbmc-layer-block-size", "esbmc_layer_block_size"),
     ):
         if run.get(key) is not None:
             value = run[key]

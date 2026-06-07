@@ -42,6 +42,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--if-relax", "--ifRelax", dest="if_relax", type=int, default=0)
     parser.add_argument("--preimage-mode", "--preimg_mode", dest="preimg_mode", default="milp", choices=["milp", "abstr", "comp"])
     parser.add_argument("--verify-mode", "--verify_mode", dest="verify_mode", default="milp", choices=["milp", "esbmc"])
+    parser.add_argument(
+        "--esbmc-layer-block-size",
+        "--esbmc_layer_block_size",
+        dest="esbmc_layer_block_size",
+        type=int,
+        default=10,
+        help="Split hidden affine ESBMC verification into blocks of N output neurons. Use 0 for full-layer verification.",
+    )
     parser.add_argument("--target-label", type=int, default=None)
     parser.add_argument("--valid-labels", default=None, help="Comma-separated valid output labels for the output property.")
     parser.add_argument("--compare-split", default="test", choices=["train", "test"])
@@ -193,6 +201,7 @@ def main(argv: list[str] | None = None) -> None:
         save_preimage_cache=args.save_preimage_cache,
         preimage_cache_dir=Path(args.preimage_cache_dir) if args.preimage_cache_dir is not None else None,
         preimage_cache_key=args.preimage_cache_key,
+        esbmc_layer_block_size=max(0, int(args.esbmc_layer_block_size)),
         export_paper_tables=args.export_paper_tables,
         baseline_results_json=args.baseline_results_json,
     )

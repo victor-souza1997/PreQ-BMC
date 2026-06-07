@@ -5,7 +5,11 @@ import tempfile
 from pathlib import Path
 import unittest
 
-from verification.c_templates import render_clamp_correctness_program, render_no_saturation_program
+from verification.c_templates import (
+    render_clamp_correctness_program,
+    render_hidden_affine_bounds_block_program,
+    render_no_saturation_program,
+)
 from verification.esbmc import ESBMCConfig, ESBMCRunner
 
 
@@ -38,6 +42,24 @@ class NoSaturationVerificationTest(unittest.TestCase):
         self.assertIn("clamp did not saturate low input to q_min", source)
         self.assertIn("clamp did not saturate high input to q_max", source)
 
+    def test_hidden_block_template_uses_block_size_with_full_input_bounds(self) -> None:
+        source = render_hidden_affine_bounds_block_program(
+            block_size=1,
+            input_size=3,
+            weights_c_int="{{1, 2, 3}}",
+            biases_c_int="{0}",
+            preimage_low_c_int="{-1}",
+            preimage_high_c_int="{1}",
+            input_bounds_low_c_int="{0, 0, 0}",
+            input_bounds_high_c_int="{4, 4, 4}",
+            scale_factor=1,
+        )
+
+        self.assertIn("#define INPUT_SIZE 3", source)
+        self.assertIn("#define LAYER_SIZE 1", source)
+        self.assertIn("long long weights[LAYER_SIZE][INPUT_SIZE] = {{1, 2, 3}};", source)
+        self.assertIn("long long input_bounds_low[INPUT_SIZE] = {0, 0, 0};", source)
+
     def test_cli_exposes_formal_and_empirical_saturation_flags(self) -> None:
         script = Path(__file__).resolve().parents[1] / "scripts" / "run_robustness_pipeline.py"
         source = script.read_text(encoding="utf-8")
@@ -46,6 +68,7 @@ class NoSaturationVerificationTest(unittest.TestCase):
         self.assertIn("--no-formal-saturation-check", source)
         self.assertIn("--empirical-saturation-check", source)
         self.assertIn("--no-empirical-saturation-check", source)
+        self.assertIn("--esbmc-layer-block-size", source)
 
     @unittest.skipUnless(shutil.which("esbmc"), "esbmc binary is not installed")
     def test_esbmc_no_saturation_fails_for_too_small_q_and_passes_for_larger_q(self) -> None:

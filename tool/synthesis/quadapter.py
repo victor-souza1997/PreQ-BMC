@@ -15,6 +15,7 @@ from synthesis.preimage_cache import load_preimage_cache, save_preimage_cache
 from utils.fixed_point import int_get_min_max, quantize_int
 from utils.logging_utils import get_logger
 from verification.c_templates import (
+    render_hidden_affine_bounds_block_program,
     render_hidden_affine_bounds_program,
     render_no_saturation_program,
     render_output_target_program,
@@ -66,6 +67,7 @@ class QuadapterConfig:
     preimage_cache_dir: Path | None = None
     preimage_cache_key: str | None = None
     preimage_cache_metadata: dict[str, Any] | None = None
+    esbmc_layer_block_size: int = 0
 
     @classmethod
     def from_namespace(cls, args: Any) -> "QuadapterConfig":
@@ -86,6 +88,7 @@ class QuadapterConfig:
                 else None
             ),
             preimage_cache_key=getattr(args, "preimage_cache_key", None),
+            esbmc_layer_block_size=max(0, int(getattr(args, "esbmc_layer_block_size", 0))),
         )
 
 
@@ -240,6 +243,8 @@ class GPEncoding:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.ifRelax = int(self.config.if_relax)
         self.scaleValueSet: list[float] = []
+        self.esbmc_layer_block_size = max(0, int(self.config.esbmc_layer_block_size))
+        self.esbmc_block_records: list[dict[str, Any]] = []
 
         if self.config.no_gurobi and self.verify_mode != "esbmc":
             raise ValueError("--no-gurobi requires --verify-mode esbmc because MILP forward verification uses Gurobi.")
@@ -260,6 +265,8 @@ class GPEncoding:
             "backward_time": 0.0,
             "forward_time": 0.0,
             "total_time": 0.0,
+            "esbmc_calls": 0.0,
+            "esbmc_block_calls": 0.0,
         }
 
         self.dense_layers: list[LayerEncoding] = []
@@ -874,6 +881,7 @@ class GPEncoding:
                 "status": contract_result.status,
                 "contract_status": contract_result.status,
                 "no_saturation_status": "DISABLED" if not formal_saturation_check else "PENDING",
+                "blocks": [dict(block) for block in contract_result.blocks],
             }
             if contract_result.status != "VERIFIED":
                 record["no_saturation_status"] = "NOT_RUN"
@@ -903,6 +911,57 @@ class GPEncoding:
 
         return True, records
 
+    def _uses_hidden_block_verification(self, cur_layer: LayerEncoding) -> bool:
+        return (
+            self.esbmc_layer_block_size > 0
+            and cur_layer.layer_index < (len(self.dense_layers) + 1)
+        )
+
+    def _hidden_block_ranges(self, output_size: int) -> list[tuple[int, int]]:
+        if self.esbmc_layer_block_size <= 0:
+            return [(0, output_size)]
+        return [
+            (start, min(start + self.esbmc_layer_block_size, output_size))
+            for start in range(0, output_size, self.esbmc_layer_block_size)
+        ]
+
+    @staticmethod
+    def _record_block_status(status: str) -> str:
+        if status == "VERIFIED":
+            return "VERIFIED"
+        if status == "TIMEOUT":
+            return "TIMEOUT"
+        return "FAILED"
+
+    def _layer_input_bounds_int(
+        self,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        scale: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if cur_layer.layer_index == 1:
+            x_lo = np.array(self.x_low_real, dtype=np.float64)
+            x_hi = np.array(self.x_high_real, dtype=np.float64)
+        else:
+            x_lo = np.array(in_layer.clipped_lb, dtype=np.float64)
+            x_hi = np.array(in_layer.clipped_ub, dtype=np.float64)
+        return (
+            np.floor(x_lo * scale).astype(np.int64),
+            np.ceil(x_hi * scale).astype(np.int64),
+        )
+
+    def _layer_preimage_bounds_int(
+        self,
+        cur_layer: LayerEncoding,
+        scale: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        pre_lo = np.array(cur_layer.relaxed_lb if cur_layer.relaxed_lb is not None else cur_layer.lb, dtype=np.float64)
+        pre_hi = np.array(cur_layer.relaxed_ub if cur_layer.relaxed_ub is not None else cur_layer.ub, dtype=np.float64)
+        return (
+            np.floor(pre_lo * scale).astype(np.int64),
+            np.ceil(pre_hi * scale).astype(np.int64),
+        )
+
     def verify_layer_with_esbmc(
         self,
         cur_layer: LayerEncoding,
@@ -913,6 +972,17 @@ class GPEncoding:
         all_bit: int,
         layer_index: int,
     ) -> ESBMCResult:
+        if self._uses_hidden_block_verification(cur_layer):
+            return self.verify_hidden_layer_blocks_with_esbmc(
+                cur_layer=cur_layer,
+                in_layer=in_layer,
+                qu_w_int=qu_w_int,
+                qu_b_int=qu_b_int,
+                frac_bit=frac_bit,
+                all_bit=all_bit,
+                layer_index=layer_index,
+            )
+
         c_source = self.generate_esbmc_verification_code(
             cur_layer=cur_layer,
             in_layer=in_layer,
@@ -933,8 +1003,111 @@ class GPEncoding:
         finally:
             if temp_file.exists():
                 temp_file.unlink()
+        self._stats["esbmc_calls"] += 1.0
         LOGGER.info("ESBMC layer=%s bits(Q=%s,F=%s) status=%s", cur_layer.layer_index, all_bit, frac_bit, result.status)
         return result
+
+    def verify_hidden_layer_blocks_with_esbmc(
+        self,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        qu_w_int: np.ndarray,
+        qu_b_int: np.ndarray,
+        frac_bit: int,
+        all_bit: int,
+        layer_index: int,
+    ) -> ESBMCResult:
+        layers_dir = self.output_dir / "layers" / "blocks"
+        layers_dir.mkdir(parents=True, exist_ok=True)
+
+        records: list[dict[str, Any]] = []
+        commands: list[str] = []
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
+        elapsed_total = 0.0
+        aggregate_return_code = 0
+
+        for block_index, (start_neuron, end_neuron) in enumerate(self._hidden_block_ranges(cur_layer.layer_size)):
+            c_source = self.generate_esbmc_hidden_block_verification_code(
+                cur_layer=cur_layer,
+                in_layer=in_layer,
+                qu_w_int=qu_w_int,
+                qu_b_int=qu_b_int,
+                frac_bit=frac_bit,
+                start_neuron=start_neuron,
+                end_neuron=end_neuron,
+            )
+            harness_name = (
+                f"layer_{layer_index}_block_{block_index}_"
+                f"n{start_neuron}_{end_neuron}_Q{all_bit}_F{frac_bit}.c"
+            )
+            archived_file = layers_dir / harness_name
+            archived_file.write_text(c_source, encoding="utf-8")
+
+            temp_file = Path(
+                f"esbmc_verify_layer_{layer_index}_block_{block_index}_"
+                f"Q{all_bit}_F{frac_bit}.c"
+            )
+            temp_file.write_text(c_source, encoding="utf-8")
+            try:
+                block_result = self.esbmc_runner.run_file(temp_file)
+            finally:
+                if temp_file.exists():
+                    temp_file.unlink()
+
+            self._stats["esbmc_calls"] += 1.0
+            self._stats["esbmc_block_calls"] += 1.0
+            elapsed_total += float(block_result.elapsed_seconds)
+            aggregate_return_code = max(aggregate_return_code, int(block_result.return_code))
+            commands.extend(block_result.command)
+            stdout_parts.append(block_result.stdout)
+            stderr_parts.append(block_result.stderr)
+
+            record_status = self._record_block_status(block_result.status)
+            record: dict[str, Any] = {
+                "layer_index": int(layer_index),
+                "block_index": int(block_index),
+                "start_neuron": int(start_neuron),
+                "end_neuron": int(end_neuron),
+                "Q": int(all_bit),
+                "I": int(max(all_bit - frac_bit - 1, 0)),
+                "F": int(frac_bit),
+                "status": record_status,
+                "time": float(block_result.elapsed_seconds),
+                "harness": str(archived_file),
+            }
+            if block_result.status != record_status:
+                record["raw_status"] = block_result.status
+            records.append(record)
+            self.esbmc_block_records.append(record)
+
+            LOGGER.info(
+                "ESBMC block layer=%s block=%s neurons=[%s,%s) bits(Q=%s,F=%s) status=%s",
+                cur_layer.layer_index,
+                block_index,
+                start_neuron,
+                end_neuron,
+                all_bit,
+                frac_bit,
+                record_status,
+            )
+
+        if all(record["status"] == "VERIFIED" for record in records):
+            aggregate_status = "VERIFIED"
+        elif any(record["status"] == "TIMEOUT" for record in records):
+            aggregate_status = "TIMEOUT"
+        else:
+            aggregate_status = "FAILED"
+
+        return ESBMCResult(
+            status=aggregate_status,
+            command=tuple(commands),
+            stdout="\n".join(stdout_parts),
+            stderr="\n".join(stderr_parts),
+            return_code=0 if aggregate_status == "VERIFIED" else aggregate_return_code or 1,
+            elapsed_seconds=elapsed_total,
+            blocks=tuple(records),
+        )
 
     def verify_layer_no_saturation_with_esbmc(
         self,
@@ -967,6 +1140,7 @@ class GPEncoding:
         finally:
             if temp_file.exists():
                 temp_file.unlink()
+        self._stats["esbmc_calls"] += 1.0
         LOGGER.info(
             "ESBMC no-saturation layer=%s bits(Q=%s,F=%s) status=%s",
             cur_layer.layer_index,
@@ -990,19 +1164,8 @@ class GPEncoding:
         weights_c_int = self.numpy_to_c_int_array(qu_w_int)
         biases_c_int = self.numpy_to_c_int_array(qu_b_int)
 
-        pre_lo = np.array(cur_layer.relaxed_lb if cur_layer.relaxed_lb is not None else cur_layer.lb, dtype=np.float64)
-        pre_hi = np.array(cur_layer.relaxed_ub if cur_layer.relaxed_ub is not None else cur_layer.ub, dtype=np.float64)
-        pre_lo_int = np.floor(pre_lo * scale).astype(np.int64)
-        pre_hi_int = np.ceil(pre_hi * scale).astype(np.int64)
-
-        if cur_layer.layer_index == 1:
-            x_lo = np.array(self.x_low_real, dtype=np.float64)
-            x_hi = np.array(self.x_high_real, dtype=np.float64)
-        else:
-            x_lo = np.array(in_layer.clipped_lb, dtype=np.float64)
-            x_hi = np.array(in_layer.clipped_ub, dtype=np.float64)
-        input_lo_int = np.floor(x_lo * scale).astype(np.int64)
-        input_hi_int = np.ceil(x_hi * scale).astype(np.int64)
+        pre_lo_int, pre_hi_int = self._layer_preimage_bounds_int(cur_layer, scale)
+        input_lo_int, input_hi_int = self._layer_input_bounds_int(cur_layer, in_layer, scale)
 
         is_output_layer = cur_layer.layer_index == len(self.dense_layers) + 1
         if is_output_layer:
@@ -1035,6 +1198,32 @@ class GPEncoding:
             biases_c_int=biases_c_int,
             preimage_low_c_int=self.numpy_to_c_int_array(pre_lo_int),
             preimage_high_c_int=self.numpy_to_c_int_array(pre_hi_int),
+            input_bounds_low_c_int=self.numpy_to_c_int_array(input_lo_int),
+            input_bounds_high_c_int=self.numpy_to_c_int_array(input_hi_int),
+            scale_factor=scale,
+        )
+
+    def generate_esbmc_hidden_block_verification_code(
+        self,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        qu_w_int: np.ndarray,
+        qu_b_int: np.ndarray,
+        frac_bit: int,
+        start_neuron: int,
+        end_neuron: int,
+    ) -> str:
+        scale = 1 << int(frac_bit)
+        pre_lo_int, pre_hi_int = self._layer_preimage_bounds_int(cur_layer, scale)
+        input_lo_int, input_hi_int = self._layer_input_bounds_int(cur_layer, in_layer, scale)
+
+        return render_hidden_affine_bounds_block_program(
+            block_size=int(end_neuron - start_neuron),
+            input_size=in_layer.layer_size,
+            weights_c_int=self.numpy_to_c_int_array(qu_w_int[start_neuron:end_neuron]),
+            biases_c_int=self.numpy_to_c_int_array(qu_b_int[start_neuron:end_neuron]),
+            preimage_low_c_int=self.numpy_to_c_int_array(pre_lo_int[start_neuron:end_neuron]),
+            preimage_high_c_int=self.numpy_to_c_int_array(pre_hi_int[start_neuron:end_neuron]),
             input_bounds_low_c_int=self.numpy_to_c_int_array(input_lo_int),
             input_bounds_high_c_int=self.numpy_to_c_int_array(input_hi_int),
             scale_factor=scale,
@@ -1082,6 +1271,36 @@ class GPEncoding:
         for row in np_array:
             rows.append("{" + ", ".join(str(int(x)) for x in row) + "}")
         return "{" + ", ".join(rows) + "}"
+
+    def blockwise_verification_summary(self) -> dict[str, Any]:
+        records = [dict(record) for record in self.esbmc_block_records]
+        verified_blocks = sum(1 for record in records if record.get("status") == "VERIFIED")
+        timeout_blocks = sum(1 for record in records if record.get("status") == "TIMEOUT")
+        failed_blocks = sum(1 for record in records if record.get("status") == "FAILED")
+
+        layers: list[dict[str, Any]] = []
+        for layer_index in sorted({int(record["layer_index"]) for record in records}):
+            layers.append(
+                {
+                    "layer_index": int(layer_index),
+                    "blocks": [
+                        record
+                        for record in records
+                        if int(record.get("layer_index", -1)) == layer_index
+                    ],
+                }
+            )
+
+        return {
+            "enabled": bool(self.verify_mode == "esbmc" and self.esbmc_layer_block_size > 0),
+            "block_size": int(self.esbmc_layer_block_size),
+            "policy": "shared_layer_qif",
+            "total_blocks": int(len(records)),
+            "verified_blocks": int(verified_blocks),
+            "failed_blocks": int(failed_blocks),
+            "timeout_blocks": int(timeout_blocks),
+            "layers": layers,
+        }
 
     def update_quantized_weights_affine(
         self,

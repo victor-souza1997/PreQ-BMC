@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 import re
 import subprocess
+import time
 
 from utils.logging_utils import get_logger
 
@@ -37,6 +38,8 @@ class ESBMCResult:
     stdout: str
     stderr: str
     return_code: int
+    elapsed_seconds: float = 0.0
+    blocks: tuple[dict[str, Any], ...] = ()
 
 
 class ESBMCRunner:
@@ -98,6 +101,7 @@ class ESBMCRunner:
             str(unwind),
             "--state-hashing",
             "--bitwuzla",
+            "--bv",
             "--timeout",
             str(self.config.timeout_seconds),
             "--verbosity",
@@ -110,8 +114,8 @@ class ESBMCRunner:
         if profile in ("preimage", "safety", "overflow"):
             command.extend(
                 [
-                    "--loop-invariant",
-                    "--interval-analysis",
+                   "--interval-analysis",
+                   "--interval-analysis-simplify"
                 ]
             )
 
@@ -150,6 +154,7 @@ class ESBMCRunner:
             unwind,
         )
         print(command)
+        start_time = time.monotonic()
         try:
             completed = subprocess.run(
                 command,
@@ -168,6 +173,7 @@ class ESBMCRunner:
                 stdout=exc.stdout or "",
                 stderr=exc.stderr or "",
                 return_code=-1,
+                elapsed_seconds=time.monotonic() - start_time,
             )
         except Exception as exc:
             return ESBMCResult(
@@ -176,7 +182,9 @@ class ESBMCRunner:
                 stdout="",
                 stderr=str(exc),
                 return_code=-1,
+                elapsed_seconds=time.monotonic() - start_time,
             )
+        elapsed_seconds = time.monotonic() - start_time
 
         LOGGER.debug("ESBMC return code: %s", completed.returncode)
         LOGGER.debug("--- STDOUT tail ---\n%s", (completed.stdout or "")[-20000:])
@@ -199,4 +207,5 @@ class ESBMCRunner:
             stdout=completed.stdout,
             stderr=completed.stderr,
             return_code=completed.returncode,
+            elapsed_seconds=elapsed_seconds,
         )

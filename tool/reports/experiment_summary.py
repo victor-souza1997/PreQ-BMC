@@ -94,6 +94,19 @@ def _formal_saturation_controls(
     }
 
 
+def _blockwise_controls(pipeline_summary: dict[str, Any]) -> dict[str, Any]:
+    verification = pipeline_summary.get("blockwise_verification", {})
+    return {
+        "blockwise_verification_enabled": bool(verification.get("enabled", False)),
+        "blockwise_block_size": verification.get("block_size", 0),
+        "blockwise_policy": verification.get("policy", "shared_layer_qif"),
+        "blockwise_total_blocks": verification.get("total_blocks", 0),
+        "blockwise_verified_blocks": verification.get("verified_blocks", 0),
+        "blockwise_failed_blocks": verification.get("failed_blocks", 0),
+        "blockwise_timeout_blocks": verification.get("timeout_blocks", 0),
+    }
+
+
 def build_experiment_summary(
     *,
     pipeline_summary: dict[str, Any],
@@ -129,6 +142,7 @@ def build_experiment_summary(
     ).get("layers", [])
     formal_saturation_controls = _formal_saturation_controls(pipeline_summary, formal_esbmc_layers)
     refined_saturation_controls = _formal_saturation_controls(pipeline_summary, refined_esbmc_layers)
+    blockwise_controls = _blockwise_controls(pipeline_summary)
     semantics_by_method = pipeline_summary.get("fixed_point_semantics_by_method", {})
     accumulator_by_method = pipeline_summary.get("accumulator_range_by_method", {})
     formal_semantics = semantics_by_method.get("formal_only", pipeline_summary.get("fixed_point_semantics", {}))
@@ -154,6 +168,7 @@ def build_experiment_summary(
         "fixed_point_semantics": formal_semantics,
         "accumulator_range": formal_accumulator_range,
         **formal_saturation_controls,
+        **blockwise_controls,
     }
 
     refined_section = {
@@ -174,6 +189,7 @@ def build_experiment_summary(
         "fixed_point_semantics": refined_semantics,
         "accumulator_range": refined_accumulator_range,
         **refined_saturation_controls,
+        **blockwise_controls,
     }
 
     return {
@@ -202,9 +218,12 @@ def build_experiment_summary(
                 "accumulator_range": "static_interval_analysis",
                 "deployment_metrics": "empirical_dataset_evaluation",
                 "formal_saturation_verification": "formal_esbmc_when_enabled",
+                "blockwise_verification": "equivalent_hidden_contract_decomposition_when_enabled",
             },
         ),
+        "blockwise_verification": pipeline_summary.get("blockwise_verification", {}),
         **refined_saturation_controls,
+        **blockwise_controls,
         "external_baselines": external_baselines,
         "artifacts": artifacts,
     }
