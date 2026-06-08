@@ -77,13 +77,13 @@ class RobustnessPipelineConfig:
     save_preimage_cache: bool = False
     preimage_cache_dir: Path | None = None
     preimage_cache_key: str | None = None
-    esbmc_layer_block_size: int = 0
+    esbmc_layer_block_size: int = 10
     blockwise_fail_fast: bool = True
     blockwise_run_all_blocks_on_failure: bool = False
     esbmc_jobs: int = 1
-    esbmc_memlimit: str = "6g"
+    esbmc_memlimit: str = "12g"
     esbmc_profile: ESBMCProfile = "paper-fast"
-    esbmc_timeout_seconds: int = 900
+    esbmc_timeout_seconds: int = 9000
     gurobi_threads: int = 4
     export_paper_tables: bool = True
     baseline_results_json: Path | None = None
