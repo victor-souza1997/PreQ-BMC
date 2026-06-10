@@ -87,6 +87,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--esbmc-timeout", "--esbmc_timeout", dest="esbmc_timeout_seconds", type=int, default=900)
     parser.add_argument("--gurobi-threads", "--gurobi_threads", dest="gurobi_threads", type=int, default=4)
+    parser.add_argument(
+        "--no-saturation-continue-on-unknown",
+        dest="no_saturation_continue_on_unknown",
+        action="store_true",
+        default=False,
+        help="Continue no-saturation block checks after TIMEOUT/MEMOUT/UNKNOWN for diagnostics.",
+    )
+    parser.add_argument(
+        "--no-no-saturation-continue-on-unknown",
+        dest="no_saturation_continue_on_unknown",
+        action="store_false",
+        help="Stop no-saturation block checks after TIMEOUT/MEMOUT/UNKNOWN.",
+    )
     parser.add_argument("--target-label", type=int, default=None)
     parser.add_argument("--valid-labels", default=None, help="Comma-separated valid output labels for the output property.")
     parser.add_argument("--compare-split", default="test", choices=["train", "test"])
@@ -106,6 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--formal-saturation-check",
+        "--formal-no-saturation",
         dest="formal_saturation_check",
         action="store_true",
         default=True,
@@ -113,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--no-formal-saturation-check",
+        "--no-formal-no-saturation",
         dest="formal_saturation_check",
         action="store_false",
         help="Disable ESBMC no-saturation verification as an acceptance criterion.",
@@ -246,6 +261,7 @@ def main(argv: list[str] | None = None) -> None:
         esbmc_profile=args.esbmc_profile,
         esbmc_timeout_seconds=max(1, int(args.esbmc_timeout_seconds)),
         gurobi_threads=max(1, int(args.gurobi_threads)),
+        no_saturation_continue_on_unknown=bool(args.no_saturation_continue_on_unknown),
         export_paper_tables=args.export_paper_tables,
         baseline_results_json=args.baseline_results_json,
     )

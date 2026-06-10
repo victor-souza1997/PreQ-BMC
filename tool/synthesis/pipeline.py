@@ -80,6 +80,7 @@ class RobustnessPipelineConfig:
     esbmc_layer_block_size: int = 10
     blockwise_fail_fast: bool = True
     blockwise_run_all_blocks_on_failure: bool = False
+    no_saturation_continue_on_unknown: bool = False
     esbmc_jobs: int = 1
     esbmc_memlimit: str = "12g"
     esbmc_profile: ESBMCProfile = "paper-fast"
@@ -193,6 +194,7 @@ def _quality_thresholds_payload(config: RobustnessPipelineConfig) -> dict[str, A
         "esbmc_layer_block_size": int(config.esbmc_layer_block_size),
         "blockwise_fail_fast": bool(config.blockwise_fail_fast),
         "blockwise_run_all_blocks_on_failure": bool(config.blockwise_run_all_blocks_on_failure),
+        "no_saturation_continue_on_unknown": bool(config.no_saturation_continue_on_unknown),
         "esbmc_jobs": int(config.esbmc_jobs),
         "esbmc_memlimit": str(config.esbmc_memlimit),
         "esbmc_profile": str(config.esbmc_profile),
@@ -338,7 +340,7 @@ def _refine_specs_after_formal_saturation_failure(
         (
             record
             for record in esbmc_records
-            if record.get("no_saturation_status") not in {"VERIFIED", "DISABLED"}
+            if record.get("failure_type") == "formal_saturation_possible"
         ),
         None,
     )
@@ -373,6 +375,60 @@ def _formal_saturation_failure(esbmc_records: list[dict[str, Any]]) -> bool:
     return any(record.get("failure_type") == "formal_saturation_possible" for record in esbmc_records)
 
 
+def _esbmc_attempt_status(esbmc_records: list[dict[str, Any]], *, verified: bool) -> str:
+    if verified:
+        return "VERIFIED"
+    statuses = {
+        str(record.get("contract_status", record.get("status", "UNKNOWN")))
+        for record in esbmc_records
+    }
+    statuses.update(str(record.get("no_saturation_status", "UNKNOWN")) for record in esbmc_records)
+    if "FAILED" in statuses:
+        return "FAILED"
+    if "TIMEOUT" in statuses:
+        return "TIMEOUT"
+    if "MEMOUT" in statuses:
+        return "MEMOUT"
+    return "UNKNOWN"
+
+
+def _contract_verified_status(status: Any) -> bool:
+    return str(status) in {"VERIFIED", "VERIFIED_BY_SYNTHESIS"}
+
+
+def _layer_final_status(layer: dict[str, Any], *, deployment_quality_accepted: bool) -> str:
+    contract_status = str(layer.get("contract_status", layer.get("status", "UNKNOWN")))
+    contract_verified = bool(layer.get("contract_verified", _contract_verified_status(contract_status)))
+    no_saturation_status = str(layer.get("no_saturation_status", "SKIPPED"))
+    no_saturation_verified = bool(layer.get("no_saturation_verified", no_saturation_status == "VERIFIED"))
+
+    if contract_status == "FAILED" or no_saturation_status == "FAILED" or not deployment_quality_accepted:
+        return "FAILED"
+    if contract_verified and deployment_quality_accepted and no_saturation_verified:
+        return "VERIFIED"
+    if contract_verified and deployment_quality_accepted and no_saturation_status in {
+        "TIMEOUT",
+        "MEMOUT",
+        "UNKNOWN",
+        "SKIPPED",
+        "DISABLED",
+    }:
+        return "PARTIAL_VERIFIED"
+    return "UNKNOWN"
+
+
+def _no_saturation_block_counters(blocks: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "no_saturation_blocks_total": int(len(blocks)),
+        "no_saturation_blocks_verified": int(sum(1 for block in blocks if block.get("status") == "VERIFIED")),
+        "no_saturation_blocks_failed": int(sum(1 for block in blocks if block.get("status") == "FAILED")),
+        "no_saturation_blocks_timeout": int(sum(1 for block in blocks if block.get("status") == "TIMEOUT")),
+        "no_saturation_blocks_memout": int(sum(1 for block in blocks if block.get("status") == "MEMOUT")),
+        "no_saturation_blocks_unknown": int(sum(1 for block in blocks if block.get("status") == "UNKNOWN")),
+        "no_saturation_blocks_skipped": int(sum(1 for block in blocks if block.get("status") == "SKIPPED")),
+    }
+
+
 def _formal_saturation_summary(
     config: RobustnessPipelineConfig,
     quality_summary: dict[str, Any],
@@ -388,8 +444,26 @@ def _formal_saturation_summary(
                     "I": layer.get("integer_bits"),
                     "F": layer.get("fractional_bits"),
                     "contract_status": layer.get("contract_status", layer.get("status")),
-                    "no_saturation_status": layer.get("no_saturation_status", "DISABLED"),
+                    "contract_verified": bool(
+                        layer.get(
+                            "contract_verified",
+                            _contract_verified_status(layer.get("contract_status", layer.get("status"))),
+                        )
+                    ),
+                    "no_saturation_formally_checked": bool(
+                        layer.get("no_saturation_formally_checked", False)
+                    ),
+                    "no_saturation_status": layer.get("no_saturation_status", "SKIPPED"),
+                    "no_saturation_verified": bool(
+                        layer.get("no_saturation_verified", layer.get("no_saturation_status") == "VERIFIED")
+                    ),
+                    "deployment_quality_accepted": bool(layer.get("deployment_quality_accepted", True)),
+                    "final_status": layer.get(
+                        "final_status",
+                        _layer_final_status(layer, deployment_quality_accepted=True),
+                    ),
                     "blocks": layer.get("blocks", []),
+                    "no_saturation_blocks": layer.get("no_saturation_blocks", []),
                     "resource_control": layer.get("resource_control"),
                     "no_saturation_resource_control": layer.get("no_saturation_resource_control"),
                 }
@@ -397,10 +471,17 @@ def _formal_saturation_summary(
             ]
             break
 
+    no_saturation_blocks = [
+        block
+        for layer in layers
+        for block in layer.get("no_saturation_blocks", [])
+    ]
     return {
         "enabled": bool(config.formal_saturation_check),
         "used_for_acceptance": bool(_quality_gate_enabled(config) and config.formal_saturation_check),
         "layers": layers,
+        "no_saturation_blocks": no_saturation_blocks,
+        **_no_saturation_block_counters(no_saturation_blocks),
     }
 
 
@@ -675,7 +756,12 @@ def _run_quality_refinement(
                             "fractional_bits": int(spec.fractional_bits),
                             "status": "VERIFIED_BY_SYNTHESIS",
                             "contract_status": "VERIFIED_BY_SYNTHESIS",
-                            "no_saturation_status": "DISABLED",
+                            "contract_verified": True,
+                            "no_saturation_formally_checked": False,
+                            "no_saturation_status": "SKIPPED",
+                            "no_saturation_verified": False,
+                            "deployment_quality_accepted": True,
+                            "final_status": "PARTIAL_VERIFIED",
                         }
                         for index, spec in enumerate(current_specs)
                     ]
@@ -689,7 +775,7 @@ def _run_quality_refinement(
                 attempt["esbmc"] = {
                     "required_for_acceptance": True,
                     "no_saturation_enabled": bool(config.formal_saturation_check),
-                    "status": "VERIFIED" if esbmc_verified else "FAILED",
+                    "status": _esbmc_attempt_status(esbmc_records, verified=esbmc_verified),
                     "layers": esbmc_records,
                 }
                 formal_saturation_failed = _formal_saturation_failure(esbmc_records)
@@ -853,6 +939,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         esbmc_layer_block_size=max(0, int(config.esbmc_layer_block_size)),
         blockwise_fail_fast=bool(config.blockwise_fail_fast),
         blockwise_run_all_blocks_on_failure=bool(config.blockwise_run_all_blocks_on_failure),
+        no_saturation_continue_on_unknown=bool(config.no_saturation_continue_on_unknown),
         esbmc_jobs=max(1, int(config.esbmc_jobs)),
         gurobi_threads=max(1, int(config.gurobi_threads)),
         esbmc=ESBMCConfig(
@@ -900,6 +987,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
             "layers": [],
         },
         "blockwise_verification": synthesizer.blockwise_verification_summary(),
+        **synthesizer.no_saturation_block_summary(),
         "fixed_point_semantics": {
             "claim_type": "declared_backend_semantics",
             "layers": [],
@@ -922,6 +1010,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
 
     if not synthesis_result.success:
         summary["blockwise_verification"] = synthesizer.blockwise_verification_summary()
+        summary.update(synthesizer.no_saturation_block_summary())
         quant_config_path = _save_json(config.output_dir / "reports" / "quantization_config.json", summary)
         summary["artifacts"] = {"quantization_config": str(quant_config_path)}
         pipeline_summary_path = _save_json(config.output_dir / "reports" / "pipeline_summary.json", summary)
@@ -974,6 +1063,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
     summary["quality_refinement"] = quality_summary
     summary["formal_saturation_verification"] = _formal_saturation_summary(config, quality_summary)
     summary["blockwise_verification"] = synthesizer.blockwise_verification_summary()
+    summary.update(synthesizer.no_saturation_block_summary())
     summary["comparison"] = comparison
 
     quantized_logits = _predict_logits(quantized_model, dataset.x_test)

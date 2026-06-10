@@ -42,6 +42,14 @@ def export_paper_tables(experiment_summary: dict[str, Any], output_dir: Path) ->
             "I",
             "F",
             "verified",
+            "contract_verified",
+            "contract_status",
+            "no_saturation_formally_checked",
+            "no_saturation_status",
+            "no_saturation_verified",
+            "deployment_quality_accepted",
+            "python_c_exact_match",
+            "final_status",
             "keras_quantized_accuracy",
             "python_fixed_accuracy",
             "c_fixed_accuracy",
@@ -52,7 +60,12 @@ def export_paper_tables(experiment_summary: dict[str, Any], output_dir: Path) ->
             "refinement_steps",
             "formal_saturation_check",
             "empirical_saturation_check",
-            "no_saturation_status",
+            "no_saturation_blocks_total",
+            "no_saturation_blocks_verified",
+            "no_saturation_blocks_failed",
+            "no_saturation_blocks_timeout",
+            "no_saturation_blocks_memout",
+            "no_saturation_blocks_unknown",
         ],
         [
             _formal_refined_row(benchmark, "formal_only", formal, formal.get("success"), 0),
@@ -202,6 +215,14 @@ def _formal_refined_row(
         "I": section.get("I"),
         "F": section.get("F"),
         "verified": verified,
+        "contract_verified": section.get("contract_verified"),
+        "contract_status": section.get("contract_status"),
+        "no_saturation_formally_checked": section.get("no_saturation_formally_checked"),
+        "no_saturation_status": _no_saturation_status(section),
+        "no_saturation_verified": section.get("no_saturation_verified"),
+        "deployment_quality_accepted": section.get("deployment_quality_accepted"),
+        "python_c_exact_match": section.get("python_c_exact_match"),
+        "final_status": section.get("final_status"),
         "keras_quantized_accuracy": deployment.get("quantized_keras_accuracy"),
         "python_fixed_accuracy": deployment.get("python_fixed_accuracy"),
         "c_fixed_accuracy": deployment.get("c_fixed_accuracy"),
@@ -212,7 +233,12 @@ def _formal_refined_row(
         "refinement_steps": refinement_steps,
         "formal_saturation_check": section.get("formal_saturation_check_enabled"),
         "empirical_saturation_check": section.get("empirical_saturation_check_enabled"),
-        "no_saturation_status": _no_saturation_status(section),
+        "no_saturation_blocks_total": section.get("no_saturation_blocks_total"),
+        "no_saturation_blocks_verified": section.get("no_saturation_blocks_verified"),
+        "no_saturation_blocks_failed": section.get("no_saturation_blocks_failed"),
+        "no_saturation_blocks_timeout": section.get("no_saturation_blocks_timeout"),
+        "no_saturation_blocks_memout": section.get("no_saturation_blocks_memout"),
+        "no_saturation_blocks_unknown": section.get("no_saturation_blocks_unknown"),
     }
 
 
@@ -269,8 +295,11 @@ def _fixed_point_semantics_rows(
 
 
 def _no_saturation_status(section: dict[str, Any]) -> str:
+    explicit_status = section.get("no_saturation_status")
+    if explicit_status:
+        return str(explicit_status)
     if not section.get("formal_saturation_check_enabled", False):
-        return "DISABLED"
+        return "SKIPPED"
     if section.get("no_saturation_verified_all_layers", False):
         return "VERIFIED"
     if section.get("no_saturation_failed_layers"):

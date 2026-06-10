@@ -439,7 +439,12 @@ def render_no_saturation_program(
     input_bounds_high_c_int: str,
     scale_factor: int,
     total_bits: int,
+    integer_bits: int | None = None,
+    fractional_bits: int | None = None,
 ) -> str:
+    integer_bits_value = max(int(total_bits) - 1, 0) if integer_bits is None else int(integer_bits)
+    fractional_bits_value = 0 if fractional_bits is None else int(fractional_bits)
+
     return f"""\
 #include <stdint.h>
 #include <limits.h>
@@ -448,6 +453,8 @@ def render_no_saturation_program(
 #define LAYER_SIZE {output_size}
 #define SCALE_FACTOR {scale_factor}LL
 #define TOTAL_BITS {total_bits}
+#define INTEGER_BITS {integer_bits_value}
+#define FRACTIONAL_BITS {fractional_bits_value}
 
 /*
  * Formal no-saturation harness for one affine fixed-point layer.
@@ -541,6 +548,34 @@ int main(void)
     return 0;
 }}
 """
+
+
+def render_no_saturation_block_program(
+    block_size: int,
+    input_size: int,
+    weights_c_int: str,
+    biases_c_int: str,
+    input_bounds_low_c_int: str,
+    input_bounds_high_c_int: str,
+    scale_factor: int,
+    total_bits: int,
+    integer_bits: int,
+    fractional_bits: int,
+) -> str:
+    """Render a no-saturation harness for a contiguous output-neuron block."""
+
+    return render_no_saturation_program(
+        output_size=block_size,
+        input_size=input_size,
+        weights_c_int=weights_c_int,
+        biases_c_int=biases_c_int,
+        input_bounds_low_c_int=input_bounds_low_c_int,
+        input_bounds_high_c_int=input_bounds_high_c_int,
+        scale_factor=scale_factor,
+        total_bits=total_bits,
+        integer_bits=integer_bits,
+        fractional_bits=fractional_bits,
+    )
 
 
 def render_clamp_correctness_program(total_bits: int) -> str:

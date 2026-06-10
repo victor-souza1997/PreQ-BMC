@@ -79,7 +79,7 @@ def _formal_saturation_controls(
     failed_layers = [
         int(layer.get("layer_index", index))
         for index, layer in enumerate(layers)
-        if layer.get("no_saturation_status") not in {"VERIFIED", "DISABLED"}
+        if layer.get("no_saturation_status") not in {"VERIFIED", "DISABLED", "SKIPPED"}
     ]
     verified_all = bool(
         enabled
@@ -94,6 +94,83 @@ def _formal_saturation_controls(
     }
 
 
+def _aggregate_status(
+    layers: list[dict[str, Any]],
+    field: str,
+    *,
+    default: str = "UNKNOWN",
+) -> str:
+    statuses = {
+        "VERIFIED" if str(layer.get(field, default)) == "VERIFIED_BY_SYNTHESIS" else str(layer.get(field, default))
+        for layer in layers
+    }
+    if not statuses:
+        return default
+    if statuses == {"VERIFIED"}:
+        return "VERIFIED"
+    for status in ("FAILED", "TIMEOUT", "MEMOUT", "UNKNOWN", "SKIPPED", "DISABLED"):
+        if status in statuses:
+            return "SKIPPED" if status == "DISABLED" else status
+    return default
+
+
+def _final_status(
+    *,
+    contract_verified: bool,
+    contract_status: str,
+    no_saturation_status: str,
+    no_saturation_verified: bool,
+    deployment_quality_accepted: bool,
+) -> str:
+    if contract_status == "FAILED" or no_saturation_status == "FAILED" or not deployment_quality_accepted:
+        return "FAILED"
+    if contract_verified and deployment_quality_accepted and no_saturation_verified:
+        return "VERIFIED"
+    if contract_verified and deployment_quality_accepted and no_saturation_status in {
+        "TIMEOUT",
+        "MEMOUT",
+        "UNKNOWN",
+        "SKIPPED",
+        "DISABLED",
+    }:
+        return "PARTIAL_VERIFIED"
+    return "UNKNOWN"
+
+
+def _formal_status_controls(
+    layers: list[dict[str, Any]],
+    metrics: dict[str, Any],
+    *,
+    deployment_quality_accepted: bool,
+) -> dict[str, Any]:
+    contract_status = _aggregate_status(layers, "contract_status", default="UNKNOWN")
+    contract_verified = bool(layers and all(layer.get("contract_verified", False) for layer in layers))
+    no_saturation_status = _aggregate_status(layers, "no_saturation_status", default="SKIPPED")
+    no_saturation_verified = bool(
+        layers
+        and all(layer.get("no_saturation_verified", False) for layer in layers)
+    )
+    python_c_exact_match = _python_c_exact_match(metrics)
+    return {
+        "contract_verified": contract_verified,
+        "contract_status": contract_status,
+        "no_saturation_formally_checked": bool(
+            any(layer.get("no_saturation_formally_checked", False) for layer in layers)
+        ),
+        "no_saturation_status": no_saturation_status,
+        "no_saturation_verified": no_saturation_verified,
+        "deployment_quality_accepted": bool(deployment_quality_accepted),
+        "python_c_exact_match": python_c_exact_match,
+        "final_status": _final_status(
+            contract_verified=contract_verified,
+            contract_status=contract_status,
+            no_saturation_status=no_saturation_status,
+            no_saturation_verified=no_saturation_verified,
+            deployment_quality_accepted=bool(deployment_quality_accepted),
+        ),
+    }
+
+
 def _blockwise_controls(pipeline_summary: dict[str, Any]) -> dict[str, Any]:
     verification = pipeline_summary.get("blockwise_verification", {})
     return {
@@ -104,6 +181,12 @@ def _blockwise_controls(pipeline_summary: dict[str, Any]) -> dict[str, Any]:
         "blockwise_verified_blocks": verification.get("verified_blocks", 0),
         "blockwise_failed_blocks": verification.get("failed_blocks", 0),
         "blockwise_timeout_blocks": verification.get("timeout_blocks", 0),
+        "no_saturation_blocks_total": pipeline_summary.get("no_saturation_blocks_total", 0),
+        "no_saturation_blocks_verified": pipeline_summary.get("no_saturation_blocks_verified", 0),
+        "no_saturation_blocks_failed": pipeline_summary.get("no_saturation_blocks_failed", 0),
+        "no_saturation_blocks_timeout": pipeline_summary.get("no_saturation_blocks_timeout", 0),
+        "no_saturation_blocks_memout": pipeline_summary.get("no_saturation_blocks_memout", 0),
+        "no_saturation_blocks_unknown": pipeline_summary.get("no_saturation_blocks_unknown", 0),
     }
 
 
@@ -142,6 +225,16 @@ def build_experiment_summary(
     ).get("layers", [])
     formal_saturation_controls = _formal_saturation_controls(pipeline_summary, formal_esbmc_layers)
     refined_saturation_controls = _formal_saturation_controls(pipeline_summary, refined_esbmc_layers)
+    formal_status_controls = _formal_status_controls(
+        formal_esbmc_layers,
+        formal_metrics,
+        deployment_quality_accepted=bool(formal_synthesis.get("success", False)),
+    )
+    refined_status_controls = _formal_status_controls(
+        refined_esbmc_layers,
+        refined_metrics,
+        deployment_quality_accepted=bool(quality.get("accepted", False)),
+    )
     blockwise_controls = _blockwise_controls(pipeline_summary)
     semantics_by_method = pipeline_summary.get("fixed_point_semantics_by_method", {})
     accumulator_by_method = pipeline_summary.get("accumulator_range_by_method", {})
@@ -168,6 +261,7 @@ def build_experiment_summary(
         "fixed_point_semantics": formal_semantics,
         "accumulator_range": formal_accumulator_range,
         **formal_saturation_controls,
+        **formal_status_controls,
         **blockwise_controls,
     }
 
@@ -189,6 +283,7 @@ def build_experiment_summary(
         "fixed_point_semantics": refined_semantics,
         "accumulator_range": refined_accumulator_range,
         **refined_saturation_controls,
+        **refined_status_controls,
         **blockwise_controls,
     }
 
@@ -222,7 +317,9 @@ def build_experiment_summary(
             },
         ),
         "blockwise_verification": pipeline_summary.get("blockwise_verification", {}),
+        "no_saturation_blocks": pipeline_summary.get("no_saturation_blocks", []),
         **refined_saturation_controls,
+        **refined_status_controls,
         **blockwise_controls,
         "external_baselines": external_baselines,
         "artifacts": artifacts,

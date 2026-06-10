@@ -12,6 +12,7 @@ from synthesis.quadapter import GPEncoding
 from verification.c_templates import (
     render_clamp_correctness_program,
     render_hidden_affine_bounds_block_program,
+    render_no_saturation_block_program,
     render_no_saturation_program,
 )
 from verification.esbmc import ESBMCConfig, ESBMCRunner, ESBMCResult
@@ -62,6 +63,28 @@ class NoSaturationVerificationTest(unittest.TestCase):
         self.assertIn("#define INPUT_SIZE 3", source)
         self.assertIn("#define LAYER_SIZE 1", source)
         self.assertIn("long long weights[LAYER_SIZE][INPUT_SIZE] = {{1, 2, 3}};", source)
+        self.assertIn("long long input_bounds_low[INPUT_SIZE] = {0, 0, 0};", source)
+
+    def test_no_saturation_block_template_uses_block_size_with_full_input_bounds(self) -> None:
+        source = render_no_saturation_block_program(
+            block_size=2,
+            input_size=3,
+            weights_c_int="{{1, 2, 3}, {4, 5, 6}}",
+            biases_c_int="{0, 1}",
+            input_bounds_low_c_int="{0, 0, 0}",
+            input_bounds_high_c_int="{4, 4, 4}",
+            scale_factor=4,
+            total_bits=8,
+            integer_bits=4,
+            fractional_bits=3,
+        )
+
+        self.assertIn("#define INPUT_SIZE 3", source)
+        self.assertIn("#define LAYER_SIZE 2", source)
+        self.assertIn("#define TOTAL_BITS 8", source)
+        self.assertIn("#define INTEGER_BITS 4", source)
+        self.assertIn("#define FRACTIONAL_BITS 3", source)
+        self.assertIn("long long weights[LAYER_SIZE][INPUT_SIZE] = {{1, 2, 3}, {4, 5, 6}};", source)
         self.assertIn("long long input_bounds_low[INPUT_SIZE] = {0, 0, 0};", source)
 
     def test_cli_exposes_formal_and_empirical_saturation_flags(self) -> None:
@@ -161,6 +184,117 @@ class NoSaturationVerificationTest(unittest.TestCase):
         self.assertEqual(result.blocks[0]["status"], "FAILED")
         self.assertEqual(result.blocks[1]["status"], "SKIPPED")
         self.assertEqual(result.blocks[2]["status"], "SKIPPED")
+
+    def test_no_saturation_block_verification_stops_on_timeout_by_default(self) -> None:
+        class FakeRunner:
+            def __init__(self) -> None:
+                self.calls: list[Path] = []
+
+            def run_file(self, c_file: Path) -> ESBMCResult:
+                self.calls.append(c_file)
+                return ESBMCResult(
+                    status="TIMEOUT",
+                    command=("esbmc", str(c_file), "--memlimit", "6g"),
+                    stdout="Timed out",
+                    stderr="",
+                    return_code=124,
+                    elapsed_seconds=0.1,
+                    timeout_seconds=900,
+                    memlimit="6g",
+                    stdout_log_path=f"{c_file}.stdout.log",
+                    stderr_log_path=f"{c_file}.stderr.log",
+                    resource_control={
+                        "timeout": "900s",
+                        "memlimit": "6g",
+                        "stdout_log_path": f"{c_file}.stdout.log",
+                        "stderr_log_path": f"{c_file}.stderr.log",
+                    },
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            encoder = object.__new__(GPEncoding)
+            encoder.output_dir = Path(temp_dir)
+            encoder.esbmc_layer_block_size = 1
+            encoder.no_saturation_continue_on_unknown = False
+            encoder.esbmc_no_saturation_block_records = []
+            encoder._stats = {"esbmc_calls": 0.0, "esbmc_block_calls": 0.0}
+            encoder.config = SimpleNamespace(esbmc=ESBMCConfig())
+            encoder.esbmc_runner = FakeRunner()
+            encoder.generate_esbmc_no_saturation_block_code = lambda **_: "int main(void) { return 0; }"
+
+            result = encoder.verify_layer_no_saturation_blocks_with_esbmc(
+                cur_layer=SimpleNamespace(layer_size=3, layer_index=1),
+                in_layer=SimpleNamespace(layer_size=2),
+                qu_w_int=np.zeros((3, 2), dtype=np.int64),
+                qu_b_int=np.zeros(3, dtype=np.int64),
+                frac_bit=2,
+                all_bit=4,
+                layer_index=0,
+            )
+
+        self.assertEqual(result.status, "TIMEOUT")
+        self.assertEqual(len(encoder.esbmc_runner.calls), 1)
+        self.assertIn("layer_0_no_sat_block_0_n0_1_Q4_F2.c", str(encoder.esbmc_runner.calls[0]))
+        self.assertEqual(len(result.blocks), 3)
+        self.assertEqual(result.blocks[0]["status"], "TIMEOUT")
+        self.assertEqual(result.blocks[1]["status"], "SKIPPED")
+        self.assertEqual(result.blocks[2]["status"], "SKIPPED")
+
+    def test_hidden_no_saturation_uses_block_harnesses_when_enabled(self) -> None:
+        class FakeRunner:
+            def __init__(self) -> None:
+                self.calls: list[Path] = []
+
+            def run_file(self, c_file: Path) -> ESBMCResult:
+                self.calls.append(c_file)
+                return ESBMCResult(
+                    status="VERIFIED",
+                    command=("esbmc", str(c_file), "--memlimit", "6g"),
+                    stdout="VERIFICATION SUCCESSFUL",
+                    stderr="",
+                    return_code=0,
+                    elapsed_seconds=0.1,
+                    timeout_seconds=900,
+                    memlimit="6g",
+                    stdout_log_path=f"{c_file}.stdout.log",
+                    stderr_log_path=f"{c_file}.stderr.log",
+                    resource_control={
+                        "timeout": "900s",
+                        "memlimit": "6g",
+                        "stdout_log_path": f"{c_file}.stdout.log",
+                        "stderr_log_path": f"{c_file}.stderr.log",
+                    },
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            encoder = object.__new__(GPEncoding)
+            encoder.output_dir = output_dir
+            encoder.esbmc_layer_block_size = 1
+            encoder.no_saturation_continue_on_unknown = False
+            encoder.esbmc_no_saturation_block_records = []
+            encoder.dense_layers = [SimpleNamespace(layer_index=1)]
+            encoder._stats = {"esbmc_calls": 0.0, "esbmc_block_calls": 0.0}
+            encoder.config = SimpleNamespace(esbmc=ESBMCConfig())
+            encoder.esbmc_runner = FakeRunner()
+            encoder.generate_esbmc_no_saturation_block_code = lambda **_: "int main(void) { return 0; }"
+
+            result = encoder.verify_layer_no_saturation_with_esbmc(
+                cur_layer=SimpleNamespace(layer_size=2, layer_index=1),
+                in_layer=SimpleNamespace(layer_size=2),
+                qu_w_int=np.zeros((2, 2), dtype=np.int64),
+                qu_b_int=np.zeros(2, dtype=np.int64),
+                frac_bit=2,
+                all_bit=4,
+                layer_index=0,
+            )
+
+            full_layer_harness = output_dir / "layers" / "layer_0_Q4_F2_no_saturation.c"
+
+        self.assertEqual(result.status, "VERIFIED")
+        self.assertEqual(len(encoder.esbmc_runner.calls), 2)
+        self.assertFalse(full_layer_harness.exists())
+        self.assertTrue(all("no_sat_block" in call.name for call in encoder.esbmc_runner.calls))
 
     @unittest.skipUnless(shutil.which("esbmc"), "esbmc binary is not installed")
     def test_esbmc_no_saturation_fails_for_too_small_q_and_passes_for_larger_q(self) -> None:
