@@ -429,6 +429,218 @@ int main(void)
 }}
 """
 
+
+def render_no_saturation_program(
+    output_size: int,
+    input_size: int,
+    weights_c_int: str,
+    biases_c_int: str,
+    input_bounds_low_c_int: str,
+    input_bounds_high_c_int: str,
+    scale_factor: int,
+    total_bits: int,
+    integer_bits: int | None = None,
+    fractional_bits: int | None = None,
+) -> str:
+    integer_bits_value = max(int(total_bits) - 1, 0) if integer_bits is None else int(integer_bits)
+    fractional_bits_value = 0 if fractional_bits is None else int(fractional_bits)
+
+    return f"""\
+#include <stdint.h>
+#include <limits.h>
+
+#define INPUT_SIZE {input_size}
+#define LAYER_SIZE {output_size}
+#define SCALE_FACTOR {scale_factor}LL
+#define TOTAL_BITS {total_bits}
+#define INTEGER_BITS {integer_bits_value}
+#define FRACTIONAL_BITS {fractional_bits_value}
+
+/*
+ * Formal no-saturation harness for one affine fixed-point layer.
+ *
+ * Backend arithmetic:
+ *   acc = sum(input_int * weight_int)
+ *   pre_clamp = rescale(acc, SCALE_FACTOR) + bias_int
+ *
+ * This harness checks the interval image of the affine layer before clamp
+ * and before activation/ReLU.
+ */
+
+long long weights[LAYER_SIZE][INPUT_SIZE] = {weights_c_int};
+long long biases[LAYER_SIZE] = {biases_c_int};
+
+long long input_bounds_low[INPUT_SIZE] = {input_bounds_low_c_int};
+long long input_bounds_high[INPUT_SIZE] = {input_bounds_high_c_int};
+
+static inline __int128 floor_div_i128(__int128 n, __int128 d)
+{{
+    __ESBMC_assert(d > 0, "division denominator must be positive");
+
+    if (n >= 0)
+    {{
+        return n / d;
+    }}
+
+    return -(((-n) + d - 1) / d);
+}}
+
+static inline __int128 ceil_div_i128(__int128 n, __int128 d)
+{{
+    __ESBMC_assert(d > 0, "division denominator must be positive");
+
+    if (n >= 0)
+    {{
+        return (n + d - 1) / d;
+    }}
+
+    return -((-n) / d);
+}}
+
+static void check_no_saturation_fixed_bounds(void)
+{{
+    __ESBMC_assert(SCALE_FACTOR > 0, "SCALE_FACTOR must be positive");
+    __ESBMC_assert(TOTAL_BITS > 1 && TOTAL_BITS < 127, "TOTAL_BITS must fit in __int128");
+
+    const __int128 q_min = -((__int128)1 << (TOTAL_BITS - 1));
+    const __int128 q_max = ((__int128)1 << (TOTAL_BITS - 1)) - 1;
+
+    for (int i = 0; i < LAYER_SIZE; ++i)
+    {{
+        __int128 lower = 0;
+        __int128 upper = 0;
+
+        for (int j = 0; j < INPUT_SIZE; ++j)
+        {{
+            const __int128 w = (__int128)weights[i][j];
+            const __int128 lo = (__int128)input_bounds_low[j];
+            const __int128 hi = (__int128)input_bounds_high[j];
+
+            __ESBMC_assert(lo <= hi, "invalid input interval");
+
+            if (w >= 0)
+            {{
+                lower += w * lo;
+                upper += w * hi;
+            }}
+            else
+            {{
+                lower += w * hi;
+                upper += w * lo;
+            }}
+        }}
+
+        const __int128 lower_rescaled = floor_div_i128(lower, (__int128)SCALE_FACTOR);
+        const __int128 upper_rescaled = ceil_div_i128(upper, (__int128)SCALE_FACTOR);
+        const __int128 lower_pre_clamp = lower_rescaled + (__int128)biases[i];
+        const __int128 upper_pre_clamp = upper_rescaled + (__int128)biases[i];
+
+        __ESBMC_assert(lower_pre_clamp >= q_min,
+                      "fixed-point saturation possible: lower below q_min");
+        __ESBMC_assert(upper_pre_clamp <= q_max,
+                      "fixed-point saturation possible: upper above q_max");
+    }}
+}}
+
+int main(void)
+{{
+    check_no_saturation_fixed_bounds();
+    return 0;
+}}
+"""
+
+
+def render_no_saturation_block_program(
+    block_size: int,
+    input_size: int,
+    weights_c_int: str,
+    biases_c_int: str,
+    input_bounds_low_c_int: str,
+    input_bounds_high_c_int: str,
+    scale_factor: int,
+    total_bits: int,
+    integer_bits: int,
+    fractional_bits: int,
+) -> str:
+    """Render a no-saturation harness for a contiguous output-neuron block."""
+
+    return render_no_saturation_program(
+        output_size=block_size,
+        input_size=input_size,
+        weights_c_int=weights_c_int,
+        biases_c_int=biases_c_int,
+        input_bounds_low_c_int=input_bounds_low_c_int,
+        input_bounds_high_c_int=input_bounds_high_c_int,
+        scale_factor=scale_factor,
+        total_bits=total_bits,
+        integer_bits=integer_bits,
+        fractional_bits=fractional_bits,
+    )
+
+
+def render_clamp_correctness_program(total_bits: int) -> str:
+    return f"""\
+#include <stdint.h>
+#include <limits.h>
+
+#define TOTAL_BITS {total_bits}
+
+extern long long nondet_longlong(void);
+
+/*
+ * Clamp correctness harness.
+ *
+ * The nondeterministic input is long long and then promoted to __int128.
+ * This verifies clamp behavior over the long long input domain, which covers
+ * the generated backend's int64_t storage interface.
+ */
+
+static inline __int128 clamp_to_signed_range_i128(__int128 value, int total_bits)
+{{
+    const __int128 q_min = -((__int128)1 << (total_bits - 1));
+    const __int128 q_max = (((__int128)1 << (total_bits - 1)) - 1);
+
+    if (value < q_min)
+    {{
+        return q_min;
+    }}
+    if (value > q_max)
+    {{
+        return q_max;
+    }}
+    return value;
+}}
+
+int main(void)
+{{
+    __ESBMC_assert(TOTAL_BITS > 1 && TOTAL_BITS < 127, "TOTAL_BITS must fit in __int128");
+
+    const __int128 q_min = -((__int128)1 << (TOTAL_BITS - 1));
+    const __int128 q_max = (((__int128)1 << (TOTAL_BITS - 1)) - 1);
+    const __int128 input = (__int128)nondet_longlong();
+    const __int128 output = clamp_to_signed_range_i128(input, TOTAL_BITS);
+
+    __ESBMC_assert(output >= q_min, "clamp output below q_min");
+    __ESBMC_assert(output <= q_max, "clamp output above q_max");
+
+    if (input >= q_min && input <= q_max)
+    {{
+        __ESBMC_assert(output == input, "clamp changed in-range input");
+    }}
+    if (input < q_min)
+    {{
+        __ESBMC_assert(output == q_min, "clamp did not saturate low input to q_min");
+    }}
+    if (input > q_max)
+    {{
+        __ESBMC_assert(output == q_max, "clamp did not saturate high input to q_max");
+    }}
+
+    return 0;
+}}
+"""
+
+
 def outerlayer_fixed_int_multiclass(
     in_layer_layer_size: int,
     cur_layer_layer_size: int,
@@ -554,6 +766,34 @@ def render_hidden_affine_bounds_program(
         preimage_high_int=preimage_high_c_int,
         input_bounds_low_int=input_bounds_low_c_int,
         input_bounds_high_int=input_bounds_high_c_int,
+        scale_factor=scale_factor,
+        activation=activation,
+    )
+
+
+def render_hidden_affine_bounds_block_program(
+    block_size: int,
+    input_size: int,
+    weights_c_int: str,
+    biases_c_int: str,
+    preimage_low_c_int: str,
+    preimage_high_c_int: str,
+    input_bounds_low_c_int: str,
+    input_bounds_high_c_int: str,
+    scale_factor: int,
+    activation: str = "none",
+) -> str:
+    """Render a hidden affine contract harness for a contiguous output-neuron block."""
+
+    return render_hidden_affine_bounds_program(
+        output_size=block_size,
+        input_size=input_size,
+        weights_c_int=weights_c_int,
+        biases_c_int=biases_c_int,
+        preimage_low_c_int=preimage_low_c_int,
+        preimage_high_c_int=preimage_high_c_int,
+        input_bounds_low_c_int=input_bounds_low_c_int,
+        input_bounds_high_c_int=input_bounds_high_c_int,
         scale_factor=scale_factor,
         activation=activation,
     )

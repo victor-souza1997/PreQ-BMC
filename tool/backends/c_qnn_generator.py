@@ -141,6 +141,87 @@ void qnn_forward_fixed(const int64_t* input, int64_t* output) {{
 """
 
 
+def generate_fixed_point_semantics_test_source() -> str:
+    """Generate a tiny C library exposing fixed-point semantic primitives for tests."""
+
+    return """\
+#include <stdint.h>
+
+static inline __int128 clamp_to_signed_range_i128(__int128 value, int total_bits) {
+    const __int128 lower = -((__int128)1 << (total_bits - 1));
+    const __int128 upper = (((__int128)1 << (total_bits - 1)) - 1);
+    if (value < lower) return lower;
+    if (value > upper) return upper;
+    return value;
+}
+
+static inline __int128 div_round_half_away_from_zero_i128(__int128 numerator, __int128 denominator) {
+    if (numerator >= 0) {
+        return (numerator + denominator / 2) / denominator;
+    }
+    return -(((-numerator) + denominator / 2) / denominator);
+}
+
+int64_t qnn_semantic_round_div_i64(int64_t numerator, int64_t denominator) {
+    return (int64_t)div_round_half_away_from_zero_i128((__int128)numerator, (__int128)denominator);
+}
+
+int64_t qnn_semantic_clamp_i64(int64_t value, int total_bits) {
+    return (int64_t)clamp_to_signed_range_i128((__int128)value, total_bits);
+}
+
+int64_t qnn_semantic_relu_i64(int64_t value) {
+    return value < 0 ? 0 : value;
+}
+
+int64_t qnn_semantic_step_i64(
+    int64_t accumulator,
+    int input_fractional_bits,
+    int64_t bias,
+    int total_bits,
+    int apply_relu
+) {
+    __int128 value = div_round_half_away_from_zero_i128(
+        (__int128)accumulator,
+        ((__int128)1 << input_fractional_bits)
+    ) + (__int128)bias;
+    value = clamp_to_signed_range_i128(value, total_bits);
+    if (apply_relu && value < 0) {
+        value = 0;
+    }
+    return (int64_t)clamp_to_signed_range_i128(value, total_bits);
+}
+
+int64_t qnn_semantic_affine2_i64(
+    int64_t x0,
+    int64_t x1,
+    int64_t w0,
+    int64_t w1,
+    int64_t bias,
+    int input_fractional_bits,
+    int total_bits,
+    int apply_relu
+) {
+    __int128 accumulator = (__int128)x0 * (__int128)w0 + (__int128)x1 * (__int128)w1;
+    return qnn_semantic_step_i64(
+        (int64_t)accumulator,
+        input_fractional_bits,
+        bias,
+        total_bits,
+        apply_relu
+    );
+}
+"""
+
+
+def write_fixed_point_semantics_test_source(destination: Path) -> Path:
+    """Write the fixed-point semantic primitive C source to disk."""
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(generate_fixed_point_semantics_test_source(), encoding="utf-8")
+    return destination
+
+
 def write_c_qnn_source(network: FixedPointNetwork, destination: Path) -> Path:
     """Write the generated C source to disk."""
 

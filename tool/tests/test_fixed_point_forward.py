@@ -6,7 +6,9 @@ import numpy as np
 
 from backends.fixed_point import (
     LayerQuantizationSpec,
+    compute_accumulator_range_analysis,
     build_fixed_point_network,
+    fixed_point_semantics_for_network,
     forward_fixed_point_batch_with_diagnostics,
     forward_fixed_point_single,
 )
@@ -49,6 +51,11 @@ class FixedPointForwardTest(unittest.TestCase):
 
         self.assertEqual(spec.signed_range, (-128, 127))
         self.assertEqual(spec.real_range, (-8.0, 7.9375))
+        self.assertEqual(spec.semantic_metadata["scale_factor"], 16)
+        self.assertEqual(spec.semantic_metadata["q_min_int"], -128)
+        self.assertEqual(spec.semantic_metadata["q_max_int"], 127)
+        self.assertEqual(spec.semantic_metadata["overflow_mode"], "saturation")
+        self.assertEqual(spec.semantic_metadata["rounding_mode"], "round_half_away_from_zero")
 
     def test_layer_quantization_spec_rejects_inconsistent_format(self) -> None:
         with self.assertRaisesRegex(ValueError, "Q=8, I=2, F=4"):
@@ -106,6 +113,26 @@ class FixedPointForwardTest(unittest.TestCase):
         self.assertEqual(metrics["float_parameter_memory_bytes"], 48)
         self.assertEqual(metrics["fixed_parameter_memory_bytes"], 12)
         self.assertEqual(metrics["weighted_avg_bits_per_parameter"], 8.0)
+
+    def test_semantics_and_accumulator_analysis_are_reportable(self) -> None:
+        model = _build_toy_model()
+        specs = [
+            LayerQuantizationSpec(total_bits=8, integer_bits=3, fractional_bits=4),
+            LayerQuantizationSpec(total_bits=8, integer_bits=3, fractional_bits=4),
+        ]
+        network = build_fixed_point_network(model, specs)
+
+        semantics = fixed_point_semantics_for_network(network)
+        accumulator = compute_accumulator_range_analysis(network)
+
+        self.assertEqual(semantics["claim_type"], "declared_backend_semantics")
+        self.assertEqual(len(semantics["layers"]), 2)
+        self.assertEqual(len(accumulator), 2)
+        for layer in accumulator:
+            self.assertIn("max_abs_accumulator", layer)
+            self.assertIn("fits_int64", layer)
+            self.assertIn("per_neuron", layer)
+            self.assertEqual(layer["claim_type"], "static_interval_analysis")
 
 
 if __name__ == "__main__":

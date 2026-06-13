@@ -42,6 +42,64 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--if-relax", "--ifRelax", dest="if_relax", type=int, default=0)
     parser.add_argument("--preimage-mode", "--preimg_mode", dest="preimg_mode", default="milp", choices=["milp", "abstr", "comp"])
     parser.add_argument("--verify-mode", "--verify_mode", dest="verify_mode", default="milp", choices=["milp", "esbmc"])
+    parser.add_argument(
+        "--esbmc-layer-block-size",
+        "--esbmc_layer_block_size",
+        dest="esbmc_layer_block_size",
+        type=int,
+        default=10,
+        help="Split hidden affine ESBMC verification into blocks of N output neurons. Use 0 for full-layer verification.",
+    )
+    parser.add_argument(
+        "--blockwise-fail-fast",
+        dest="blockwise_fail_fast",
+        action="store_true",
+        default=True,
+        help="Reject a shared-QIF block-wise candidate as soon as one block fails.",
+    )
+    parser.add_argument(
+        "--no-blockwise-fail-fast",
+        dest="blockwise_fail_fast",
+        action="store_false",
+        help="Do not fail fast on the first failed block.",
+    )
+    parser.add_argument(
+        "--blockwise-run-all-blocks-on-failure",
+        dest="blockwise_run_all_blocks_on_failure",
+        action="store_true",
+        default=False,
+        help="Run every block for a failing candidate for diagnostics.",
+    )
+    parser.add_argument(
+        "--no-blockwise-run-all-blocks-on-failure",
+        dest="blockwise_run_all_blocks_on_failure",
+        action="store_false",
+        help="Skip remaining blocks for a candidate after the first block failure.",
+    )
+    parser.add_argument("--esbmc-jobs", "--esbmc_jobs", dest="esbmc_jobs", type=int, default=1)
+    parser.add_argument("--esbmc-memlimit", "--esbmc_memlimit", dest="esbmc_memlimit", default="6g")
+    parser.add_argument(
+        "--esbmc-profile",
+        "--esbmc_profile",
+        dest="esbmc_profile",
+        default="paper-fast",
+        choices=["paper-fast", "debug", "fast", "preimage", "safety", "overflow"],
+    )
+    parser.add_argument("--esbmc-timeout", "--esbmc_timeout", dest="esbmc_timeout_seconds", type=int, default=900)
+    parser.add_argument("--gurobi-threads", "--gurobi_threads", dest="gurobi_threads", type=int, default=4)
+    parser.add_argument(
+        "--no-saturation-continue-on-unknown",
+        dest="no_saturation_continue_on_unknown",
+        action="store_true",
+        default=False,
+        help="Continue no-saturation block checks after TIMEOUT/MEMOUT/UNKNOWN for diagnostics.",
+    )
+    parser.add_argument(
+        "--no-no-saturation-continue-on-unknown",
+        dest="no_saturation_continue_on_unknown",
+        action="store_false",
+        help="Stop no-saturation block checks after TIMEOUT/MEMOUT/UNKNOWN.",
+    )
     parser.add_argument("--target-label", type=int, default=None)
     parser.add_argument("--valid-labels", default=None, help="Comma-separated valid output labels for the output property.")
     parser.add_argument("--compare-split", default="test", choices=["train", "test"])
@@ -58,6 +116,34 @@ def build_parser() -> argparse.ArgumentParser:
         dest="enable_diagnostics",
         action="store_false",
         help="Skip detailed fixed-point diagnostics in the QNN-vs-Keras report.",
+    )
+    parser.add_argument(
+        "--formal-saturation-check",
+        "--formal-no-saturation",
+        dest="formal_saturation_check",
+        action="store_true",
+        default=True,
+        help="Require ESBMC no-saturation verification for fixed-point affine layers.",
+    )
+    parser.add_argument(
+        "--no-formal-saturation-check",
+        "--no-formal-no-saturation",
+        dest="formal_saturation_check",
+        action="store_false",
+        help="Disable ESBMC no-saturation verification as an acceptance criterion.",
+    )
+    parser.add_argument(
+        "--empirical-saturation-check",
+        dest="empirical_saturation_check",
+        action="store_true",
+        default=True,
+        help="Use Python fixed-point saturation diagnostics as a deployment-quality acceptance criterion.",
+    )
+    parser.add_argument(
+        "--no-empirical-saturation-check",
+        dest="empirical_saturation_check",
+        action="store_false",
+        help="Do not reject/refine candidates based on empirical saturation diagnostics.",
     )
     parser.add_argument(
         "--accuracy-drop-threshold",
@@ -157,6 +243,8 @@ def main(argv: list[str] | None = None) -> None:
         compile_c_backend=not args.skip_c_backend,
         compiler=args.compiler,
         enable_diagnostics=args.enable_diagnostics,
+        formal_saturation_check=args.formal_saturation_check,
+        empirical_saturation_check=args.empirical_saturation_check,
         accuracy_drop_threshold=_optional_threshold(args.accuracy_drop_threshold),
         saturation_threshold=_optional_threshold(args.saturation_threshold),
         mismatch_threshold=_optional_threshold(args.mismatch_threshold),
@@ -165,6 +253,15 @@ def main(argv: list[str] | None = None) -> None:
         save_preimage_cache=args.save_preimage_cache,
         preimage_cache_dir=Path(args.preimage_cache_dir) if args.preimage_cache_dir is not None else None,
         preimage_cache_key=args.preimage_cache_key,
+        esbmc_layer_block_size=max(0, int(args.esbmc_layer_block_size)),
+        blockwise_fail_fast=bool(args.blockwise_fail_fast),
+        blockwise_run_all_blocks_on_failure=bool(args.blockwise_run_all_blocks_on_failure),
+        esbmc_jobs=max(1, int(args.esbmc_jobs)),
+        esbmc_memlimit=str(args.esbmc_memlimit),
+        esbmc_profile=args.esbmc_profile,
+        esbmc_timeout_seconds=max(1, int(args.esbmc_timeout_seconds)),
+        gurobi_threads=max(1, int(args.gurobi_threads)),
+        no_saturation_continue_on_unknown=bool(args.no_saturation_continue_on_unknown),
         export_paper_tables=args.export_paper_tables,
         baseline_results_json=args.baseline_results_json,
     )

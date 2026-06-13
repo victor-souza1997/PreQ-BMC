@@ -59,10 +59,134 @@ def deployment_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "c_fixed_accuracy": metrics.get("c_qnn_accuracy"),
         "max_saturation_rate": saturation["max_saturation_rate"],
         "mean_saturation_rate": saturation["mean_saturation_rate"],
+        "layer_with_max_saturation": saturation["layer_with_max_saturation"],
+        "per_layer_saturation_rates": saturation["per_layer_saturation_rates"],
         "mismatch_rate_vs_keras": metrics.get("python_qnn_mismatch_rate_vs_keras"),
         "max_abs_logit_error": metrics.get("python_qnn_max_abs_error"),
         "mean_abs_logit_error": metrics.get("python_qnn_mean_abs_error"),
         "python_c_exact_match": _python_c_exact_match(metrics),
+    }
+
+
+def _formal_saturation_controls(
+    pipeline_summary: dict[str, Any],
+    layers_override: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    verification = pipeline_summary.get("formal_saturation_verification", {})
+    enabled = bool(verification.get("enabled", pipeline_summary.get("formal_saturation_check_enabled", False)))
+    empirical_enabled = bool(pipeline_summary.get("empirical_saturation_check_enabled", True))
+    layers = layers_override if layers_override is not None else verification.get("layers", [])
+    failed_layers = [
+        int(layer.get("layer_index", index))
+        for index, layer in enumerate(layers)
+        if layer.get("no_saturation_status") not in {"VERIFIED", "DISABLED", "SKIPPED"}
+    ]
+    verified_all = bool(
+        enabled
+        and layers
+        and all(layer.get("no_saturation_status") == "VERIFIED" for layer in layers)
+    )
+    return {
+        "formal_saturation_check_enabled": enabled,
+        "empirical_saturation_check_enabled": empirical_enabled,
+        "no_saturation_verified_all_layers": verified_all,
+        "no_saturation_failed_layers": failed_layers,
+    }
+
+
+def _aggregate_status(
+    layers: list[dict[str, Any]],
+    field: str,
+    *,
+    default: str = "UNKNOWN",
+) -> str:
+    statuses = {
+        "VERIFIED" if str(layer.get(field, default)) == "VERIFIED_BY_SYNTHESIS" else str(layer.get(field, default))
+        for layer in layers
+    }
+    if not statuses:
+        return default
+    if statuses == {"VERIFIED"}:
+        return "VERIFIED"
+    for status in ("FAILED", "TIMEOUT", "MEMOUT", "UNKNOWN", "SKIPPED", "DISABLED"):
+        if status in statuses:
+            return "SKIPPED" if status == "DISABLED" else status
+    return default
+
+
+def _final_status(
+    *,
+    contract_verified: bool,
+    contract_status: str,
+    no_saturation_status: str,
+    no_saturation_verified: bool,
+    deployment_quality_accepted: bool,
+) -> str:
+    if contract_status == "FAILED" or no_saturation_status == "FAILED" or not deployment_quality_accepted:
+        return "FAILED"
+    if contract_verified and deployment_quality_accepted and no_saturation_verified:
+        return "VERIFIED"
+    if contract_verified and deployment_quality_accepted and no_saturation_status in {
+        "TIMEOUT",
+        "MEMOUT",
+        "UNKNOWN",
+        "SKIPPED",
+        "DISABLED",
+    }:
+        return "PARTIAL_VERIFIED"
+    return "UNKNOWN"
+
+
+def _formal_status_controls(
+    layers: list[dict[str, Any]],
+    metrics: dict[str, Any],
+    *,
+    deployment_quality_accepted: bool,
+) -> dict[str, Any]:
+    contract_status = _aggregate_status(layers, "contract_status", default="UNKNOWN")
+    contract_verified = bool(layers and all(layer.get("contract_verified", False) for layer in layers))
+    no_saturation_status = _aggregate_status(layers, "no_saturation_status", default="SKIPPED")
+    no_saturation_verified = bool(
+        layers
+        and all(layer.get("no_saturation_verified", False) for layer in layers)
+    )
+    python_c_exact_match = _python_c_exact_match(metrics)
+    return {
+        "contract_verified": contract_verified,
+        "contract_status": contract_status,
+        "no_saturation_formally_checked": bool(
+            any(layer.get("no_saturation_formally_checked", False) for layer in layers)
+        ),
+        "no_saturation_status": no_saturation_status,
+        "no_saturation_verified": no_saturation_verified,
+        "deployment_quality_accepted": bool(deployment_quality_accepted),
+        "python_c_exact_match": python_c_exact_match,
+        "final_status": _final_status(
+            contract_verified=contract_verified,
+            contract_status=contract_status,
+            no_saturation_status=no_saturation_status,
+            no_saturation_verified=no_saturation_verified,
+            deployment_quality_accepted=bool(deployment_quality_accepted),
+        ),
+    }
+
+
+def _blockwise_controls(pipeline_summary: dict[str, Any]) -> dict[str, Any]:
+    verification = pipeline_summary.get("blockwise_verification", {})
+    return {
+        "blockwise_verification_enabled": bool(verification.get("enabled", False)),
+        "blockwise_block_size": verification.get("block_size", 0),
+        "blockwise_policy": verification.get("policy", "shared_layer_qif"),
+        "blockwise_total_blocks": verification.get("total_blocks", 0),
+        "blockwise_verified_blocks": verification.get("verified_blocks", 0),
+        "blockwise_failed_blocks": verification.get("failed_blocks", 0),
+        "blockwise_timeout_blocks": verification.get("timeout_blocks", 0),
+        "no_saturation_blocks_total": pipeline_summary.get("no_saturation_blocks_total", 0),
+        "no_saturation_blocks_verified": pipeline_summary.get("no_saturation_blocks_verified", 0),
+        "no_saturation_blocks_failed": pipeline_summary.get("no_saturation_blocks_failed", 0),
+        "no_saturation_blocks_timeout": pipeline_summary.get("no_saturation_blocks_timeout", 0),
+        "no_saturation_blocks_memout": pipeline_summary.get("no_saturation_blocks_memout", 0),
+        "no_saturation_blocks_unknown": pipeline_summary.get("no_saturation_blocks_unknown", 0),
     }
 
 
@@ -90,6 +214,37 @@ def build_experiment_summary(
     formal_stats = formal_synthesis.get("stats", {})
     refined_stats = synthesis.get("stats", {})
     samples_evaluated = comparison.get("samples_evaluated")
+    refinement_steps = quality.get("steps", [])
+    formal_esbmc_layers = (
+        refinement_steps[0].get("esbmc", {}).get("layers", [])
+        if refinement_steps
+        else pipeline_summary.get("formal_saturation_verification", {}).get("layers", [])
+    )
+    refined_esbmc_layers = _final_esbmc_layers(quality) or pipeline_summary.get(
+        "formal_saturation_verification", {}
+    ).get("layers", [])
+    formal_saturation_controls = _formal_saturation_controls(pipeline_summary, formal_esbmc_layers)
+    refined_saturation_controls = _formal_saturation_controls(pipeline_summary, refined_esbmc_layers)
+    formal_status_controls = _formal_status_controls(
+        formal_esbmc_layers,
+        formal_metrics,
+        deployment_quality_accepted=bool(formal_synthesis.get("success", False)),
+    )
+    refined_status_controls = _formal_status_controls(
+        refined_esbmc_layers,
+        refined_metrics,
+        deployment_quality_accepted=bool(quality.get("accepted", False)),
+    )
+    blockwise_controls = _blockwise_controls(pipeline_summary)
+    semantics_by_method = pipeline_summary.get("fixed_point_semantics_by_method", {})
+    accumulator_by_method = pipeline_summary.get("accumulator_range_by_method", {})
+    formal_semantics = semantics_by_method.get("formal_only", pipeline_summary.get("fixed_point_semantics", {}))
+    refined_semantics = semantics_by_method.get("quality_refined", pipeline_summary.get("fixed_point_semantics", {}))
+    formal_accumulator_range = accumulator_by_method.get("formal_only", pipeline_summary.get("accumulator_range", []))
+    refined_accumulator_range = accumulator_by_method.get(
+        "quality_refined",
+        pipeline_summary.get("accumulator_range", []),
+    )
 
     formal_section = {
         "success": bool(formal_synthesis.get("success", False)),
@@ -103,6 +258,11 @@ def build_experiment_summary(
         },
         "deployment_metrics": deployment_metrics(formal_metrics),
         "resource_metrics": formal_resource_metrics or {},
+        "fixed_point_semantics": formal_semantics,
+        "accumulator_range": formal_accumulator_range,
+        **formal_saturation_controls,
+        **formal_status_controls,
+        **blockwise_controls,
     }
 
     refined_section = {
@@ -120,6 +280,11 @@ def build_experiment_summary(
         },
         "deployment_metrics": deployment_metrics(refined_metrics),
         "resource_metrics": refined_resource_metrics or {},
+        "fixed_point_semantics": refined_semantics,
+        "accumulator_range": refined_accumulator_range,
+        **refined_saturation_controls,
+        **refined_status_controls,
+        **blockwise_controls,
     }
 
     return {
@@ -139,6 +304,23 @@ def build_experiment_summary(
         },
         "formal_only": formal_section,
         "quality_refined": refined_section,
+        "fixed_point_semantics": refined_semantics,
+        "accumulator_range": refined_accumulator_range,
+        "verification_claims": pipeline_summary.get(
+            "verification_claims",
+            {
+                "fixed_point_semantics": "declared_backend_semantics",
+                "accumulator_range": "static_interval_analysis",
+                "deployment_metrics": "empirical_dataset_evaluation",
+                "formal_saturation_verification": "formal_esbmc_when_enabled",
+                "blockwise_verification": "equivalent_hidden_contract_decomposition_when_enabled",
+            },
+        ),
+        "blockwise_verification": pipeline_summary.get("blockwise_verification", {}),
+        "no_saturation_blocks": pipeline_summary.get("no_saturation_blocks", []),
+        **refined_saturation_controls,
+        **refined_status_controls,
+        **blockwise_controls,
         "external_baselines": external_baselines,
         "artifacts": artifacts,
     }
