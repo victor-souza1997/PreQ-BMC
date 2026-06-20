@@ -7,7 +7,7 @@
   },
   "defaults": {
     "bit_lb": 2,
-    "bit_ub": 24,
+    "bit_ub": 40,
     "preimg_mode": "milp",
     "verify_mode": "esbmc",
     "compare_split": "test",
@@ -19,8 +19,8 @@
     "mismatch_threshold": 0.05,
     "max_quality_refinement_steps": 10,
     "export_paper_tables": true,
-    "formal_saturation_check": true,
-    "empirical_saturation_check": true,
+    "formal_saturation_check": false,
+    "empirical_saturation_check": false,
     "incremental_bmc": false,
     "interval_analysis": true
   },
@@ -173,9 +173,39 @@
       "arch": "1blk_25",
       "sample_id": 0,
       "eps": 1,
-      "enabled": false,
+      "enabled": true,
       "expected_difficulty": "medium",
       "notes": "MNIST default paper run. MNIST is intentionally capped at 25_25."
+    },
+     {
+      "name": "mnist_1blk50_sample0_eps1",
+      "dataset": "mnist",
+      "arch": "1blk_50",
+      "sample_id": 0,
+      "eps": 1,
+      "enabled": true,
+      "expected_difficulty": "medium",
+      "notes": "MNIST default paper run. MNIST is intentionally capped at 25_25."
+    },
+    {
+      "name": "mnist_1blk100_sample0_eps15",
+      "dataset": "mnist",
+      "arch": "1blk_100",
+      "sample_id": 0,
+      "eps": 1.5,
+      "enabled": true,
+      "expected_difficulty": "medium",
+      "notes": "MNIST default paper run. MNIST is intentionally capped at 25_25."
+    },
+    {
+      "name": "mnist_2blk10_10_sample0_eps1",
+      "dataset": "mnist",
+      "arch": "2blk_10_10",
+      "sample_id": 0,
+      "eps": 1,
+      "enabled": true,
+      "expected_difficulty": "high",
+      "notes": "Largest MNIST architecture included in the default paper plan; larger MNIST models are intentionally excluded."
     },
     {
       "name": "mnist_2blk25_25_sample0_eps1",
@@ -183,7 +213,17 @@
       "arch": "2blk_25_25",
       "sample_id": 0,
       "eps": 1,
-      "enabled": false,
+      "enabled": true,
+      "expected_difficulty": "high",
+      "notes": "Largest MNIST architecture included in the default paper plan; larger MNIST models are intentionally excluded."
+    },
+     {
+      "name": "mnist_2blk50_50_sample0_eps1",
+      "dataset": "mnist",
+      "arch": "2blk_50_50",
+      "sample_id": 0,
+      "eps": 1,
+      "enabled": true,
       "expected_difficulty": "high",
       "notes": "Largest MNIST architecture included in the default paper plan; larger MNIST models are intentionally excluded."
     },
