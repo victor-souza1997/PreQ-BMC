@@ -1,8 +1,8 @@
-# Quadapter
+# PreQ-BMC
 This is the official webpage for paper *Certified Quantization Strategy Synthesis for Neural Networks*. In this paper, we make the following main contributions:
 - We introduce the first quantization strategy synthesis method for neural networks which provably preserves desired properties after quantization;
 - WeproposeanovelMILP-basedmethod,tocomputeanunder-approximation of the preimage for each layer efficiently and effectively;
-- We implement our methods into a tool Quadapter and conduct extensive experiments to demonstrate the application of the certified quantization for preserving robustness and backdoor-freeness properties.
+- We implement our methods into a tool PreQ-BMC and conduct extensive experiments to demonstrate the application of the certified quantization for preserving robustness and backdoor-freeness properties.
 
 ## Benchmarks in Sections 5.1 & 5.2:
 
@@ -26,21 +26,21 @@ $ pip install gurobipy
 
 Please install Gurobi on your machine.
 
-## Running Quadapter for Certified Robustness
+## Running PreQ-BMC for Certified Robustness
 ```shell script
 # Preimage Computation Mode: MILP-based ('--preimg_mode milp'), Abstr-based ('--preimg_mode abstr')
-# If relaxed version of Quadapter: yes ('--if_relax 1'), no ('--if_relax 0')
+# If relaxed version of PreQ-BMC: yes ('--if_relax 1'), no ('--if_relax 0')
 # Input=5346, Attack=2, preimg_mode=milp, OutputFolder=./output/
 
-python Quadapter_robustness_main.py --dataset mnist --arch 1blk_100 --sample_id 5346 --eps 2 --preimg_mode milp --if_relax 0 --outputPath ./output/
+python PreQ-BMC_robustness_main.py --dataset mnist --arch 1blk_100 --sample_id 5346 --eps 2 --preimg_mode milp --if_relax 0 --outputPath ./output/
 ```
 
-### Running Quadapter for Certified Backdoor-freeness
+### Running PreQ-BMC for Certified Backdoor-freeness
 ```shell script
 # Backdoor Info:  --loc_row 1  --loc_col 1 --stamp_size 3 --targetCls 8 --originalCls 10
 # Paras for Hypothesis Testing: --K 5 --delta 0.05
 
-python Quadapter_backdoor_main.py --dataset mnist --arch 1blk_100 --bit_lb 2 --loc_row 1  --loc_col 1  --stamp_size 3 --targetCls 8 --originalCls 10 --K 5 --delta 0.05 --preimg_mode milp --ifRelax 1  --outputPath ./output/
+python PreQ-BMC_backdoor_main.py --dataset mnist --arch 1blk_100 --bit_lb 2 --loc_row 1  --loc_col 1  --stamp_size 3 --targetCls 8 --originalCls 10 --K 5 --delta 0.05 --preimg_mode milp --ifRelax 1  --outputPath ./output/
 ```
 
 
@@ -71,7 +71,7 @@ python scripts/run_robustness_pipeline.py \
   --preimage-cache-dir output/preimage_cache
 
 // Execucao normal
-python3 Quadapter_robustness_main.py --dataset iris_15x2 --arch 1blk_10 --sample_id 25 --eps 0.05 --preimg_mode milp --verify_mode esbmc --ifRelax 0 --outputPath ./output/
+python3 PreQ-BMC_robustness_main.py --dataset iris_15x2 --arch 1blk_10 --sample_id 25 --eps 0.05 --preimg_mode milp --verify_mode esbmc --ifRelax 0 --outputPath ./output/
 
 
 python scripts/export_gurobi_preimage_cache.py \
@@ -87,7 +87,7 @@ python scripts/export_gurobi_preimage_cache.py \
 Run from the repo root:
 
 ```bash
-cd /home/joao/code/Quadapter
+cd /home/joao/code/PreQ-BMC
 ```
 
 **Single Experiment**
