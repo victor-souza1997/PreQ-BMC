@@ -54,6 +54,25 @@ def infer_dense_architecture_from_h5(weight_file: str | Path) -> list[int]:
                     continue
                 kernel_shapes.append(tuple(int(dim) for dim in dataset.shape))
 
+        if not kernel_shapes:
+            # Keras 3 subclassed models saved with `save_weights()` may not
+            # populate the legacy layer_names/weight_names attributes. Dense
+            # kernels are stored as dense_layers/<layer>/vars/0 in creation
+            # order, with the matching bias at vars/1.
+            keras3_shapes: list[tuple[str, tuple[int, int]]] = []
+
+            def collect_keras3_dense_kernel(name: str, value: h5py.Dataset) -> None:
+                if not isinstance(value, h5py.Dataset):
+                    return
+                if not name.startswith("dense_layers/") or not name.endswith("/vars/0"):
+                    return
+                if len(value.shape) != 2:
+                    return
+                keras3_shapes.append((name, tuple(int(dim) for dim in value.shape)))
+
+            handle.visititems(collect_keras3_dense_kernel)
+            kernel_shapes.extend(shape for _, shape in sorted(keras3_shapes, key=lambda item: item[0]))
+
     if not kernel_shapes:
         return []
 
