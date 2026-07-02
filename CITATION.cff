@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use PreQ-BMC, please cite the SBSeg 2026 Tool Track artifact."
+title: "PreQ-BMC: Preimage-Guided Bounded Model Checking of Fixed-Point Quantized Neural Network Implementations"
+authors:
+  - family-names: "TODO"
+    given-names: "TODO"
+conference: "SBSeg 2026 Tool Track"
+doi: "TODO"
+date-released: "2026-07-01"
+license: "Apache-2.0"

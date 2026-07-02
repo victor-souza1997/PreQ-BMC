@@ -1,0 +1,19 @@
+{
+  "name": "iris_cached_demo",
+  "dataset": "iris_15x2",
+  "arch": "2blk_15_15",
+  "sample_id": 27,
+  "eps": 0.05,
+  "preimage_mode": "milp",
+  "verify_mode": "esbmc",
+  "requires_gurobi": false,
+  "requires_esbmc": true,
+  "preimage_cache_dir": "examples/preimage_cache",
+  "command": "preqbmc demo --no-gurobi --output output/demo_run",
+  "expected_outputs": [
+    "output/demo_run/reports/pipeline_summary.json",
+    "output/demo_run/reports/experiment_summary.json",
+    "output/demo_run/layers/",
+    "output/demo_run/c_export/qnn_model.c"
+  ]
+}
