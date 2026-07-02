@@ -1,10 +1,17 @@
 __pycache__
+**/__pycache__/
 venv/
+.venv/
 *.pyc
 .DS_Store
 .idea/
 *.log
+*.smt2
 .env
+*.lic
+gurobi.lic
+.pytest_cache/
+*.egg-info/
 *.sqlite3
 staticfiles/
 media/
