@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "preqbmc"
+version = "0.1.0"
+description = "Preimage-guided bounded model checking for fixed-point quantized neural network implementations."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [
+  { name = "PreQ-BMC authors" }
+]
+dependencies = [
+  "numpy"
+]
+
+[project.optional-dependencies]
+gurobi = [
+  "gurobipy"
+]
+plots = [
+  "matplotlib",
+  "pandas"
+]
+dev = [
+  "pytest"
+]
+full = [
+  "tensorflow",
+  "torch",
+  "onnx",
+  "h5py",
+  "scikit-learn",
+  "matplotlib",
+  "pandas",
+  "gurobipy"
+]
+
+[project.scripts]
+preqbmc = "cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "tool" }
+py-modules = ["cli"]
+
+[tool.setuptools.packages.find]
+where = ["tool"]
+include = [
+  "backends*",
+  "configs*",
+  "datasets*",
+  "models*",
+  "reports*",
+  "scripts*",
+  "synthesis*",
+  "utils*",
+  "verification*"
+]
