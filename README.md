@@ -1,206 +1,203 @@
 # PreQ-BMC
-This is the official webpage for paper *Certified Quantization Strategy Synthesis for Neural Networks*. In this paper, we make the following main contributions:
-- We introduce the first quantization strategy synthesis method for neural networks which provably preserves desired properties after quantization;
-- WeproposeanovelMILP-basedmethod,tocomputeanunder-approximation of the preimage for each layer efficiently and effectively;
-- We implement our methods into a tool PreQ-BMC and conduct extensive experiments to demonstrate the application of the certified quantization for preserving robustness and backdoor-freeness properties.
 
-## Benchmarks in Sections 5.1 & 5.2:
+PreQ-BMC is a preimage-guided bounded model checking framework for deployment-aware verification of fixed-point Quantized Neural Network implementations.
 
-The 50 randomly selected inputs from the test set of the respective dataset (shown by IDs):
+The repository contains the research prototype used for the article experiments and the SBSeg 2026 Tool Track / Salao de Ferramentas artifact. Some internal modules still use historical project names for compatibility, but public commands and documentation use the name PreQ-BMC.
 
-```
-5346  8564  7059  371   6984  5782  2127  8517  4520  8685
-3877  463   5446  7775  9623  5739  5010  7668  892   8825
-3523  7997  8561  1613  6934  6781  5554  6301  6220  9873
-9384  130   9033  8620  6066  4973  8870  5032  8911  5224
-5369  1451  7766  5126  9498  1382  3932  8302  9566  5750
-```
+## Key Features
 
+- Layer-wise preimage contracts for neural-network robustness properties.
+- Fixed-point C harness generation for ESBMC/BMC checks.
+- Block-wise verification for dense hidden layers using a shared layer `<Q,I,F>` format.
+- Formal no-saturation checks and empirical implementation diagnostics.
+- Python and generated-C deployment comparisons.
+- Article experiment runners, aggregation scripts, tables, and plots.
 
-## Setup
-Please install gurobypy from PyPI:
+## Scope and Limitations
 
-```shell script
-$ pip install gurobipy
-```
+PreQ-BMC currently targets the supported benchmark subset in this repository: fixed-point affine/ReLU MLP-style networks loaded from the provided benchmark weights. The formal pipeline verifies the existing generated ESBMC harnesses and fixed-point contracts; this artifact preparation does not change the mathematical verification semantics.
 
-Please install Gurobi on your machine.
+Full end-to-end MILP-based preimage synthesis requires a valid Gurobi license. For artifact evaluation, we provide cached preimage contracts for small examples so that reviewers can run harness generation, ESBMC verification, and diagnostics without Gurobi.
 
-## Running PreQ-BMC for Certified Robustness
-```shell script
-# Preimage Computation Mode: MILP-based ('--preimg_mode milp'), Abstr-based ('--preimg_mode abstr')
-# If relaxed version of PreQ-BMC: yes ('--if_relax 1'), no ('--if_relax 0')
-# Input=5346, Attack=2, preimg_mode=milp, OutputFolder=./output/
+Deployment C export already exists for runs with the C backend enabled. The pipeline writes it under:
 
-python PreQ-BMC_robustness_main.py --dataset mnist --arch 1blk_100 --sample_id 5346 --eps 2 --preimg_mode milp --if_relax 0 --outputPath ./output/
+```text
+<run-output>/c_export/qnn_model.c
+<run-output>/c_export/qnn_model.so
 ```
 
-### Running PreQ-BMC for Certified Backdoor-freeness
-```shell script
-# Backdoor Info:  --loc_row 1  --loc_col 1 --stamp_size 3 --targetCls 8 --originalCls 10
-# Paras for Hypothesis Testing: --K 5 --delta 0.05
+ESBMC verification harnesses are distinct artifacts and are written under:
 
-python PreQ-BMC_backdoor_main.py --dataset mnist --arch 1blk_100 --bit_lb 2 --loc_row 1  --loc_col 1  --stamp_size 3 --targetCls 8 --originalCls 10 --K 5 --delta 0.05 --preimg_mode milp --ifRelax 1  --outputPath ./output/
+```text
+<run-output>/layers/
 ```
 
+## Installation
 
-Running Script
-
-```
-# Notas de Execucao
-
-
-// Gerar cache
-python scripts/export_gurobi_preimage_cache.py \
-  --datasets mnist \
-  --archs 1blk_100 \
-  --sample-ids 0 \
-  --eps 1.0 \
-  --preimage-mode milp \
-  --cache-dir output/preimage_cache
-
-// Executar lendo cache
-python scripts/run_robustness_pipeline.py \
-  --dataset iris_15x2  \
-  --arch 2blk_15_15 \
-  --sample-id 0 \
-  --eps 1.0 \
-  --preimage-mode milp \
-  --verify-mode esbmc \
-  --no-gurobi \
-  --preimage-cache-dir output/preimage_cache
-
-// Execucao normal
-python3 PreQ-BMC_robustness_main.py --dataset iris_15x2 --arch 1blk_10 --sample_id 25 --eps 0.05 --preimg_mode milp --verify_mode esbmc --ifRelax 0 --outputPath ./output/
-
-
-python scripts/export_gurobi_preimage_cache.py \
-  --datasets iris_15x2 \
-  --sample-ids 27 \
-  --eps 0.05 \
-  --preimage-mode milp \
-  --cache-dir output/preimage_cache
-
-```
-
-# Run Experiments
-Run from the repo root:
+Clone the repository and create a virtual environment:
 
 ```bash
-cd /home/joao/code/PreQ-BMC
+git clone https://github.com/victor-souza1997/PreQ-BMC.git
+cd PreQ-BMC
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -e .
 ```
 
-**Single Experiment**
-Example for Iris, sample 25, eps 0.1, ESBMC verification:
+For the full experiment pipeline, install optional dependencies:
+
+```bash
+pip install -e '.[full]'
+```
+
+Optional solver and plotting groups are also available:
+
+```bash
+pip install -e '.[gurobi]'
+pip install -e '.[plots]'
+```
+
+Install ESBMC separately and ensure it is on `PATH`:
+
+```bash
+esbmc --version
+```
+
+Configure Gurobi only if you will run full MILP preimage synthesis.
+
+## Verify the Environment
+
+```bash
+preqbmc verify-environment
+```
+
+This command reports Python version, ESBMC availability, optional Gurobi availability, and Python package availability. Missing Gurobi is reported as optional for cached demos.
+
+## Quickstart Without Gurobi
+
+Run the cached Iris demo:
+
+```bash
+preqbmc demo --no-gurobi --output output/demo_run
+```
+
+The demo uses the cache in `examples/preimage_cache/` and writes:
+
+```text
+output/demo_run/reports/pipeline_summary.json
+output/demo_run/reports/experiment_summary.json
+output/demo_run/layers/
+output/demo_run/c_export/qnn_model.c
+```
+
+If ESBMC is not installed, the command stops before running the pipeline and prints installation guidance.
+
+## Full Synthesis With Gurobi
+
+With ESBMC and Gurobi configured, run the same small example end to end:
+
+```bash
+preqbmc demo --output output/demo_run_gurobi
+```
+
+Or call the existing pipeline directly:
 
 ```bash
 python tool/scripts/run_robustness_pipeline.py \
   --dataset iris_15x2 \
-  --arch 1blk_15 \
-  --sample-id 25 \
-  --eps 0.1 \
-  --bit-lb 1 \
-  --bit-ub 16 \
+  --arch 2blk_15_15 \
+  --sample-id 27 \
+  --eps 0.05 \
   --preimage-mode milp \
   --verify-mode esbmc \
-  --compare-limit 0 \
-  --output-dir output/iris_15x2_id25_eps0p1
+  --output-dir output/iris_full
 ```
 
-By default this now runs:
-- existing DeepPoly/backward-preimage verification
-- existing ESBMC preimage/argmax checks
-- formal ESBMC no-saturation checks
-- empirical saturation diagnostics/gating
-- quality refinement
-- paper table export
+## Reproducing Article Experiments
 
-Main outputs:
-
-```text
-output/iris_15x2_id25_eps0p1/reports/pipeline_summary.json
-output/iris_15x2_id25_eps0p1/reports/experiment_summary.json
-output/iris_15x2_id25_eps0p1/reports/qnn_vs_keras_metrics.json
-output/iris_15x2_id25_eps0p1/reports/refinement_history.json
-output/iris_15x2_id25_eps0p1/reports/table_formal_vs_refined.csv
-output/iris_15x2_id25_eps0p1/reports/table_deployment_metrics.csv
-output/iris_15x2_id25_eps0p1/reports/table_resource_metrics.csv
-```
-
-**Useful Flags**
-Disable formal no-saturation ESBMC:
+Dry-run one Iris article experiment:
 
 ```bash
---no-formal-saturation-check
+preqbmc reproduce \
+  --config experiments/article_experiments.json \
+  --only iris \
+  --max-runs 1 \
+  --dry-run
 ```
 
-Disable empirical saturation rejection while still allowing diagnostics:
+Run and aggregate article experiments:
 
 ```bash
---no-empirical-saturation-check
+preqbmc reproduce \
+  --config experiments/article_experiments.json \
+  --continue-on-error \
+  --aggregate \
+  --plots
 ```
 
-Disable quality refinement entirely, closer to old behavior:
+Aggregate existing outputs:
 
 ```bash
---max-quality-refinement-steps 0
+preqbmc aggregate \
+  --input-root output/article_runs \
+  --output-root output/article_results \
+  --plots
 ```
 
-Tune quality thresholds:
+See [docs/reproducing_article_results.md](docs/reproducing_article_results.md) for table and figure commands.
+
+## Outputs
+
+Important per-run files:
+
+- `reports/pipeline_summary.json`: full run configuration, verification status, block summaries, and artifact paths.
+- `reports/experiment_summary.json`: paper-oriented summary with formal and deployment metrics.
+- `reports/qnn_vs_keras_metrics.json`: Python fixed-point, Keras, and generated-C deployment comparison.
+- `reports/refinement_history.json`: quality-refinement attempts when enabled.
+- `reports/table_*.csv`: per-run CSV tables.
+- `layers/*.c`: ESBMC verification harnesses.
+- `c_export/qnn_model.c`: generated fixed-point deployment C implementation.
+
+Aggregate outputs under `output/article_results/` include `all_experiments.csv`, `table_quality_metrics.csv`, `table_scalability.csv`, `table_mrr.csv`, plot PNGs, and LaTeX table fragments.
+
+## Tests
+
+Run the available unit tests:
 
 ```bash
---accuracy-drop-threshold 0.05 \
---saturation-threshold 0.01 \
---mismatch-threshold 0.05 \
---max-quality-refinement-steps 10
+python -m unittest discover tool/tests
 ```
 
-Add external baseline data:
+Some tests require optional packages such as TensorFlow or host tools such as `gcc`. ESBMC-dependent tests are skipped automatically when `esbmc` is not installed.
 
-```bash
---baseline-results-json path/to/baseline.json
-```
+## Artifact Evaluation
 
-**Batch Experiments**
-Create a config, for example:
+Start with [docs/artifact_evaluation.md](docs/artifact_evaluation.md). It lists minimal software requirements, which commands require Gurobi or ESBMC, and expected runtime for the cached demo.
 
-```json
-{
-  "runs": [
-    {
-      "dataset": "iris_15x2",
-      "arch": "1blk_15",
-      "sample_ids": [0, 5, 10, 15, 20, 25],
-      "eps_values": [0.05, 0.1, 0.2],
-      "bit_lb": 1,
-      "bit_ub": 16,
-      "verify_mode": "esbmc",
-      "preimg_mode": "milp",
-      "compare_limit": 0
-    }
-  ]
+## Documentation
+
+- [docs/architecture.md](docs/architecture.md)
+- [docs/installation.md](docs/installation.md)
+- [docs/artifact_evaluation.md](docs/artifact_evaluation.md)
+- [docs/metrics.md](docs/metrics.md)
+- [docs/reproducing_article_results.md](docs/reproducing_article_results.md)
+- [docs/gurobi_and_esbmc.md](docs/gurobi_and_esbmc.md)
+
+## Citation
+
+```bibtex
+@inproceedings{preqbmc2026,
+  title = {PreQ-BMC: Preimage-Guided Bounded Model Checking of Fixed-Point Quantized Neural Network Implementations},
+  author = {TODO},
+  booktitle = {SBSeg 2026 Tool Track},
+  year = {2026},
+  doi = {TODO}
 }
 ```
 
-Save it as, for example:
+## License
 
-```text
-experiments/sbesc_iris_seeds.json
-```
+This repository includes an Apache-2.0 `LICENSE` file.
 
-Run:
-
-```bash
-python tool/scripts/run_paper_experiments.py \
-  --config experiments/sbesc_iris_seeds.json
-```
-
-Aggregate outputs:
-
-```text
-output/paper_results/all_experiments.json
-output/paper_results/all_experiments.csv
-output/paper_results/runs/.../reports/experiment_summary.json
-```
-
-You need ESBMC available on `PATH`. If using `preimg_mode=milp`, you also need Gurobi working.
+License choice must be confirmed by all authors before final submission.
