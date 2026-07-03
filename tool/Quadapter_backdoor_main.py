@@ -143,7 +143,8 @@ while True:
 
     if left <= right_H0:
         backward_end_time = time.time()
-        ifSucc, qu_list, qu_frac_list, qu_int_list = dnn_gurobi_model.forward_quantization_backdoor(success_X_n)
+        ifSucc, qu_list, qu_frac_list, qu_int_list = dnn_gurobi_model.forward_quantization_with_esbmc()
+
         forward_end_time = time.time()
 
         print("Backward Time is: ", backward_end_time - start_time)
