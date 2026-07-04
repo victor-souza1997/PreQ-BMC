@@ -37,7 +37,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-id", "--sample_id", dest="sample_id", type=int, default=0)
     parser.add_argument("--bit-lb", "--bit_lb", dest="bit_lb", type=int, default=1)
     parser.add_argument("--bit-ub", "--bit_ub", dest="bit_ub", type=int, default=16)
-    parser.add_argument("--eps", type=float, default=1.0)
+    parser.add_argument(
+        "--eps",
+        "--input-epsilon",
+        "--perturbation-radius",
+        dest="eps",
+        type=float,
+        default=1.0,
+        help="Input perturbation radius. --eps is kept as a backward-compatible alias.",
+    )
     parser.add_argument("--output-dir", "--outputPath", dest="output_dir", default="output")
     parser.add_argument("--if-relax", "--ifRelax", dest="if_relax", type=int, default=0)
     parser.add_argument("--preimage-mode", "--preimg_mode", dest="preimg_mode", default="milp", choices=["milp", "abstr", "comp"])
@@ -85,7 +93,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="paper-fast",
         choices=["paper-fast", "debug", "fast", "preimage", "safety", "overflow"],
     )
-    parser.add_argument("--esbmc-timeout", "--esbmc_timeout", dest="esbmc_timeout_seconds", type=int, default=900)
+    parser.add_argument(
+        "--esbmc-timeout",
+        "--esbmc_timeout",
+        "--esbmc-timeout-seconds",
+        dest="esbmc_timeout_seconds",
+        type=int,
+        default=900,
+    )
     parser.add_argument("--gurobi-threads", "--gurobi_threads", dest="gurobi_threads", type=int, default=4)
     parser.add_argument(
         "--no-saturation-continue-on-unknown",
@@ -131,6 +146,19 @@ def build_parser() -> argparse.ArgumentParser:
         dest="formal_saturation_check",
         action="store_false",
         help="Disable ESBMC no-saturation verification as an acceptance criterion.",
+    )
+    parser.add_argument(
+        "--require-formal-no-saturation",
+        dest="require_formal_no_saturation",
+        action="store_true",
+        default=True,
+        help="Require formal no-saturation checks to verify for pipeline acceptance.",
+    )
+    parser.add_argument(
+        "--no-require-formal-no-saturation",
+        dest="require_formal_no_saturation",
+        action="store_false",
+        help="Record formal no-saturation checks as optional evidence instead of an acceptance requirement.",
     )
     parser.add_argument(
         "--empirical-saturation-check",
@@ -244,6 +272,7 @@ def main(argv: list[str] | None = None) -> None:
         compiler=args.compiler,
         enable_diagnostics=args.enable_diagnostics,
         formal_saturation_check=args.formal_saturation_check,
+        require_formal_no_saturation=args.require_formal_no_saturation,
         empirical_saturation_check=args.empirical_saturation_check,
         accuracy_drop_threshold=_optional_threshold(args.accuracy_drop_threshold),
         saturation_threshold=_optional_threshold(args.saturation_threshold),

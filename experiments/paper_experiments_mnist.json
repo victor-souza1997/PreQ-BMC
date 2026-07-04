@@ -1,0 +1,41 @@
+{
+  "metadata": {
+    "description": "Default paper experiments for fixed-point QNN verification",
+    "note": "Each experiment is intended to run once. MNIST is intentionally limited to 25_25 for paper reproducibility; larger MNIST models can be run manually.",
+    "output_root": "output/paper_runs",
+    "aggregate_output_dir": "output/paper_results"
+  },
+  "defaults": {
+    "bit_lb": 2,
+    "bit_ub": 40,
+    "preimg_mode": "milp",
+    "verify_mode": "esbmc",
+    "compare_split": "test",
+    "compare_limit": 100,
+    "compile_c_backend": true,
+    "enable_diagnostics": true,
+    "accuracy_drop_threshold": 0.05,
+    "saturation_threshold": 0.01,
+    "mismatch_threshold": 0.05,
+    "max_quality_refinement_steps": 10,
+    "export_paper_tables": true,
+    "formal_saturation_check": true,
+    "empirical_saturation_check": true,
+    "incremental_bmc": false,
+    "interval_analysis": true
+  },
+  "runs": [
+    {
+      "name": "mnist_2blk_512_512sample0_esp15",
+      "dataset": "mnist",
+      "arch": "2blk_512_512",
+      "sample_id": 0,
+      "eps": 3,
+      "enabled": true,
+      "compare_limit": 0,
+      "expected_difficulty": "low",
+      "notes": "Running mnist limit of 50 neurons per layer."
+    }
+    
+  ]
+}

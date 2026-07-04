@@ -159,6 +159,7 @@ class NoSaturationVerificationTest(unittest.TestCase):
             encoder.blockwise_fail_fast = True
             encoder.blockwise_run_all_blocks_on_failure = False
             encoder.esbmc_jobs = 1
+            encoder.esbmc_call_records = []
             encoder.esbmc_block_records = []
             encoder.blockwise_skipped_blocks_due_to_fail_fast = 0
             encoder.blockwise_first_failed_block = None
@@ -216,6 +217,7 @@ class NoSaturationVerificationTest(unittest.TestCase):
             encoder.output_dir = Path(temp_dir)
             encoder.esbmc_layer_block_size = 1
             encoder.no_saturation_continue_on_unknown = False
+            encoder.esbmc_call_records = []
             encoder.esbmc_no_saturation_block_records = []
             encoder._stats = {"esbmc_calls": 0.0, "esbmc_block_calls": 0.0}
             encoder.config = SimpleNamespace(esbmc=ESBMCConfig())
@@ -272,6 +274,7 @@ class NoSaturationVerificationTest(unittest.TestCase):
             encoder.output_dir = output_dir
             encoder.esbmc_layer_block_size = 1
             encoder.no_saturation_continue_on_unknown = False
+            encoder.esbmc_call_records = []
             encoder.esbmc_no_saturation_block_records = []
             encoder.dense_layers = [SimpleNamespace(layer_index=1)]
             encoder._stats = {"esbmc_calls": 0.0, "esbmc_block_calls": 0.0}

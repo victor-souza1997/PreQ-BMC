@@ -266,6 +266,7 @@ class GPEncoding:
         self.blockwise_run_all_blocks_on_failure = bool(self.config.blockwise_run_all_blocks_on_failure)
         self.no_saturation_continue_on_unknown = bool(self.config.no_saturation_continue_on_unknown)
         self.esbmc_jobs = max(1, int(self.config.esbmc_jobs))
+        self.esbmc_call_records: list[dict[str, Any]] = []
         self.esbmc_block_records: list[dict[str, Any]] = []
         self.esbmc_no_saturation_block_records: list[dict[str, Any]] = []
         self.blockwise_skipped_blocks_due_to_fail_fast = 0
@@ -850,6 +851,7 @@ class GPEncoding:
         integer_bits: list[int],
         *,
         formal_saturation_check: bool = False,
+        require_formal_saturation_check: bool = True,
     ) -> tuple[bool, list[dict[str, Any]]]:
         """Run the existing ESBMC layer checks for an explicit exported Q/I/F configuration.
 
@@ -946,16 +948,17 @@ class GPEncoding:
                 record["no_saturation_resource_control"] = no_saturation_result.resource_control
                 if no_saturation_result.status != "VERIFIED":
                     record["status"] = no_saturation_result.status
-                    record["final_status"] = (
-                        "FAILED" if no_saturation_result.status == "FAILED" else "PARTIAL_VERIFIED"
-                    )
+                    record["final_status"] = "FAILED" if require_formal_saturation_check else "PARTIAL_VERIFIED"
                     record["failure_type"] = (
                         "formal_saturation_possible"
                         if no_saturation_result.status == "FAILED"
                         else "formal_saturation_inconclusive"
                     )
                     records.append(record)
-                    return False, records
+                    if require_formal_saturation_check:
+                        return False, records
+                    self.update_quantized_weights_affine(in_layer, cur_layer, q_bits, f_bits, f_bits, layer_index)
+                    continue
 
             if not formal_saturation_check:
                 record["final_status"] = "PARTIAL_VERIFIED"
@@ -1034,6 +1037,10 @@ class GPEncoding:
         all_bit: int,
         frac_bit: int,
         harness: Path | None,
+        property_type: str = "preimage",
+        mode: str = "full_layer",
+        input_dim: int | None = None,
+        output_neurons: int | None = None,
         status: str | None = None,
         reason: str | None = None,
         skipped_due_to_fail_fast: bool = False,
@@ -1055,7 +1062,15 @@ class GPEncoding:
             "stderr_log_path": result.stderr_log_path,
             "resource_control": result.resource_control,
             "harness": str(harness) if harness is not None else None,
+            "property_type": property_type,
+            "mode": mode,
         }
+        if input_dim is not None:
+            record["input_dim"] = int(input_dim)
+        if output_neurons is not None:
+            record["neurons_per_query"] = int(output_neurons)
+        if input_dim is not None and output_neurons is not None:
+            record["estimated_macs"] = int(input_dim) * int(output_neurons)
         if block_index is not None:
             record["block_index"] = int(block_index)
         if start_neuron is not None:
@@ -1135,6 +1150,21 @@ class GPEncoding:
 
         result = self.esbmc_runner.run_file(archived_file)
         self._stats["esbmc_calls"] += 1.0
+        record = self._esbmc_call_record(
+            result=result,
+            layer_index=layer_index,
+            block_index=None,
+            start_neuron=None,
+            end_neuron=None,
+            all_bit=all_bit,
+            frac_bit=frac_bit,
+            harness=archived_file,
+            property_type="output" if cur_layer.layer_index == len(self.dense_layers) + 1 else "preimage",
+            mode="full_layer",
+            input_dim=in_layer.layer_size,
+            output_neurons=cur_layer.layer_size,
+        )
+        self.esbmc_call_records.append(record)
         LOGGER.info("ESBMC layer=%s bits(Q=%s,F=%s) status=%s", cur_layer.layer_index, all_bit, frac_bit, result.status)
         return result
 
@@ -1201,9 +1231,14 @@ class GPEncoding:
                 all_bit=all_bit,
                 frac_bit=frac_bit,
                 harness=archived_file,
+                property_type="preimage",
+                mode="blockwise",
+                input_dim=in_layer.layer_size,
+                output_neurons=end_neuron - start_neuron,
                 status=record_status,
             )
             records.append(record)
+            self.esbmc_call_records.append(record)
             self.esbmc_block_records.append(record)
 
             LOGGER.info(
@@ -1259,10 +1294,16 @@ class GPEncoding:
                                 "stderr_log_path": "",
                             },
                             "harness": None,
+                            "property_type": "preimage",
+                            "mode": "blockwise",
+                            "input_dim": int(in_layer.layer_size),
+                            "neurons_per_query": int(skip_end - skip_start),
+                            "estimated_macs": int(in_layer.layer_size) * int(skip_end - skip_start),
                             "reason": "skipped_due_to_fail_fast",
                             "skipped_due_to_fail_fast": True,
                         }
                         records.append(skipped_record)
+                        self.esbmc_call_records.append(skipped_record)
                         self.esbmc_block_records.append(skipped_record)
                     break
 
@@ -1337,6 +1378,21 @@ class GPEncoding:
 
         result = self.esbmc_runner.run_file(archived_file)
         self._stats["esbmc_calls"] += 1.0
+        record = self._esbmc_call_record(
+            result=result,
+            layer_index=layer_index,
+            block_index=None,
+            start_neuron=None,
+            end_neuron=None,
+            all_bit=all_bit,
+            frac_bit=frac_bit,
+            harness=archived_file,
+            property_type="no_saturation",
+            mode="full_layer",
+            input_dim=in_layer.layer_size,
+            output_neurons=cur_layer.layer_size,
+        )
+        self.esbmc_call_records.append(record)
         LOGGER.info(
             "ESBMC no-saturation layer=%s bits(Q=%s,F=%s) status=%s",
             cur_layer.layer_index,
@@ -1403,9 +1459,14 @@ class GPEncoding:
                 all_bit=all_bit,
                 frac_bit=frac_bit,
                 harness=archived_file,
+                property_type="no_saturation",
+                mode="blockwise",
+                input_dim=in_layer.layer_size,
+                output_neurons=end_neuron - start_neuron,
                 status=record_status,
             )
             records.append(record)
+            self.esbmc_call_records.append(record)
             self.esbmc_no_saturation_block_records.append(record)
 
             LOGGER.info(
@@ -1453,10 +1514,16 @@ class GPEncoding:
                                 "stderr_log_path": "",
                             },
                             "harness": None,
+                            "property_type": "no_saturation",
+                            "mode": "blockwise",
+                            "input_dim": int(in_layer.layer_size),
+                            "neurons_per_query": int(skip_end - skip_start),
+                            "estimated_macs": int(in_layer.layer_size) * int(skip_end - skip_start),
                             "reason": "skipped_after_no_saturation_block_status",
                             "skipped_due_to_no_saturation_policy": True,
                         }
                         records.append(skipped_record)
+                        self.esbmc_call_records.append(skipped_record)
                         self.esbmc_no_saturation_block_records.append(skipped_record)
                     break
 
@@ -1645,6 +1712,9 @@ class GPEncoding:
         memout_blocks = sum(1 for record in records if record.get("status") == "MEMOUT")
         unknown_blocks = sum(1 for record in records if record.get("status") == "UNKNOWN")
         skipped_blocks = sum(1 for record in records if record.get("status") == "SKIPPED")
+        largest_neurons = max((int(record.get("neurons_per_query", 0) or 0) for record in records), default=0)
+        largest_input_dim = max((int(record.get("input_dim", 0) or 0) for record in records), default=0)
+        largest_estimated_macs = max((int(record.get("estimated_macs", 0) or 0) for record in records), default=0)
 
         layers: list[dict[str, Any]] = []
         for layer_index in sorted({int(record["layer_index"]) for record in records}):
@@ -1674,9 +1744,56 @@ class GPEncoding:
             "unknown_blocks": int(unknown_blocks),
             "skipped_blocks": int(skipped_blocks),
             "skipped_blocks_due_to_fail_fast": int(self.blockwise_skipped_blocks_due_to_fail_fast),
+            "largest_neurons_per_query": int(largest_neurons),
+            "largest_input_dim_per_query": int(largest_input_dim),
+            "largest_estimated_macs_per_query": int(largest_estimated_macs),
             "first_failed_block": self.blockwise_first_failed_block,
             "layers": layers,
         }
+
+    def esbmc_call_summary(self) -> dict[str, Any]:
+        records = [dict(record) for record in self.esbmc_call_records]
+        statuses = ["VERIFIED", "FAILED", "TIMEOUT", "MEMOUT", "UNKNOWN", "SKIPPED"]
+        counts = {
+            status.lower(): int(sum(1 for record in records if record.get("status") == status))
+            for status in statuses
+        }
+        query_times = [
+            float(record.get("elapsed_seconds", record.get("time", 0.0)) or 0.0)
+            for record in records
+            if record.get("status") != "SKIPPED"
+        ]
+        total_calls = int(sum(counts.values()))
+        total_non_skipped = int(total_calls - counts["skipped"])
+        return {
+            "records": records,
+            "verified_count": counts["verified"],
+            "failed_count": counts["failed"],
+            "timeout_count": counts["timeout"],
+            "memout_count": counts["memout"],
+            "unknown_count": counts["unknown"],
+            "skipped_count": counts["skipped"],
+            "total_count": total_calls,
+            "executed_count": total_non_skipped,
+            "timeout_rate": float(counts["timeout"] / total_calls) if total_calls else 0.0,
+            "memout_rate": float(counts["memout"] / total_calls) if total_calls else 0.0,
+            "unknown_rate": float(counts["unknown"] / total_calls) if total_calls else 0.0,
+            "total_time_seconds": float(sum(query_times)),
+            "max_query_time_seconds": float(max(query_times, default=0.0)),
+            "mean_query_time_seconds": float(sum(query_times) / len(query_times)) if query_times else 0.0,
+            "largest_neurons_per_query": int(
+                max((int(record.get("neurons_per_query", 0) or 0) for record in records), default=0)
+            ),
+            "largest_input_dim_per_query": int(
+                max((int(record.get("input_dim", 0) or 0) for record in records), default=0)
+            ),
+            "largest_estimated_macs_per_query": int(
+                max((int(record.get("estimated_macs", 0) or 0) for record in records), default=0)
+            ),
+        }
+
+    def stats_snapshot(self) -> dict[str, float]:
+        return {key: float(value) for key, value in self._stats.items()}
 
     def no_saturation_block_summary(self) -> dict[str, Any]:
         records = [dict(record) for record in self.esbmc_no_saturation_block_records]
