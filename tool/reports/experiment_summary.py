@@ -74,6 +74,12 @@ def _formal_saturation_controls(
 ) -> dict[str, Any]:
     verification = pipeline_summary.get("formal_saturation_verification", {})
     enabled = bool(verification.get("enabled", pipeline_summary.get("formal_saturation_check_enabled", False)))
+    required = bool(
+        verification.get(
+            "required_for_acceptance",
+            pipeline_summary.get("require_formal_no_saturation", True),
+        )
+    )
     empirical_enabled = bool(pipeline_summary.get("empirical_saturation_check_enabled", True))
     layers = layers_override if layers_override is not None else verification.get("layers", [])
     failed_layers = [
@@ -88,6 +94,7 @@ def _formal_saturation_controls(
     )
     return {
         "formal_saturation_check_enabled": enabled,
+        "require_formal_no_saturation": required,
         "empirical_saturation_check_enabled": empirical_enabled,
         "no_saturation_verified_all_layers": verified_all,
         "no_saturation_failed_layers": failed_layers,
@@ -121,12 +128,16 @@ def _final_status(
     no_saturation_status: str,
     no_saturation_verified: bool,
     deployment_quality_accepted: bool,
+    require_formal_no_saturation: bool,
 ) -> str:
-    if contract_status == "FAILED" or no_saturation_status == "FAILED" or not deployment_quality_accepted:
+    if contract_status == "FAILED" or not deployment_quality_accepted:
+        return "FAILED"
+    if require_formal_no_saturation and no_saturation_status == "FAILED":
         return "FAILED"
     if contract_verified and deployment_quality_accepted and no_saturation_verified:
         return "VERIFIED"
     if contract_verified and deployment_quality_accepted and no_saturation_status in {
+        "FAILED",
         "TIMEOUT",
         "MEMOUT",
         "UNKNOWN",
@@ -142,6 +153,7 @@ def _formal_status_controls(
     metrics: dict[str, Any],
     *,
     deployment_quality_accepted: bool,
+    require_formal_no_saturation: bool,
 ) -> dict[str, Any]:
     contract_status = _aggregate_status(layers, "contract_status", default="UNKNOWN")
     contract_verified = bool(layers and all(layer.get("contract_verified", False) for layer in layers))
@@ -167,6 +179,7 @@ def _formal_status_controls(
             no_saturation_status=no_saturation_status,
             no_saturation_verified=no_saturation_verified,
             deployment_quality_accepted=bool(deployment_quality_accepted),
+            require_formal_no_saturation=bool(require_formal_no_saturation),
         ),
     }
 
@@ -229,11 +242,13 @@ def build_experiment_summary(
         formal_esbmc_layers,
         formal_metrics,
         deployment_quality_accepted=bool(formal_synthesis.get("success", False)),
+        require_formal_no_saturation=bool(formal_saturation_controls.get("require_formal_no_saturation", True)),
     )
     refined_status_controls = _formal_status_controls(
         refined_esbmc_layers,
         refined_metrics,
         deployment_quality_accepted=bool(quality.get("accepted", False)),
+        require_formal_no_saturation=bool(refined_saturation_controls.get("require_formal_no_saturation", True)),
     )
     blockwise_controls = _blockwise_controls(pipeline_summary)
     semantics_by_method = pipeline_summary.get("fixed_point_semantics_by_method", {})

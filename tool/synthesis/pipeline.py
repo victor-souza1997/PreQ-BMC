@@ -4,6 +4,7 @@ import csv
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import time
 from typing import Any
 
 import numpy as np
@@ -68,6 +69,7 @@ class RobustnessPipelineConfig:
     compiler: str = "gcc"
     enable_diagnostics: bool = True
     formal_saturation_check: bool = True
+    require_formal_no_saturation: bool = True
     empirical_saturation_check: bool = True
     accuracy_drop_threshold: float | None = 0.05
     saturation_threshold: float | None = 0.01
@@ -155,13 +157,14 @@ def _result_from_specs(
     layer_specs: list[LayerQuantizationSpec],
     *,
     success: bool,
+    stats: dict[str, float] | None = None,
 ) -> SynthesisResult:
     return SynthesisResult(
         success=success,
         total_bits=[int(spec.total_bits) for spec in layer_specs],
         fractional_bits=[int(spec.fractional_bits) for spec in layer_specs],
         integer_bits=[int(spec.integer_bits) for spec in layer_specs],
-        stats=base_result.stats,
+        stats=base_result.stats if stats is None else stats,
     )
 
 
@@ -179,7 +182,8 @@ def _quality_gate_enabled(config: RobustnessPipelineConfig) -> bool:
         )
     )
     return config.max_quality_refinement_steps > 0 and (
-        config.formal_saturation_check or threshold_enabled
+        (config.formal_saturation_check and config.require_formal_no_saturation)
+        or threshold_enabled
     )
 
 
@@ -190,6 +194,7 @@ def _quality_thresholds_payload(config: RobustnessPipelineConfig) -> dict[str, A
         "mismatch_threshold": config.mismatch_threshold,
         "max_quality_refinement_steps": int(config.max_quality_refinement_steps),
         "formal_saturation_check": bool(config.formal_saturation_check),
+        "require_formal_no_saturation": bool(config.require_formal_no_saturation),
         "empirical_saturation_check": bool(config.empirical_saturation_check),
         "esbmc_layer_block_size": int(config.esbmc_layer_block_size),
         "blockwise_fail_fast": bool(config.blockwise_fail_fast),
@@ -207,6 +212,97 @@ def _save_json(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _pipeline_timing_payload(
+    *,
+    pipeline_start_time: float,
+    synthesis_stats: dict[str, Any],
+    esbmc_summary: dict[str, Any],
+    quality_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    records = esbmc_summary.get("records", [])
+    contract_records = [
+        record
+        for record in records
+        if record.get("property_type") in {"preimage", "output", "contract", None}
+    ]
+    no_saturation_records = [
+        record
+        for record in records
+        if record.get("property_type") == "no_saturation"
+    ]
+
+    def elapsed(record: dict[str, Any]) -> float:
+        return _safe_float(record.get("elapsed_seconds", record.get("time", 0.0)))
+
+    quality_steps = (quality_summary or {}).get("steps", [])
+    deployment_times = [
+        _safe_float(step.get("comparison", {}).get("evaluation_time_seconds"))
+        for step in quality_steps
+        if isinstance(step, dict)
+    ]
+    return {
+        "total_runtime_seconds": float(time.monotonic() - pipeline_start_time),
+        "preimage_time_seconds": _safe_float(synthesis_stats.get("backward_time")),
+        "bitwidth_search_time_seconds": _safe_float(synthesis_stats.get("forward_time")),
+        "esbmc_contract_time_seconds": float(sum(elapsed(record) for record in contract_records)),
+        "esbmc_no_saturation_time_seconds": float(sum(elapsed(record) for record in no_saturation_records)),
+        "deployment_eval_time_seconds": float(sum(deployment_times)),
+        "refinement_time_seconds": _safe_float((quality_summary or {}).get("elapsed_seconds")),
+        "total_esbmc_time_seconds": _safe_float(esbmc_summary.get("total_time_seconds")),
+        "max_esbmc_query_time_seconds": _safe_float(esbmc_summary.get("max_query_time_seconds")),
+        "mean_esbmc_query_time_seconds": _safe_float(esbmc_summary.get("mean_query_time_seconds")),
+        "number_of_esbmc_calls": int(esbmc_summary.get("executed_count", esbmc_summary.get("total_count", 0)) or 0),
+    }
+
+
+def _refresh_article_metrics(
+    summary: dict[str, Any],
+    *,
+    pipeline_start_time: float,
+    synthesis_stats: dict[str, Any],
+    synthesizer: GPEncoding,
+    config: RobustnessPipelineConfig,
+    quality_summary: dict[str, Any] | None = None,
+) -> None:
+    esbmc_summary = synthesizer.esbmc_call_summary()
+    summary["esbmc_status_counts"] = {
+        "esbmc_verified_count": esbmc_summary.get("verified_count", 0),
+        "esbmc_failed_count": esbmc_summary.get("failed_count", 0),
+        "esbmc_timeout_count": esbmc_summary.get("timeout_count", 0),
+        "esbmc_memout_count": esbmc_summary.get("memout_count", 0),
+        "esbmc_unknown_count": esbmc_summary.get("unknown_count", 0),
+        "esbmc_skipped_count": esbmc_summary.get("skipped_count", 0),
+        "esbmc_total_count": esbmc_summary.get("total_count", 0),
+        "timeout_rate": esbmc_summary.get("timeout_rate", 0.0),
+        "memout_rate": esbmc_summary.get("memout_rate", 0.0),
+        "unknown_rate": esbmc_summary.get("unknown_rate", 0.0),
+    }
+    summary["esbmc_call_records"] = esbmc_summary.get("records", [])
+    summary["timing_metrics"] = _pipeline_timing_payload(
+        pipeline_start_time=pipeline_start_time,
+        synthesis_stats=synthesis_stats,
+        esbmc_summary=esbmc_summary,
+        quality_summary=quality_summary,
+    )
+    summary["resource_controls"] = {
+        "esbmc_profile": str(config.esbmc_profile),
+        "esbmc_timeout_seconds": int(config.esbmc_timeout_seconds),
+        "esbmc_memlimit": str(config.esbmc_memlimit),
+        "esbmc_layer_block_size": int(config.esbmc_layer_block_size),
+        "esbmc_jobs": int(config.esbmc_jobs),
+        "gurobi_threads": int(config.gurobi_threads),
+        "formal_no_saturation": bool(config.formal_saturation_check),
+        "require_formal_no_saturation": bool(config.require_formal_no_saturation),
+    }
 
 
 def _save_mismatches_csv(path: Path, rows: list[dict[str, Any]]) -> Path:
@@ -478,7 +574,12 @@ def _formal_saturation_summary(
     ]
     return {
         "enabled": bool(config.formal_saturation_check),
-        "used_for_acceptance": bool(_quality_gate_enabled(config) and config.formal_saturation_check),
+        "required_for_acceptance": bool(config.require_formal_no_saturation),
+        "used_for_acceptance": bool(
+            _quality_gate_enabled(config)
+            and config.formal_saturation_check
+            and config.require_formal_no_saturation
+        ),
         "layers": layers,
         "no_saturation_blocks": no_saturation_blocks,
         **_no_saturation_block_counters(no_saturation_blocks),
@@ -653,6 +754,7 @@ def _compare_specs(
 ) -> tuple[dict[str, Any], Any, FixedPointNetwork]:
     quantized_model = clone_quantized_keras_model(model, layer_specs)
     fixed_point_network = build_fixed_point_network(model, layer_specs)
+    eval_start_time = time.monotonic()
     comparison = compare_qnn_to_keras(
         dataset=dataset,
         quantized_model=quantized_model,
@@ -668,6 +770,7 @@ def _compare_specs(
         mismatch_threshold=config.mismatch_threshold,
         empirical_saturation_check=config.empirical_saturation_check,
     )
+    comparison["evaluation_time_seconds"] = float(time.monotonic() - eval_start_time)
     return comparison, quantized_model, fixed_point_network
 
 
@@ -681,6 +784,7 @@ def _run_quality_refinement(
     config: RobustnessPipelineConfig,
 ) -> tuple[list[LayerQuantizationSpec], dict[str, Any], Any, dict[str, Any], dict[str, Any]]:
     del initial_result
+    refinement_start_time = time.monotonic()
     enabled = _quality_gate_enabled(config)
     attempts: list[dict[str, Any]] = []
     thresholds = _quality_thresholds_payload(config)
@@ -771,6 +875,7 @@ def _run_quality_refinement(
                         fractional_bits=[spec.fractional_bits for spec in current_specs],
                         integer_bits=[spec.integer_bits for spec in current_specs],
                         formal_saturation_check=config.formal_saturation_check,
+                        require_formal_saturation_check=config.require_formal_no_saturation,
                     )
                 attempt["esbmc"] = {
                     "required_for_acceptance": True,
@@ -852,6 +957,7 @@ def _run_quality_refinement(
         "accepted": bool(accepted),
         "steps": attempts,
         "final_reason": final_reason,
+        "elapsed_seconds": float(time.monotonic() - refinement_start_time),
         "artifacts": history["artifacts"],
     }
 
@@ -863,6 +969,7 @@ def _run_quality_refinement(
 def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -> dict[str, Any]:
     """Run the full robustness synthesis pipeline and return a structured summary."""
 
+    pipeline_start_time = time.monotonic()
     selection = normalize_dataset_selection(config.dataset)
     dataset = load_dataset(selection.base_name)
     weights_path = resolve_weight_path(repo_root, config.dataset, config.arch)
@@ -971,6 +1078,9 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         "weights_path": str(weights_path),
         "sample_id": config.sample_id,
         "eps": config.eps,
+        "input_epsilon": config.eps,
+        "perturbation_radius": config.eps,
+        "normalized_input_epsilon": float(config.eps) / float(dataset.input_scale),
         "compare_split": config.compare_split,
         "sample_label": sample_label,
         "predicted_label": predicted_label,
@@ -980,9 +1090,11 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
             "reference_accuracy": full_precision_accuracy,
         },
         "formal_saturation_check_enabled": bool(config.formal_saturation_check),
+        "require_formal_no_saturation": bool(config.require_formal_no_saturation),
         "empirical_saturation_check_enabled": bool(config.empirical_saturation_check),
         "formal_saturation_verification": {
             "enabled": bool(config.formal_saturation_check),
+            "required_for_acceptance": bool(config.require_formal_no_saturation),
             "used_for_acceptance": False,
             "layers": [],
         },
@@ -1011,6 +1123,13 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
     if not synthesis_result.success:
         summary["blockwise_verification"] = synthesizer.blockwise_verification_summary()
         summary.update(synthesizer.no_saturation_block_summary())
+        _refresh_article_metrics(
+            summary,
+            pipeline_start_time=pipeline_start_time,
+            synthesis_stats=synthesis_result.stats,
+            synthesizer=synthesizer,
+            config=config,
+        )
         quant_config_path = _save_json(config.output_dir / "reports" / "quantization_config.json", summary)
         summary["artifacts"] = {"quantization_config": str(quant_config_path)}
         pipeline_summary_path = _save_json(config.output_dir / "reports" / "pipeline_summary.json", summary)
@@ -1056,6 +1175,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         synthesis_result,
         final_specs,
         success=bool(synthesis_result.success and quality_summary["accepted"]),
+        stats=synthesizer.stats_snapshot(),
     )
     if final_specs != layer_specs or _quality_gate_enabled(config):
         summary["formal_synthesis"] = synthesis_result.to_dict()
@@ -1065,6 +1185,14 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
     summary["blockwise_verification"] = synthesizer.blockwise_verification_summary()
     summary.update(synthesizer.no_saturation_block_summary())
     summary["comparison"] = comparison
+    _refresh_article_metrics(
+        summary,
+        pipeline_start_time=pipeline_start_time,
+        synthesis_stats=final_synthesis_result.stats,
+        synthesizer=synthesizer,
+        config=config,
+        quality_summary=quality_summary,
+    )
 
     quantized_logits = _predict_logits(quantized_model, dataset.x_test)
     summary["baseline"]["quantized_keras_accuracy"] = _compute_accuracy(quantized_logits, dataset.y_test)

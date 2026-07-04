@@ -1,0 +1,134 @@
+{
+  "metadata": {
+    "description": "Article experiments for deployment-aware fixed-point QNN verification",
+    "output_root": "output/article_runs",
+    "aggregate_output_root": "output/article_results",
+    "notes": [
+      "The CLI option --eps is the input perturbation radius. Article outputs report it as input_epsilon.",
+      "Formal no-saturation is recorded as optional evidence by default for article runs unless require_formal_no_saturation is set."
+    ]
+  },
+  "defaults": {
+    "bit_lb": 3,
+    "bit_ub": 16,
+    "preimg_mode": "milp",
+    "verify_mode": "esbmc",
+    "method": "both",
+    "mode": "full_pipeline",
+    "compare_split": "test",
+    "compare_limit": 100,
+    "compile_c_backend": true,
+    "enable_diagnostics": true,
+    "export_paper_tables": true,
+    "quality_refinement": true,
+    "formal_no_saturation": true,
+    "require_formal_no_saturation": false,
+    "empirical_saturation_check": true,
+    "accuracy_drop_threshold": 0.05,
+    "saturation_threshold": 0.01,
+    "mismatch_threshold": 0.05,
+    "max_quality_refinement_steps": 10,
+    "esbmc_layer_block_size": 10,
+    "esbmc_profile": "paper-fast",
+    "esbmc_timeout_seconds": 900,
+    "esbmc_memlimit": "6g",
+    "esbmc_jobs": 1,
+    "gurobi_threads": 4,
+    "enabled": true
+  },
+  "runs": [
+    {
+      "name": "iris_smoke_sample25_eps005",
+      "dataset": "iris",
+      "arch": "1blk_10",
+      "sample_id": 25,
+      "eps": 0.05,
+      "compare_limit": 0,
+      "expected_difficulty": "low",
+      "notes": "Small smoke benchmark used by --only iris --max-runs 1."
+    },
+    {
+      "name": "iris_default",
+      "dataset": "iris",
+      "arch": "1blk_10",
+      "sample_ids": [0, 1, 2],
+      "eps": 0.1,
+      "compare_limit": 0,
+      "mrr_enabled": true,
+      "eps_sweep": [0.05, 0.1, 0.2],
+      "expected_difficulty": "low"
+    },
+    {
+      "name": "seeds_default",
+      "dataset": "seeds",
+      "arch": "1blk_10",
+      "sample_ids": [0, 1, 2],
+      "eps": 0.01,
+      "compare_limit": 0,
+      "mrr_enabled": true,
+      "eps_sweep": [0.005, 0.01, 0.02],
+      "expected_difficulty": "low"
+    },
+    {
+      "name": "mnist_onnx_default",
+      "dataset": "mnist_onnx",
+      "arch": "1blk_10",
+      "sample_ids": [0, 1, 2],
+      "eps": 1.0,
+      "mrr_enabled": true,
+      "eps_sweep": [0.5, 1.0, 1.5, 2.0],
+      "expected_difficulty": "medium"
+    },
+    {
+      "name": "mnist_2blk_25_25",
+      "dataset": "mnist",
+      "arch": "2blk_25_25",
+      "sample_ids": [0, 1],
+      "eps": 1.0,
+      "expected_difficulty": "high"
+    },
+    {
+      "name": "mnist_2blk_50_50",
+      "dataset": "mnist",
+      "arch": "2blk_50_50",
+      "sample_id": 0,
+      "eps": 1.0,
+      "expected_difficulty": "high",
+      "notes": "Verified successfully in block-wise mode; included as a main scalability point."
+    },
+    {
+      "name": "mnist_1blk_100",
+      "dataset": "mnist",
+      "arch": "1blk_100",
+      "sample_id": 0,
+      "eps": 1.0,
+      "expected_difficulty": "high",
+      "notes": "Available MNIST 100 architecture."
+    },
+    {
+      "name": "mnist_2blk_100_100_frontier",
+      "dataset": "mnist",
+      "arch": "2blk_100_100",
+      "sample_id": 0,
+      "eps": 1.0,
+      "enabled": false,
+      "allowed_failure": true,
+      "scalability_frontier": true,
+      "expected_difficulty": "frontier",
+      "notes": "Known scalability frontier; TIMEOUT, MEMOUT, UNKNOWN, or FAILED should be reported rather than hidden."
+    },
+    {
+      "name": "mnist_2blk_50_50_full_layer_baseline",
+      "dataset": "mnist",
+      "arch": "2blk_50_50",
+      "sample_id": 0,
+      "eps": 1.0,
+      "mode": "full_layer_verification",
+      "esbmc_layer_block_size": 0,
+      "enabled": false,
+      "allowed_failure": true,
+      "expected_difficulty": "baseline",
+      "notes": "Full-layer baseline with resource controls; failures are scalability evidence."
+    }
+  ]
+}

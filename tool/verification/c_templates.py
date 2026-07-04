@@ -155,12 +155,12 @@ static void check_affine_bounds_fixed(const long long in_[INPUT_SIZE])
             ? pre_hi_i - pre_lo_i
             : pre_lo_i - pre_hi_i;
 
-        __int128 eps = (__int128)abs_tol
+        __int128 preimage_tolerance = (__int128)abs_tol
             + ((__int128)rel_tol_num * range) / (__int128)rel_tol_den;
 
         __ESBMC_assert(
-            out_lb >= pre_lo_i - eps &&
-            out_ub <= pre_hi_i + eps,
+            out_lb >= pre_lo_i - preimage_tolerance &&
+            out_ub <= pre_hi_i + preimage_tolerance,
             "affine bounds not within tolerated preimage"
         );
         int j = 0;
@@ -193,7 +193,7 @@ static void check_affine_bounds_fixed(const long long in_[INPUT_SIZE])
         s_ub  = (s_ub  / SCALE_FACTOR) + biases[i];
 
         /* verifica se a saida esta dentro da preimagem esperada */
-        __ESBMC_assert(s_out >= pre_lo - eps && s_out <= pre_hi + eps,
+        __ESBMC_assert(s_out >= pre_lo - preimage_tolerance && s_out <= pre_hi + preimage_tolerance,
                        "affine output not within tolerated preimage");
     }}
 }}
@@ -377,7 +377,7 @@ static void check_affine_bounds_fixed_bounds_only(void)
         __ESBMC_assert(pre_lo <= pre_hi, "invalid preimage interval");
 
         const __int128 range = abs_i128(pre_hi - pre_lo);
-        const __int128 eps = abs_tol + (rel_tol_num * range) / rel_tol_den;
+        const __int128 preimage_tolerance = abs_tol + (rel_tol_num * range) / rel_tol_den;
 
         for (int j = 0; j < INPUT_SIZE; ++j)
         {{
@@ -412,8 +412,8 @@ static void check_affine_bounds_fixed_bounds_only(void)
 
         apply_activation_bounds(&out_lb, &out_ub);
 
-        const __int128 accepted_low = pre_lo - eps;
-        const __int128 accepted_high = pre_hi + eps;
+        const __int128 accepted_low = pre_lo - preimage_tolerance;
+        const __int128 accepted_high = pre_hi + preimage_tolerance;
 
         __ESBMC_assert(
             out_lb >= accepted_low && out_ub <= accepted_high,
