@@ -1,6 +1,6 @@
 """Compatibility wrapper for the legacy robustness encoding module."""
 
-from synthesis.quadapter import (
+from tool.synthesis.preqbmc import (
     GPEncoding,
     LayerEncoding,
     QuadapterConfig,
@@ -15,7 +15,7 @@ __all__ = [
     "QuadapterRobustnessSynthesizer",
     "SynthesisResult",
 ]
-from symbolic_pp.DeepPoly_quadapter import *
+from tool.symbolic_pp.DeepPoly_preqbmc import *
 from tool.utils.preqbmc_utils import *
 
 import math

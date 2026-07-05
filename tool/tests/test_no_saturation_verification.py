@@ -8,7 +8,7 @@ import unittest
 
 import numpy as np
 
-from synthesis.quadapter import GPEncoding
+from tool.synthesis.preqbmc import GPEncoding
 from verification.c_templates import (
     render_clamp_correctness_program,
     render_hidden_affine_bounds_block_program,

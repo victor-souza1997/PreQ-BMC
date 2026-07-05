@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from symbolic_pp.DeepPoly_quadapter import DP_DNN_network
+from tool.symbolic_pp.DeepPoly_preqbmc import DP_DNN_network
 from synthesis.preimage_cache import load_preimage_cache, save_preimage_cache
 from utils.fixed_point import int_get_min_max, quantize_int
 from utils.logging_utils import get_logger

@@ -1,7 +1,7 @@
 import argparse
 from utils.deep_models import *
-from utils.quadapter_encoding_backdoor import *
-from utils.quadapter_utils import *
+from tool.utils.preqbmc_encoding_backdoor import *
+from tool.utils.preqbmc_utils import *
 from gurobipy import GRB
 import gurobipy as gp
 import random

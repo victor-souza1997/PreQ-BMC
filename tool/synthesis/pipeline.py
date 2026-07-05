@@ -39,7 +39,7 @@ from reports.resource_metrics import compute_fixed_point_resource_metrics
 from reports.table_export import export_paper_tables
 from synthesis.forward import forward_dnn
 from synthesis.preimage_cache import build_preimage_cache_identity
-from synthesis.quadapter import GPEncoding, QuadapterConfig, SynthesisResult
+from tool.synthesis.preqbmc import GPEncoding, QuadapterConfig, SynthesisResult
 from utils.logging_utils import get_logger
 from verification.esbmc import ESBMCConfig, ESBMCProfile
 from verification.properties import ClassificationProperty

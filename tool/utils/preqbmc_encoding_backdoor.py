@@ -1,5 +1,5 @@
-from symbolic_pp.DeepPoly_quadapter import *
-from utils.quadapter_utils import *
+from tool.symbolic_pp.DeepPoly_preqbmc import *
+from tool.utils.preqbmc_utils import *
 
 import math
 from gurobipy import GRB

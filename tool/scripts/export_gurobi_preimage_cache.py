@@ -21,7 +21,7 @@ from models.loading import (
 )
 from synthesis.forward import forward_dnn
 from synthesis.preimage_cache import build_preimage_cache_identity
-from synthesis.quadapter import GPEncoding, QuadapterConfig
+from tool.synthesis.preqbmc import GPEncoding, QuadapterConfig
 from utils.logging_utils import configure_logging, get_logger
 from verification.properties import ClassificationProperty
 
