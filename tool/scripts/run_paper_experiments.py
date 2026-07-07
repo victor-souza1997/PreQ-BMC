@@ -24,6 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--aggregate", action="store_true", help="Run aggregate_paper_results.py after experiments.")
     parser.add_argument("--plots", action="store_true", help="Run plot_paper_results.py after aggregation.")
     parser.add_argument("--python-executable", default=sys.executable)
+    parser.add_argument("--solver", choices=["cbc", "gurobi"], default="gurobi")
     parser.add_argument(
         "--discover-benchmarks",
         action="store_true",
@@ -119,6 +120,7 @@ def _build_pipeline_command(
     run: dict[str, Any],
     output_dir: Path,
     supported_flags: set[str],
+    default_solver: str = "cbc",
 ) -> list[str]:
     script = _tool_root() / "scripts" / "run_robustness_pipeline.py"
     command = [
@@ -140,6 +142,8 @@ def _build_pipeline_command(
         str(run.get("preimg_mode", "milp")),
         "--verify-mode",
         str(run.get("verify_mode", "esbmc")),
+        "--solver",
+        str(run.get("solver", default_solver)),
         "--output-dir",
         str(output_dir),
         "--compare-split",
@@ -415,6 +419,7 @@ def main(argv: list[str] | None = None) -> None:
             run=run,
             output_dir=output_dir,
             supported_flags=supported_flags,
+            default_solver=args.solver,
         )
         print(_command_text(command))
         executed += 1

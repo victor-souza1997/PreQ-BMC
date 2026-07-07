@@ -3,9 +3,9 @@
 ## Minimal Requirements
 
 - Python 3.10 or newer.
-- `pip install -e .` from the repository root.
+- `pip install -e '.[cbc]'` from the repository root for the default CBC MILP backend.
 - ESBMC on `PATH` for verification runs.
-- Optional: Gurobi and `gurobipy` for full MILP preimage synthesis.
+- Optional: Gurobi and `gurobipy` for `--solver gurobi` reference runs.
 - Optional: `matplotlib` and `pandas` for plots and table analysis.
 
 The cached demo is intended to run without Gurobi.
@@ -16,7 +16,7 @@ The cached demo is intended to run without Gurobi.
 preqbmc verify-environment
 ```
 
-This command reports Python, ESBMC, Gurobi, and Python package availability. Missing Gurobi is not fatal for cached runs.
+This command reports Python, ESBMC, CBC/python-mip, optional Gurobi, and Python package availability. Missing Gurobi is not fatal unless `--solver gurobi` is selected.
 
 ## Quickstart Demo
 
@@ -38,9 +38,13 @@ Expected outputs:
 
 Expected runtime depends on ESBMC and host CPU, but the cached Iris example is intended to be a small artifact smoke test rather than a full paper reproduction.
 
+## Commands Requiring A MILP Solver
+
+- Full MILP preimage synthesis without `--no-gurobi` uses CBC by default or Gurobi with `--solver gurobi`.
+
 ## Commands Requiring Gurobi
 
-- Full MILP preimage synthesis without `--no-gurobi`.
+- Reference MILP runs with `--solver gurobi`.
 - Preimage cache generation with `tool/scripts/export_gurobi_preimage_cache.py`.
 
 ## Commands Requiring ESBMC

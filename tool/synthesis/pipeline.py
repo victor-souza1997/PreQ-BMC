@@ -39,7 +39,8 @@ from reports.resource_metrics import compute_fixed_point_resource_metrics
 from reports.table_export import export_paper_tables
 from synthesis.forward import forward_dnn
 from synthesis.preimage_cache import build_preimage_cache_identity
-from tool.synthesis.preqbmc import GPEncoding, QuadapterConfig, SynthesisResult
+from synthesis.preqbmc import GPEncoding, QuadapterConfig, SynthesisResult
+from synthesis.solver_backend import SolverBackendName
 from utils.logging_utils import get_logger
 from verification.esbmc import ESBMCConfig, ESBMCProfile
 from verification.properties import ClassificationProperty
@@ -79,6 +80,7 @@ class RobustnessPipelineConfig:
     save_preimage_cache: bool = False
     preimage_cache_dir: Path | None = None
     preimage_cache_key: str | None = None
+    solver: SolverBackendName = "cbc"
     esbmc_layer_block_size: int = 10
     blockwise_fail_fast: bool = True
     blockwise_run_all_blocks_on_failure: bool = False
@@ -204,6 +206,7 @@ def _quality_thresholds_payload(config: RobustnessPipelineConfig) -> dict[str, A
         "esbmc_memlimit": str(config.esbmc_memlimit),
         "esbmc_profile": str(config.esbmc_profile),
         "esbmc_timeout_seconds": int(config.esbmc_timeout_seconds),
+        "solver": str(config.solver),
         "gurobi_threads": int(config.gurobi_threads),
     }
 
@@ -294,6 +297,7 @@ def _refresh_article_metrics(
         quality_summary=quality_summary,
     )
     summary["resource_controls"] = {
+        "solver": str(config.solver),
         "esbmc_profile": str(config.esbmc_profile),
         "esbmc_timeout_seconds": int(config.esbmc_timeout_seconds),
         "esbmc_memlimit": str(config.esbmc_memlimit),
@@ -1048,6 +1052,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         blockwise_run_all_blocks_on_failure=bool(config.blockwise_run_all_blocks_on_failure),
         no_saturation_continue_on_unknown=bool(config.no_saturation_continue_on_unknown),
         esbmc_jobs=max(1, int(config.esbmc_jobs)),
+        solver=config.solver,
         gurobi_threads=max(1, int(config.gurobi_threads)),
         esbmc=ESBMCConfig(
             timeout_seconds=max(1, int(config.esbmc_timeout_seconds)),
@@ -1082,6 +1087,8 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         "perturbation_radius": config.eps,
         "normalized_input_epsilon": float(config.eps) / float(dataset.input_scale),
         "compare_split": config.compare_split,
+        "solver": str(config.solver),
+        "cached_preimage": bool(config.no_gurobi),
         "sample_label": sample_label,
         "predicted_label": predicted_label,
         "sample_logits": sample_logits.tolist(),

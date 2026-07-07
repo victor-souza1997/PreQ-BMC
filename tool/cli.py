@@ -54,7 +54,8 @@ def _python_package_report() -> list[dict[str, Any]]:
         ("pandas", "optional for result analysis"),
         ("torch", "optional for legacy conversion utilities"),
         ("onnx", "optional for ONNX conversion utilities"),
-        ("gurobipy", "optional; required for full MILP preimage synthesis"),
+        ("mip", "optional; provides the default CBC MILP backend"),
+        ("gurobipy", "optional; provides the Gurobi reference MILP backend"),
     ]
     return [
         {
@@ -68,6 +69,7 @@ def _python_package_report() -> list[dict[str, Any]]:
 
 def _print_environment_report() -> dict[str, Any]:
     esbmc = shutil.which("esbmc")
+    cbc_available = _module_available("mip")
     gurobi_available = _module_available("gurobipy")
     packages = _python_package_report()
     report = {
@@ -76,14 +78,17 @@ def _print_environment_report() -> dict[str, Any]:
         "python_ok": sys.version_info >= (3, 10),
         "esbmc_path": esbmc,
         "esbmc_available": esbmc is not None,
+        "cbc_available": cbc_available,
         "gurobipy_available": gurobi_available,
         "packages": packages,
     }
     print(json.dumps(report, indent=2))
     if esbmc is None:
         print("\nESBMC was not found on PATH. Install ESBMC and ensure `esbmc --version` works.")
+    if not cbc_available:
+        print("\nCBC/python-mip is the default license-free MILP backend. Install it with `pip install -e '.[cbc]'`.")
     if not gurobi_available:
-        print("\nGurobi/gurobipy is optional for cached demos, but full MILP preimage synthesis requires it.")
+        print("\nGurobi/gurobipy is optional and only needed for `--solver gurobi` reference runs.")
     missing_demo = [
         item["module"]
         for item in packages
@@ -93,7 +98,7 @@ def _print_environment_report() -> dict[str, Any]:
         print(
             "\nMissing packages for the full demo/pipeline: "
             + ", ".join(missing_demo)
-            + ". Install with `pip install -e '.[full]'` in an environment with the required solver licenses."
+            + ". Install with `pip install -e '.[full]'`; Gurobi licensing is only needed for `--solver gurobi`."
         )
     return report
 
@@ -122,11 +127,14 @@ def _demo_required_modules_available() -> tuple[bool, list[str]]:
 
 def cmd_demo(args: argparse.Namespace, extra: list[str]) -> int:
     esbmc = shutil.which("esbmc")
+    cbc_available = _module_available("mip")
     gurobi_available = _module_available("gurobipy")
     cache_dir = Path(args.preimage_cache_dir)
     output_dir = Path(args.output)
     print(f"ESBMC: {esbmc or 'not found'}", flush=True)
+    print(f"CBC/python-mip: {'available' if cbc_available else 'not available'}", flush=True)
     print(f"Gurobi/gurobipy: {'available' if gurobi_available else 'not available'}", flush=True)
+    print(f"MILP solver: {args.solver}", flush=True)
     print(f"no-gurobi mode: {bool(args.no_gurobi)}", flush=True)
     if args.no_gurobi:
         print(f"preimage cache: {cache_dir}", flush=True)
@@ -166,6 +174,8 @@ def cmd_demo(args: argparse.Namespace, extra: list[str]) -> int:
         args.preimage_mode,
         "--verify-mode",
         "esbmc",
+        "--solver",
+        args.solver,
         "--compare-limit",
         str(args.compare_limit),
         "--output-dir",
@@ -210,6 +220,8 @@ def cmd_reproduce(args: argparse.Namespace, extra: list[str]) -> int:
         str(_script_path("run_article_experiments.py")),
         "--config",
         str(args.config),
+        "--solver",
+        args.solver,
     ]
     for value in args.only or []:
         command.extend(["--only", value])
@@ -265,7 +277,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     demo = subparsers.add_parser("demo", help="Run a small Iris artifact demo.")
     demo.add_argument("--output", type=Path, default=Path("output/demo_run"))
-    demo.add_argument("--no-gurobi", action="store_true", help="Use cached preimage contracts instead of Gurobi.")
+    demo.add_argument("--solver", default="cbc", choices=["cbc", "gurobi"])
+    demo.add_argument("--no-gurobi", action="store_true", help="Use cached preimage contracts instead of solving the preimage MILP.")
     demo.add_argument("--preimage-cache-dir", type=Path, default=_default_cache_dir())
     demo.add_argument("--preimage-cache-key", default=DEMO_CACHE_KEY)
     demo.add_argument("--dataset", default=DEMO_DATASET)
@@ -280,6 +293,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     reproduce = subparsers.add_parser("reproduce", help="Run article experiment configurations.")
     reproduce.add_argument("--config", type=Path, default=Path("experiments/article_experiments.json"))
+    reproduce.add_argument("--solver", default="cbc", choices=["cbc", "gurobi"])
     reproduce.add_argument("--only", action="append", default=[])
     reproduce.add_argument("--max-runs", type=int, default=None)
     reproduce.add_argument("--output-root", type=Path, default=None)

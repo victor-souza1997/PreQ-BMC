@@ -17,6 +17,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cbc = [
+  "mip"
+]
 gurobi = [
   "gurobipy"
 ]
@@ -35,6 +38,7 @@ full = [
   "scikit-learn",
   "matplotlib",
   "pandas",
+  "mip",
   "gurobipy"
 ]
 
@@ -54,6 +58,7 @@ include = [
   "models*",
   "reports*",
   "scripts*",
+  "symbolic_pp*",
   "synthesis*",
   "utils*",
   "verification*"

@@ -33,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--esbmc-memlimit", default="6g")
     parser.add_argument("--esbmc-layer-block-size", type=int, default=10)
     parser.add_argument("--esbmc-jobs", type=int, default=1)
+    parser.add_argument("--solver", choices=["cbc", "gurobi"], default="gurobi")
     parser.add_argument("--gurobi-threads", type=int, default=4)
     parser.add_argument("--esbmc-generate-smt-formula", action="store_true")
     parser.add_argument("--mrr-mode", choices=["none", "discrete", "binary"], default=None)
@@ -193,6 +194,7 @@ def _runtime_metadata(args: argparse.Namespace, run: dict[str, Any], command: li
         "timeout": int(run.get("esbmc_timeout_seconds", args.esbmc_timeout_seconds)),
         "memlimit": str(run.get("esbmc_memlimit", args.esbmc_memlimit)),
         "block_size": int(run.get("esbmc_layer_block_size", args.esbmc_layer_block_size)),
+        "solver": str(run.get("solver", args.solver)),
         "gurobi_threads": int(run.get("gurobi_threads", args.gurobi_threads)),
         "esbmc_jobs": int(run.get("esbmc_jobs", args.esbmc_jobs)),
         "dataset": run.get("dataset"),
@@ -294,6 +296,8 @@ def _build_pipeline_command(
         str(run.get("preimg_mode", "milp")),
         "--verify-mode",
         str(run.get("verify_mode", "esbmc")),
+        "--solver",
+        str(run.get("solver", args.solver)),
         "--output-dir",
         str(output_dir),
         "--compare-split",

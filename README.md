@@ -17,7 +17,7 @@ The repository contains the research prototype used for the article experiments 
 
 PreQ-BMC currently targets the supported benchmark subset in this repository: fixed-point affine/ReLU MLP-style networks loaded from the provided benchmark weights. The formal pipeline verifies the existing generated ESBMC harnesses and fixed-point contracts; this artifact preparation does not change the mathematical verification semantics.
 
-Full end-to-end MILP-based preimage synthesis requires a valid Gurobi license. For artifact evaluation, we provide cached preimage contracts for small examples so that reviewers can run harness generation, ESBMC verification, and diagnostics without Gurobi.
+Full end-to-end MILP-based preimage synthesis uses CBC through `python-mip` by default. Gurobi remains supported as an optional reference backend via `--solver gurobi`. For artifact evaluation, we also provide cached preimage contracts for small examples so that reviewers can run harness generation, ESBMC verification, and diagnostics without solving the preimage MILP.
 
 Deployment C export already exists for runs with the C backend enabled. The pipeline writes it under:
 
@@ -55,6 +55,7 @@ Optional solver and plotting groups are also available:
 
 ```bash
 pip install -e '.[gurobi]'
+pip install -e '.[cbc]'
 pip install -e '.[plots]'
 ```
 
@@ -64,7 +65,7 @@ Install ESBMC separately and ensure it is on `PATH`:
 esbmc --version
 ```
 
-Configure Gurobi only if you will run full MILP preimage synthesis.
+Install CBC with `pip install -e '.[cbc]'` for the default license-free MILP backend. Configure Gurobi only if you will run reference checks with `--solver gurobi`.
 
 ## Verify the Environment
 
@@ -72,9 +73,9 @@ Configure Gurobi only if you will run full MILP preimage synthesis.
 preqbmc verify-environment
 ```
 
-This command reports Python version, ESBMC availability, optional Gurobi availability, and Python package availability. Missing Gurobi is reported as optional for cached demos.
+This command reports Python version, ESBMC availability, CBC/python-mip availability, optional Gurobi availability, and Python package availability.
 
-## Quickstart Without Gurobi
+## Quickstart With Cached Preimage
 
 Run the cached Iris demo:
 
@@ -93,12 +94,12 @@ output/demo_run/c_export/qnn_model.c
 
 If ESBMC is not installed, the command stops before running the pipeline and prints installation guidance.
 
-## Full Synthesis With Gurobi
+## Full Synthesis With CBC Or Gurobi
 
-With ESBMC and Gurobi configured, run the same small example end to end:
+With ESBMC and CBC/python-mip installed, run the same small example end to end:
 
 ```bash
-preqbmc demo --output output/demo_run_gurobi
+preqbmc demo --output output/demo_run_cbc
 ```
 
 Or call the existing pipeline directly:
@@ -111,8 +112,11 @@ python tool/scripts/run_robustness_pipeline.py \
   --eps 0.05 \
   --preimage-mode milp \
   --verify-mode esbmc \
+  --solver cbc \
   --output-dir output/iris_full
 ```
+
+For a Gurobi reference run, add `--solver gurobi` and ensure `gurobipy` plus a valid license are configured.
 
 ## Reproducing Article Experiments
 
@@ -182,6 +186,7 @@ Start with [docs/artifact_evaluation.md](docs/artifact_evaluation.md). It lists 
 - [docs/artifact_evaluation.md](docs/artifact_evaluation.md)
 - [docs/metrics.md](docs/metrics.md)
 - [docs/reproducing_article_results.md](docs/reproducing_article_results.md)
+- [docs/solver_backends.md](docs/solver_backends.md)
 - [docs/gurobi_and_esbmc.md](docs/gurobi_and_esbmc.md)
 
 ## Citation

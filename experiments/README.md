@@ -16,6 +16,8 @@ python tool/scripts/run_paper_experiments.py \
 
 This runs the robustness pipeline for each enabled entry, then aggregates CSV/JSON/LaTeX outputs and generates figures.
 
+The active robustness pipeline uses CBC by default. Add `--solver gurobi` for licensed Gurobi reference runs.
+
 ## Dry Run
 
 ```bash

@@ -21,7 +21,7 @@ from models.loading import (
 )
 from synthesis.forward import forward_dnn
 from synthesis.preimage_cache import build_preimage_cache_identity
-from tool.synthesis.preqbmc import GPEncoding, QuadapterConfig
+from synthesis.preqbmc import GPEncoding, QuadapterConfig
 from utils.logging_utils import configure_logging, get_logger
 from verification.properties import ClassificationProperty
 
@@ -180,6 +180,7 @@ def export_one(
         preimage_cache_dir=cache_dir,
         preimage_cache_key=cache_key,
         preimage_cache_metadata=cache_metadata,
+        solver="gurobi",
     )
     synthesizer = GPEncoding(
         arch=[input_dim] + layer_units,

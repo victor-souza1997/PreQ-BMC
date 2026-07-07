@@ -10,8 +10,10 @@ from typing import Any
 
 import numpy as np
 
-from tool.symbolic_pp.DeepPoly_preqbmc import DP_DNN_network
+from symbolic_pp.DeepPoly_preqbmc import DP_DNN_network
 from synthesis.preimage_cache import load_preimage_cache, save_preimage_cache
+from synthesis.solver_backend import BackendConstants as GRB
+from synthesis.solver_backend import SolverBackendName, build_model
 from utils.fixed_point import int_get_min_max, quantize_int
 from utils.logging_utils import get_logger
 from verification.c_templates import (
@@ -26,23 +28,6 @@ from verification.esbmc import ESBMCConfig, ESBMCRunner, ESBMCResult
 from verification.properties import ClassificationProperty
 
 LOGGER = get_logger(__name__)
-
-try:
-    import gurobipy as gp
-    from gurobipy import GRB
-except ImportError:  # pragma: no cover - depends on host licensing/install.
-    gp = None  # type: ignore[assignment]
-    GRB = None  # type: ignore[assignment]
-
-
-def _require_gurobi() -> None:
-    if gp is None or GRB is None:
-        raise RuntimeError(
-            "gurobipy is required for this pipeline mode. "
-            "Use --no-gurobi with --verify-mode esbmc and a preimage cache, "
-            "or install/configure Gurobi."
-        )
-
 
 def _export_integer_bits(internal_integer_bits: int) -> int:
     """Convert Quadapter's internal sign-inclusive integer width to exported magnitude bits."""
@@ -74,9 +59,13 @@ class QuadapterConfig:
     no_saturation_continue_on_unknown: bool = False
     esbmc_jobs: int = 1
     gurobi_threads: int = 4
+    solver: SolverBackendName = "cbc"
 
     @classmethod
     def from_namespace(cls, args: Any) -> "QuadapterConfig":
+        solver = str(getattr(args, "solver", "cbc")).lower()
+        if solver not in {"cbc", "gurobi"}:
+            raise ValueError(f"Unsupported solver backend: {solver!r}. Expected 'cbc' or 'gurobi'.")
         return cls(
             bit_lb=int(args.bit_lb),
             bit_ub=int(args.bit_ub),
@@ -107,6 +96,7 @@ class QuadapterConfig:
             no_saturation_continue_on_unknown=bool(getattr(args, "no_saturation_continue_on_unknown", False)),
             esbmc_jobs=max(1, int(getattr(args, "esbmc_jobs", 1))),
             gurobi_threads=max(1, int(getattr(args, "gurobi_threads", 4))),
+            solver=solver,  # type: ignore[arg-type]
         )
 
 
@@ -131,7 +121,7 @@ class SynthesisResult:
 
 
 class LayerEncoding:
-    """Per-layer state used by the Gurobi/DeepPoly synthesis algorithm."""
+    """Per-layer state used by the MILP/DeepPoly synthesis algorithm."""
 
     def __init__(
         self,
@@ -195,7 +185,6 @@ class LayerEncoding:
         if gp_model is None:
             return
 
-        _require_gurobi()
         neuron_lb_after = 0 if if_hid else -GRB.MAXINT
         neuron_lb_before = -GRB.MAXINT
 
@@ -253,6 +242,7 @@ class GPEncoding:
         self.bit_ub = self.config.bit_ub
         self.preimg_mode = self.config.preimg_mode
         self.verify_mode = self.config.verify_mode
+        self.solver: SolverBackendName = self.config.solver
         self.x_low_real = x_low_real
         self.x_high_real = x_high_real
         self.sample_id = self.config.sample_id
@@ -272,16 +262,18 @@ class GPEncoding:
         self.blockwise_skipped_blocks_due_to_fail_fast = 0
         self.blockwise_first_failed_block: dict[str, Any] | None = None
 
-        if self.config.no_gurobi and self.verify_mode != "esbmc":
-            raise ValueError("--no-gurobi requires --verify-mode esbmc because MILP forward verification uses Gurobi.")
-
-        if self.config.no_gurobi:
+        needs_milp_model = (not self.config.no_gurobi) or self.verify_mode == "milp"
+        if not needs_milp_model:
             self.gp_model = None
         else:
-            _require_gurobi()
-            self.gp_model = gp.Model("gp_encoding")
-            self.gp_model.Params.IntFeasTol = 1e-9
-            self.gp_model.Params.FeasibilityTol = self.tole
+            self.gp_model = build_model(
+                self.solver,
+                "gp_encoding",
+                threads=max(1, int(self.config.gurobi_threads)),
+                output_flag=0,
+            )
+            self.gp_model.setParam("IntFeasTol", 1e-9)
+            self.gp_model.setParam("FeasibilityTol", self.tole)
             self.gp_model.setParam(GRB.Param.Threads, max(1, int(self.config.gurobi_threads)))
             self.gp_model.setParam(GRB.Param.OutputFlag, 0)
 
@@ -356,6 +348,42 @@ class GPEncoding:
             x_ub = x_high_real[input_index]
             if self.gp_model is not None:
                 self.input_gp_vars.append(self.gp_model.addVar(lb=x_lb, ub=x_ub, vtype=GRB.CONTINUOUS))
+
+    @staticmethod
+    def _linear_combination(coefficients: Any, variables: list[Any], constant: Any = 0.0) -> Any:
+        if isinstance(constant, np.ndarray) and constant.shape == ():
+            expr: Any = constant.item()
+        elif isinstance(constant, np.generic):
+            expr = constant.item()
+        else:
+            expr = constant
+        for coefficient, variable in zip(np.asarray(coefficients, dtype=np.float64).ravel(), variables):
+            coeff = float(coefficient)
+            if coeff != 0.0:
+                expr = expr + coeff * variable
+        return expr
+
+    @staticmethod
+    def _interval_linear_combination(
+        coefficients: Any,
+        variable_bounds: list[tuple[float, float]],
+        constant: float = 0.0,
+    ) -> tuple[float, float]:
+        lower = float(constant)
+        upper = float(constant)
+        for coefficient, (var_lb, var_ub) in zip(np.asarray(coefficients, dtype=np.float64).ravel(), variable_bounds):
+            coeff = float(coefficient)
+            if coeff >= 0:
+                lower += coeff * float(var_lb)
+                upper += coeff * float(var_ub)
+            else:
+                lower += coeff * float(var_ub)
+                upper += coeff * float(var_lb)
+        return lower, upper
+
+    @staticmethod
+    def _pre_relu_bounds(neuron_lb: float, neuron_ub: float, alpha_k: float, beta_k: float, relax_ub: float) -> tuple[float, float]:
+        return float(neuron_lb - alpha_k * relax_ub), float(neuron_ub + beta_k * relax_ub)
 
     def verified_quant(self, lb: np.ndarray, ub: np.ndarray) -> tuple[bool, Any, Any, Any]:
         result = self.run(lb, ub)
@@ -465,7 +493,7 @@ class GPEncoding:
             scale_values=np.asarray(self.scaleValueSet, dtype=np.float64),
             metadata=self.config.preimage_cache_metadata or {},
         )
-        LOGGER.info("Saved Gurobi preimage cache to %s", cache_path)
+        LOGGER.info("Saved MILP preimage cache to %s", cache_path)
         return cache_path
 
     def load_cached_preimage(self) -> None:
@@ -494,11 +522,11 @@ class GPEncoding:
             layer.relaxed_ub = arrays[f"relaxed_ub_{offset}"].astype(np.float32)
 
         self.scaleValueSet = arrays["scale_values"].astype(np.float64).tolist()
-        LOGGER.info("Loaded Gurobi preimage cache %s (%s)", self._preimage_cache_key(), metadata.get("format"))
+        LOGGER.info("Loaded MILP preimage cache %s (%s)", self._preimage_cache_key(), metadata.get("format"))
 
     def backward_preimage_computation(self) -> None:
         if self.gp_model is None:
-            raise RuntimeError("Cannot compute a preimage without Gurobi. Use load_cached_preimage() instead.")
+            raise RuntimeError("Cannot compute a MILP preimage without a solver model. Use load_cached_preimage() instead.")
         cur_layer = self.output_layer
         in_layer_index = len(self.dense_layers)
         for in_layer in reversed(self.dense_layers):
@@ -520,6 +548,7 @@ class GPEncoding:
         b = cur_layer.layer_paras[1]
         relaxScale = self.gp_model.addVar(lb=0, ub=100, vtype=GRB.CONTINUOUS)
         relaxScale_LL = [relaxScale]
+        relu_after_bounds: list[tuple[float, float]] = []
 
         for in_index in range(in_layer.layer_size):
             neuron_val = in_layer.realVal[in_index]
@@ -547,19 +576,28 @@ class GPEncoding:
             relaxed_lb_bias = in_lb_algebra[-1] - in_layer.alpha[in_index]
             relaxed_ub_bias = in_ub_algebra[-1] + in_layer.beta[in_index]
 
-            symbolic_lb_expression = np.dot(in_lb_algebra[:-1], self.input_gp_vars) + relaxed_lb_bias
-            symbolic_ub_expression = np.dot(in_ub_algebra[:-1], self.input_gp_vars) + relaxed_ub_bias
+            symbolic_lb_expression = self._linear_combination(in_lb_algebra[:-1], self.input_gp_vars, relaxed_lb_bias)
+            symbolic_ub_expression = self._linear_combination(in_ub_algebra[:-1], self.input_gp_vars, relaxed_ub_bias)
+            pre_relu_bounds = self._pre_relu_bounds(float(neuron_lb), float(neuron_ub), float(alpha_K), float(beta_K), 100.0)
+            post_relu_bounds = (max(0.0, pre_relu_bounds[0]), max(0.0, pre_relu_bounds[1]))
+            relu_after_bounds.append(post_relu_bounds)
 
             model_cstr_ll.append(self.gp_model.addConstr(in_layer.gp_vars_before[in_index] <= symbolic_ub_expression))
             model_cstr_ll.append(self.gp_model.addConstr(in_layer.gp_vars_before[in_index] >= symbolic_lb_expression))
             model_cstr_ll.append(
-                self.gp_model.addGenConstrMax(in_layer.gp_vars_after[in_index], [in_layer.gp_vars_before[in_index], 0])
+                self.gp_model.addGenConstrMax(
+                    in_layer.gp_vars_after[in_index],
+                    [in_layer.gp_vars_before[in_index], 0],
+                    operand_bounds=[pre_relu_bounds, (0.0, 0.0)],
+                )
             )
 
         self.gp_model.update()
 
+        cur_layer_before_bounds: list[tuple[float, float]] = []
         for out_index in range(cur_layer.layer_size):
-            accumulation = np.dot(w[out_index], in_layer.gp_vars_after) + b[out_index]
+            accumulation = self._linear_combination(w[out_index], in_layer.gp_vars_after, b[out_index])
+            cur_layer_before_bounds.append(self._interval_linear_combination(w[out_index], relu_after_bounds, b[out_index]))
             model_cstr_ll.append(self.gp_model.addConstr(cur_layer.gp_vars_before[out_index] == accumulation))
 
         enc_finish_time = time.time()
@@ -569,8 +607,13 @@ class GPEncoding:
             other_vars = [
                 cur_layer.gp_vars_before[i] for i in range(cur_layer.layer_size) if i != int(self.targetCls)
             ]
+            other_bounds = [
+                cur_layer_before_bounds[i] for i in range(cur_layer.layer_size) if i != int(self.targetCls)
+            ]
             other_maximal = self.gp_model.addVar(lb=-1000, vtype=GRB.CONTINUOUS)
-            prop_cstr_ll.append(self.gp_model.addGenConstrMax(other_maximal, other_vars))
+            prop_cstr_ll.append(
+                self.gp_model.addGenConstrMax(other_maximal, other_vars, operand_bounds=other_bounds)
+            )
             prop_cstr_ll.append(
                 self.gp_model.addConstr(other_maximal >= cur_layer.gp_vars_before[self.targetCls] + self.tole)
             )
@@ -618,10 +661,10 @@ class GPEncoding:
 
         scaleValue = -10000.0
         if self.gp_model.status == GRB.OPTIMAL:
-            scaleValue = float(relaxScale.X)
+            scaleValue = float(self.gp_model.value(relaxScale))
             for in_index in range(in_layer.layer_size):
-                alpha = in_layer.alpha[in_index].X
-                beta = in_layer.beta[in_index].X
+                alpha = self.gp_model.value(in_layer.alpha[in_index])
+                beta = self.gp_model.value(in_layer.beta[in_index])
                 in_layer.relaxed_ub[in_index] = in_layer.ub[in_index] + beta
                 in_layer.relaxed_lb[in_index] = in_layer.lb[in_index] - alpha
 
@@ -634,8 +677,12 @@ class GPEncoding:
 
                 relaxed_lb_bias = in_lb_algebra[-1] - alpha
                 relaxed_ub_bias = in_ub_algebra[-1] + beta
-                in_layer.relaxed_lb_expression[in_index] = np.dot(in_lb_algebra[:-1], self.input_gp_vars) + relaxed_lb_bias
-                in_layer.relaxed_ub_expression[in_index] = np.dot(in_ub_algebra[:-1], self.input_gp_vars) + relaxed_ub_bias
+                in_layer.relaxed_lb_expression[in_index] = self._linear_combination(
+                    in_lb_algebra[:-1], self.input_gp_vars, relaxed_lb_bias
+                )
+                in_layer.relaxed_ub_expression[in_index] = self._linear_combination(
+                    in_ub_algebra[:-1], self.input_gp_vars, relaxed_ub_bias
+                )
                 if in_layer.relaxed_ub[in_index] <= 0:
                     in_layer.relaxed_ub_expression[in_index] = 0
 
@@ -665,10 +712,12 @@ class GPEncoding:
                 beta_K = neuron_ub - neuron_val
                 model_cstr_ll.append(self.gp_model.addConstr(in_layer.alpha_before[in_index] == (alpha_K * relaxScale)))
                 model_cstr_ll.append(self.gp_model.addConstr(in_layer.beta_after[in_index] == (beta_K * relaxScale)))
+                alpha_before_bounds = (0.0, max(0.0, float(alpha_K) * 1000.0))
                 model_cstr_ll.append(
                     self.gp_model.addGenConstrMin(
                         in_layer.alpha_after[in_index],
-                        [in_layer.alpha_before[in_index], in_layer.lb[in_index]],
+                        [in_layer.alpha_before[in_index], float(in_layer.lb[in_index])],
+                        operand_bounds=[alpha_before_bounds, (float(in_layer.lb[in_index]), float(in_layer.lb[in_index]))],
                     )
                 )
             elif actMode == 2:
@@ -764,10 +813,10 @@ class GPEncoding:
         if self.gp_model.status != GRB.OPTIMAL:
             return 0.0
 
-        scaleValue = float(relaxScale.X)
+        scaleValue = float(self.gp_model.value(relaxScale))
         for in_index in range(in_layer.layer_size):
-            alpha_after = in_layer.alpha_after[in_index].X
-            beta_after = in_layer.beta_after[in_index].X
+            alpha_after = self.gp_model.value(in_layer.alpha_after[in_index])
+            beta_after = self.gp_model.value(in_layer.beta_after[in_index])
 
             if in_layer.ub[in_index] <= 0:
                 in_layer.relaxed_ub[in_index] = 0
@@ -785,8 +834,12 @@ class GPEncoding:
 
             relaxed_lb_bias = in_lb_algebra[-1] - alpha_after
             relaxed_ub_bias = in_ub_algebra[-1] + beta_after
-            in_layer.relaxed_lb_expression[in_index] = np.dot(in_lb_algebra[:-1], self.input_gp_vars) + relaxed_lb_bias
-            in_layer.relaxed_ub_expression[in_index] = np.dot(in_ub_algebra[:-1], self.input_gp_vars) + relaxed_ub_bias
+            in_layer.relaxed_lb_expression[in_index] = self._linear_combination(
+                in_lb_algebra[:-1], self.input_gp_vars, relaxed_lb_bias
+            )
+            in_layer.relaxed_ub_expression[in_index] = self._linear_combination(
+                in_ub_algebra[:-1], self.input_gp_vars, relaxed_ub_bias
+            )
             if in_layer.ub[in_index] <= 0:
                 in_layer.relaxed_ub_expression[in_index] = 0
 
@@ -1875,7 +1928,7 @@ class GPEncoding:
 
     def forward_quantization(self) -> tuple[bool, Any, Any, Any]:
         if self.gp_model is None:
-            raise RuntimeError("--verify-mode milp requires Gurobi; use --verify-mode esbmc with --no-gurobi.")
+            raise RuntimeError("--verify-mode milp requires a MILP solver model; use --verify-mode esbmc with cached preimage.")
         qu_list: list[int] = []
         qu_frac_list: list[int] = []
         qu_int_list: list[int] = []
@@ -1954,8 +2007,16 @@ class GPEncoding:
                     pre_mul_qu_lb_deepPoly.append(cur_neuron_concrete_lower)
                     pre_mul_qu_ub_deepPoly.append(cur_neuron_concrete_upper)
 
-                    quantized_lb_expression = np.dot(cur_neuron_concrete_algebra_lower[:-1], self.input_gp_vars) + cur_neuron_concrete_algebra_lower[-1]
-                    quantized_ub_expression = np.dot(cur_neuron_concrete_algebra_upper[:-1], self.input_gp_vars) + cur_neuron_concrete_algebra_upper[-1]
+                    quantized_lb_expression = self._linear_combination(
+                        cur_neuron_concrete_algebra_lower[:-1],
+                        self.input_gp_vars,
+                        cur_neuron_concrete_algebra_lower[-1],
+                    )
+                    quantized_ub_expression = self._linear_combination(
+                        cur_neuron_concrete_algebra_upper[:-1],
+                        self.input_gp_vars,
+                        cur_neuron_concrete_algebra_upper[-1],
+                    )
 
                     if cur_layer.layer_index == (len(self.dense_layers) + 1):
                         if out_index == self.targetCls:

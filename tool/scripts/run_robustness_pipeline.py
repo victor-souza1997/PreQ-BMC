@@ -51,6 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preimage-mode", "--preimg_mode", dest="preimg_mode", default="milp", choices=["milp", "abstr", "comp"])
     parser.add_argument("--verify-mode", "--verify_mode", dest="verify_mode", default="milp", choices=["milp", "esbmc"])
     parser.add_argument(
+        "--solver",
+        choices=["cbc", "gurobi"],
+        default="gurobi",
+        help="MILP solver backend for preimage synthesis and MILP forward checks. CBC is license-free and the default.",
+    )
+    parser.add_argument(
         "--esbmc-layer-block-size",
         "--esbmc_layer_block_size",
         dest="esbmc_layer_block_size",
@@ -222,7 +228,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-gurobi",
         "--no_gurobi",
         action="store_true",
-        help="Load cached preimage bounds instead of calling Gurobi. Requires --verify-mode esbmc.",
+        help="Backward-compatible alias for loading cached preimage bounds instead of solving the preimage MILP.",
     )
     parser.add_argument(
         "--save-preimage-cache",
@@ -262,6 +268,7 @@ def main(argv: list[str] | None = None) -> None:
         bit_ub=args.bit_ub,
         preimg_mode=args.preimg_mode,
         verify_mode=args.verify_mode,
+        solver=args.solver,
         output_dir=Path(args.output_dir),
         if_relax=bool(args.if_relax),
         target_label=args.target_label,
