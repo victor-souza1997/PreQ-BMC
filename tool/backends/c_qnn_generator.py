@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+from .fixed_point_c_kernel import fixed_point_c_kernel_source
 from .fixed_point import FixedPointNetwork, forward_fixed_point_single, quantize_network_input
 
 
@@ -55,7 +56,6 @@ static const int64_t LAYER_{index}_BIASES[{layer.biases_int.shape[0]}] = {_c_arr
     for index, layer in enumerate(network.layers):
         in_buffer = "buffer_a" if index % 2 == 0 else "buffer_b"
         out_buffer = "buffer_b" if index % 2 == 0 else "buffer_a"
-        relu_clause = "if (value < 0) value = 0;" if not layer.is_output_layer else ""
         layer_input_frac = current_input_frac
         layer_steps.append(
             f"""
@@ -66,12 +66,14 @@ static const int64_t LAYER_{index}_BIASES[{layer.biases_int.shape[0]}] = {_c_arr
         }}
         /* acc has F_in({layer_input_frac}) + F_w(LAYER_{index}_F) fractional bits.
            Divide by 2**F_in to keep LAYER_{index}_F, matching Python exactly. */
-        __int128 value = div_round_half_away_from_zero_i128(
-            acc, ((__int128)1 << {current_input_frac})) + (__int128)LAYER_{index}_BIASES[out_idx];
-        
-        value = clamp_to_signed_range(value, LAYER_{index}_Q);
-        {relu_clause}
-        {out_buffer}[out_idx] = (int64_t)clamp_to_signed_range(value, LAYER_{index}_Q);
+        __int128 value = fixed_point_layer_value_i128(
+            acc,
+            ((__int128)1 << {current_input_frac}),
+            (__int128)LAYER_{index}_BIASES[out_idx],
+            LAYER_{index}_Q,
+            {0 if layer.is_output_layer else 1}
+        );
+        {out_buffer}[out_idx] = (int64_t)value;
     }}
 """
         )
@@ -90,21 +92,7 @@ void __ESBMC_assert(_Bool, const char *);
 #define QNN_ASSERT(cond, msg) ((void)0)
 #endif
 
-static inline __int128 clamp_to_signed_range(__int128 value, int total_bits) {{
-    const __int128 lower = -((__int128)1 << (total_bits - 1));
-    const __int128 upper = (((__int128)1 << (total_bits - 1)) - 1);
-    if (value < lower) return lower;
-    if (value > upper) return upper;
-    return value;
-}}
-
-static inline __int128 div_round_half_away_from_zero_i128(__int128 numerator, __int128 denominator){{
-    QNN_ASSERT(denominator > 0, "denominator must be positive");
-    if (numerator >= 0) {{
-        return (numerator + denominator / 2) / denominator;
-    }}
-    return -(((-numerator) + denominator / 2) / denominator);
-}}
+{fixed_point_c_kernel_source()}
 
 {''.join(layer_blocks)}
 
@@ -147,27 +135,14 @@ def generate_fixed_point_semantics_test_source() -> str:
     return """\
 #include <stdint.h>
 
-static inline __int128 clamp_to_signed_range_i128(__int128 value, int total_bits) {
-    const __int128 lower = -((__int128)1 << (total_bits - 1));
-    const __int128 upper = (((__int128)1 << (total_bits - 1)) - 1);
-    if (value < lower) return lower;
-    if (value > upper) return upper;
-    return value;
-}
-
-static inline __int128 div_round_half_away_from_zero_i128(__int128 numerator, __int128 denominator) {
-    if (numerator >= 0) {
-        return (numerator + denominator / 2) / denominator;
-    }
-    return -(((-numerator) + denominator / 2) / denominator);
-}
+""" + fixed_point_c_kernel_source() + """\
 
 int64_t qnn_semantic_round_div_i64(int64_t numerator, int64_t denominator) {
     return (int64_t)div_round_half_away_from_zero_i128((__int128)numerator, (__int128)denominator);
 }
 
 int64_t qnn_semantic_clamp_i64(int64_t value, int total_bits) {
-    return (int64_t)clamp_to_signed_range_i128((__int128)value, total_bits);
+    return (int64_t)clamp_to_signed_range((__int128)value, total_bits);
 }
 
 int64_t qnn_semantic_relu_i64(int64_t value) {
@@ -181,15 +156,13 @@ int64_t qnn_semantic_step_i64(
     int total_bits,
     int apply_relu
 ) {
-    __int128 value = div_round_half_away_from_zero_i128(
+    return (int64_t)fixed_point_layer_value_i128(
         (__int128)accumulator,
-        ((__int128)1 << input_fractional_bits)
-    ) + (__int128)bias;
-    value = clamp_to_signed_range_i128(value, total_bits);
-    if (apply_relu && value < 0) {
-        value = 0;
-    }
-    return (int64_t)clamp_to_signed_range_i128(value, total_bits);
+        ((__int128)1 << input_fractional_bits),
+        (__int128)bias,
+        total_bits,
+        apply_relu
+    );
 }
 
 int64_t qnn_semantic_affine2_i64(
@@ -203,10 +176,10 @@ int64_t qnn_semantic_affine2_i64(
     int apply_relu
 ) {
     __int128 accumulator = (__int128)x0 * (__int128)w0 + (__int128)x1 * (__int128)w1;
-    return qnn_semantic_step_i64(
-        (int64_t)accumulator,
-        input_fractional_bits,
-        bias,
+    return (int64_t)fixed_point_layer_value_i128(
+        accumulator,
+        ((__int128)1 << input_fractional_bits),
+        (__int128)bias,
         total_bits,
         apply_relu
     );

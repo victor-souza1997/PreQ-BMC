@@ -10,7 +10,7 @@
   },
   "defaults": {
     "bit_lb": 3,
-    "bit_ub": 16,
+    "bit_ub": 40,
     "preimg_mode": "milp",
     "verify_mode": "esbmc",
     "method": "both",
@@ -42,7 +42,7 @@
       "dataset": "iris",
       "arch": "1blk_10",
       "sample_id": 25,
-      "eps": 0.05,
+      "eps": 0.01,
       "compare_limit": 0,
       "expected_difficulty": "low",
       "notes": "Small smoke benchmark used by --only iris --max-runs 1."
@@ -52,10 +52,10 @@
       "dataset": "iris",
       "arch": "1blk_10",
       "sample_ids": [0, 1, 2],
-      "eps": 0.1,
+      "eps": 0.01,
       "compare_limit": 0,
       "mrr_enabled": true,
-      "eps_sweep": [0.05, 0.1, 0.2],
+      "eps_sweep": [0.005, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.1],
       "expected_difficulty": "low"
     },
     {

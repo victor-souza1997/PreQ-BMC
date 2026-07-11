@@ -17,6 +17,7 @@ def innerlayer_fixed_int(
     input_bounds_low_int,
     input_bounds_high_int,
     scale_factor,
+    total_bits=64,
 ):
     return _render_hidden_affine_bounds_program(
         output_size=cur_layer_layer_size,
@@ -28,6 +29,7 @@ def innerlayer_fixed_int(
         input_bounds_low_c_int=input_bounds_low_int,
         input_bounds_high_c_int=input_bounds_high_int,
         scale_factor=scale_factor,
+        total_bits=total_bits,
     )
 
 
@@ -41,6 +43,7 @@ def innerlayer_fixed_int_bounds_only(
     input_bounds_low_int,
     input_bounds_high_int,
     scale_factor,
+    total_bits=64,
 ):
     return _render_hidden_affine_bounds_program(
         output_size=cur_layer_layer_size,
@@ -52,6 +55,7 @@ def innerlayer_fixed_int_bounds_only(
         input_bounds_low_c_int=input_bounds_low_int,
         input_bounds_high_c_int=input_bounds_high_int,
         scale_factor=scale_factor,
+        total_bits=total_bits,
     )
 
 
@@ -64,6 +68,7 @@ def outerlayer_fixed_int(
     input_bounds_high_int,
     targetCls,
     scale_factor,
+    total_bits=64,
 ):
     return _render_output_target_program(
         output_size=cur_layer_layer_size,
@@ -74,6 +79,7 @@ def outerlayer_fixed_int(
         input_bounds_high_c_int=input_bounds_high_int,
         target_label=targetCls,
         scale_factor=scale_factor,
+        total_bits=total_bits,
     )
 
 
@@ -86,6 +92,7 @@ def outerlayer_fixed_int_multiclass(
     input_bounds_high_int,
     valid_classes,
     scale_factor,
+    total_bits=64,
 ):
     return _render_output_valid_set_program(
         output_size=cur_layer_layer_size,
@@ -96,6 +103,7 @@ def outerlayer_fixed_int_multiclass(
         input_bounds_high_c_int=input_bounds_high_int,
         valid_classes=tuple(valid_classes),
         scale_factor=scale_factor,
+        total_bits=total_bits,
     )
 
 

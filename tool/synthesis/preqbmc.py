@@ -385,6 +385,75 @@ class GPEncoding:
     def _pre_relu_bounds(neuron_lb: float, neuron_ub: float, alpha_k: float, beta_k: float, relax_ub: float) -> tuple[float, float]:
         return float(neuron_lb - alpha_k * relax_ub), float(neuron_ub + beta_k * relax_ub)
 
+    @staticmethod
+    def _required_internal_integer_bits_for_interval(lower: float, upper: float) -> int:
+        """Return sign-inclusive integer bits needed to represent a real interval.
+
+        `LayerEncoding.int_bit` follows Quadapter's internal convention: it
+        includes the sign bit. A value of 2 therefore corresponds to exported
+        I=1 and real range [-2, 2) for any fractional precision.
+        """
+
+        lo = float(lower)
+        hi = float(upper)
+        if not (math.isfinite(lo) and math.isfinite(hi)):
+            return 1
+        if lo > hi:
+            lo, hi = hi, lo
+
+        internal_bits = 1
+        while lo < -(2 ** (internal_bits - 1)) or hi >= (2 ** (internal_bits - 1)):
+            internal_bits += 1
+        return internal_bits
+
+    def _required_internal_integer_bits_for_layer_contract(self, layer: LayerEncoding) -> int:
+        lower_candidates: list[float] = []
+        upper_candidates: list[float] = []
+
+        for lower_values, upper_values in (
+            (layer.lb, layer.ub),
+            (layer.relaxed_lb, layer.relaxed_ub),
+        ):
+            lower_array = np.asarray(lower_values, dtype=np.float64)
+            upper_array = np.asarray(upper_values, dtype=np.float64)
+            finite_lower = lower_array[np.isfinite(lower_array)]
+            finite_upper = upper_array[np.isfinite(upper_array)]
+            if finite_lower.size:
+                lower_candidates.append(float(np.min(finite_lower)))
+            if finite_upper.size:
+                upper_candidates.append(float(np.max(finite_upper)))
+
+        if not lower_candidates and not upper_candidates:
+            return 1
+        lower = min(lower_candidates) if lower_candidates else 0.0
+        upper = max(upper_candidates) if upper_candidates else 0.0
+        return self._required_internal_integer_bits_for_interval(lower, upper)
+
+    def _widen_internal_integer_bits_for_fixed_point_contracts(self) -> None:
+        """Ensure layer formats can represent the contracts ESBMC must prove.
+
+        The synthesis search varies fractional precision while keeping a single
+        shared integer width per layer. After the ESBMC harness started modeling
+        deployed saturation exactly, too-small integer widths could make every
+        candidate fail for the same real-range reason. This pass keeps the
+        shared-QIF policy, but raises the layer-level integer-width floor to
+        cover the DeepPoly/preimage contract range before searching F.
+        """
+
+        for layer in [*self.dense_layers, self.output_layer]:
+            if layer.int_bit is None:
+                continue
+            current = int(layer.int_bit)
+            required = self._required_internal_integer_bits_for_layer_contract(layer)
+            if required > current:
+                LOGGER.info(
+                    "Increasing layer %s internal integer bits from %s to %s to cover fixed-point contract range.",
+                    layer.layer_index,
+                    current,
+                    required,
+                )
+                layer.int_bit = required
+
     def verified_quant(self, lb: np.ndarray, ub: np.ndarray) -> tuple[bool, Any, Any, Any]:
         result = self.run(lb, ub)
         if not result.success:
@@ -412,6 +481,7 @@ class GPEncoding:
             self.backward_preimage_computation()
             if self.config.save_preimage_cache:
                 self.save_cached_preimage()
+        self._widen_internal_integer_bits_for_fixed_point_contracts()
         backward_end_time = time.time()
 
         if self.verify_mode == "esbmc":
@@ -1194,6 +1264,7 @@ class GPEncoding:
             qu_w_int=qu_w_int,
             qu_b_int=qu_b_int,
             frac_bit=frac_bit,
+            all_bit=all_bit,
             layer_index=layer_index,
         )
         layers_dir = self.output_dir / "layers"
@@ -1255,6 +1326,7 @@ class GPEncoding:
                 qu_w_int=qu_w_int,
                 qu_b_int=qu_b_int,
                 frac_bit=frac_bit,
+                all_bit=all_bit,
                 start_neuron=start_neuron,
                 end_neuron=end_neuron,
             )
@@ -1613,6 +1685,7 @@ class GPEncoding:
         qu_w_int: np.ndarray,
         qu_b_int: np.ndarray,
         frac_bit: int,
+        all_bit: int,
         layer_index: int,
     ) -> str:
         del layer_index
@@ -1635,6 +1708,7 @@ class GPEncoding:
                     input_bounds_high_c_int=self.numpy_to_c_int_array(input_hi_int),
                     valid_classes=tuple(self.property_spec.valid_labels),
                     scale_factor=scale,
+                    total_bits=all_bit,
                 )
             return render_output_target_program(
                 output_size=cur_layer.layer_size,
@@ -1645,6 +1719,7 @@ class GPEncoding:
                 input_bounds_high_c_int=self.numpy_to_c_int_array(input_hi_int),
                 target_label=int(self.property_spec.target_label if self.property_spec.target_label is not None else self.targetCls),
                 scale_factor=scale,
+                total_bits=all_bit,
             )
 
         return render_hidden_affine_bounds_program(
@@ -1657,6 +1732,7 @@ class GPEncoding:
             input_bounds_low_c_int=self.numpy_to_c_int_array(input_lo_int),
             input_bounds_high_c_int=self.numpy_to_c_int_array(input_hi_int),
             scale_factor=scale,
+            total_bits=all_bit,
         )
 
     def generate_esbmc_hidden_block_verification_code(
@@ -1666,6 +1742,7 @@ class GPEncoding:
         qu_w_int: np.ndarray,
         qu_b_int: np.ndarray,
         frac_bit: int,
+        all_bit: int,
         start_neuron: int,
         end_neuron: int,
     ) -> str:
@@ -1683,6 +1760,7 @@ class GPEncoding:
             input_bounds_low_c_int=self.numpy_to_c_int_array(input_lo_int),
             input_bounds_high_c_int=self.numpy_to_c_int_array(input_hi_int),
             scale_factor=scale,
+            total_bits=all_bit,
         )
 
     def generate_esbmc_no_saturation_code(

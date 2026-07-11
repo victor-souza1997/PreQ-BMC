@@ -14,6 +14,7 @@ from verification.c_templates import (
     render_hidden_affine_bounds_block_program,
     render_no_saturation_block_program,
     render_no_saturation_program,
+    render_output_target_program,
 )
 from verification.esbmc import ESBMCConfig, ESBMCRunner, ESBMCResult
 
@@ -58,12 +59,58 @@ class NoSaturationVerificationTest(unittest.TestCase):
             input_bounds_low_c_int="{0, 0, 0}",
             input_bounds_high_c_int="{4, 4, 4}",
             scale_factor=1,
+            total_bits=8,
         )
 
         self.assertIn("#define INPUT_SIZE 3", source)
         self.assertIn("#define LAYER_SIZE 1", source)
         self.assertIn("long long weights[LAYER_SIZE][INPUT_SIZE] = {{1, 2, 3}};", source)
         self.assertIn("long long input_bounds_low[INPUT_SIZE] = {0, 0, 0};", source)
+
+    def test_output_contract_harness_uses_deployed_fixed_point_kernel(self) -> None:
+        source = render_output_target_program(
+            output_size=2,
+            input_size=2,
+            weights_c_int="{{1, -2}, {3, 4}}",
+            biases_c_int="{0, 1}",
+            input_bounds_low_c_int="{-4, -4}",
+            input_bounds_high_c_int="{4, 4}",
+            target_label=0,
+            scale_factor=4,
+            total_bits=8,
+        )
+
+        self.assertIn("__int128 acc", source)
+        self.assertIn("div_round_half_away_from_zero_i128", source)
+        self.assertIn("clamp_to_signed_range", source)
+        self.assertIn("fixed_point_layer_value_i128", source)
+        self.assertNotIn("(acc / SCALE_FACTOR)", source)
+        self.assertNotIn("long long acc = 0LL", source)
+
+    def test_hidden_contract_harness_clamps_without_no_saturation_dependency(self) -> None:
+        source = render_hidden_affine_bounds_block_program(
+            block_size=1,
+            input_size=2,
+            weights_c_int="{{16, 16}}",
+            biases_c_int="{0}",
+            preimage_low_c_int="{0}",
+            preimage_high_c_int="{7}",
+            input_bounds_low_c_int="{8, 8}",
+            input_bounds_high_c_int="{8, 8}",
+            scale_factor=4,
+            total_bits=4,
+            activation="relu",
+        )
+
+        self.assertIn("TOTAL_BITS 4", source)
+        self.assertIn("fixed_point_layer_value_i128", source)
+        self.assertIn("div_round_half_away_from_zero_i128(s_lb", source)
+        self.assertIn("div_round_half_away_from_zero_i128(s_ub", source)
+        self.assertIn("clamp_bounds_to_signed_range(&out_lb, &out_ub, TOTAL_BITS);", source)
+        self.assertIn("out_lb >= accepted_low && out_ub <= accepted_high", source)
+        self.assertNotIn("(acc / SCALE_FACTOR)", source)
+        self.assertNotIn("div_floor_i128", source)
+        self.assertNotIn("div_ceil_i128", source)
 
     def test_no_saturation_block_template_uses_block_size_with_full_input_bounds(self) -> None:
         source = render_no_saturation_block_program(

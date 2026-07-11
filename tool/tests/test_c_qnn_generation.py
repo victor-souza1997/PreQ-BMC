@@ -123,11 +123,62 @@ class CQNNGenerationTest(unittest.TestCase):
                     ),
                 )
 
-                x0 = int(rng.integers(-64, 65))
-                x1 = int(rng.integers(-64, 65))
-                w0 = int(rng.integers(-32, 33))
-                w1 = int(rng.integers(-32, 33))
-                affine_accumulator = x0 * w0 + x1 * w1
+    def test_shared_kernel_rounds_half_away_from_zero_at_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_path = write_fixed_point_semantics_test_source(Path(tmp_dir) / "semantics.c")
+            shared_path = compile_c_qnn_shared_library(source_path, Path(tmp_dir) / "semantics.so")
+            library = ctypes.CDLL(str(shared_path))
+            library.qnn_semantic_round_div_i64.argtypes = [ctypes.c_int64, ctypes.c_int64]
+            library.qnn_semantic_round_div_i64.restype = ctypes.c_int64
+
+            denominator = 8
+            for numerator in (-13, -12, -11, -5, -4, -3, 3, 4, 5, 11, 12, 13):
+                self.assertEqual(
+                    library.qnn_semantic_round_div_i64(numerator, denominator),
+                    round_divide_half_away_from_zero(numerator, denominator),
+                )
+
+    def test_shared_kernel_clamps_at_signed_range_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_path = write_fixed_point_semantics_test_source(Path(tmp_dir) / "semantics.c")
+            shared_path = compile_c_qnn_shared_library(source_path, Path(tmp_dir) / "semantics.so")
+            library = ctypes.CDLL(str(shared_path))
+            library.qnn_semantic_clamp_i64.argtypes = [ctypes.c_int64, ctypes.c_int]
+            library.qnn_semantic_clamp_i64.restype = ctypes.c_int64
+
+            total_bits = 4
+            for value in (-20, -9, -8, -7, 0, 6, 7, 8, 20):
+                self.assertEqual(
+                    library.qnn_semantic_clamp_i64(value, total_bits),
+                    clamp_to_signed_range(value, total_bits),
+                )
+
+    def test_shared_kernel_layer_step_matches_python_for_tiny_affine(self) -> None:
+        rng = np.random.default_rng(11)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_path = write_fixed_point_semantics_test_source(Path(tmp_dir) / "semantics.c")
+            shared_path = compile_c_qnn_shared_library(source_path, Path(tmp_dir) / "semantics.so")
+            library = ctypes.CDLL(str(shared_path))
+            library.qnn_semantic_affine2_i64.argtypes = [
+                ctypes.c_int64,
+                ctypes.c_int64,
+                ctypes.c_int64,
+                ctypes.c_int64,
+                ctypes.c_int64,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+            ]
+            library.qnn_semantic_affine2_i64.restype = ctypes.c_int64
+
+            x0, x1 = 7, -3
+            w0, w1 = 5, -6
+            bias = -2
+            input_fractional_bits = 3
+            total_bits = 5
+            accumulator = x0 * w0 + x1 * w1
+
+            for apply_relu in (0, 1):
                 self.assertEqual(
                     library.qnn_semantic_affine2_i64(
                         x0,
@@ -140,13 +191,40 @@ class CQNNGenerationTest(unittest.TestCase):
                         apply_relu,
                     ),
                     apply_fixed_point_affine_value(
-                        affine_accumulator,
+                        accumulator,
                         input_fractional_bits,
                         bias,
                         total_bits,
                         apply_relu=bool(apply_relu),
                     ),
                 )
+
+            for _ in range(10):
+                x0 = int(rng.integers(-64, 65))
+                x1 = int(rng.integers(-64, 65))
+                w0 = int(rng.integers(-32, 33))
+                w1 = int(rng.integers(-32, 33))
+                affine_accumulator = x0 * w0 + x1 * w1
+                for apply_relu in (0, 1):
+                    self.assertEqual(
+                        library.qnn_semantic_affine2_i64(
+                            x0,
+                            x1,
+                            w0,
+                            w1,
+                            bias,
+                            input_fractional_bits,
+                            total_bits,
+                            apply_relu,
+                        ),
+                        apply_fixed_point_affine_value(
+                            affine_accumulator,
+                            input_fractional_bits,
+                            bias,
+                            total_bits,
+                            apply_relu=bool(apply_relu),
+                        ),
+                    )
 
 
 if __name__ == "__main__":
