@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from backends.fixed_point_c_kernel import fixed_point_c_kernel_source
+from verification.arith_kernel import render_arith_kernel
 
 
 def outerlayer_fixed_int(
@@ -36,7 +36,7 @@ long long input_bounds_high[INPUT_SIZE] = {input_bounds_high_int};
 void __ESBMC_assert(_Bool, const char *);
 #define QNN_ASSERT(cond, msg) __ESBMC_assert((cond), (msg))
 
-{fixed_point_c_kernel_source()}
+{render_arith_kernel()}
 
 /* Transformacao afim em ponto fixo: out[i] = (W[i] · in + b[i]) / SCALE */
 static void affine_transform_fixed(const long long in_[INPUT_SIZE], long long out_[LAYER_SIZE])
@@ -46,16 +46,15 @@ static void affine_transform_fixed(const long long in_[INPUT_SIZE], long long ou
 
         for (int j = 0; j < INPUT_SIZE; ++j) {{
             /* w * x ambos em SCALE_FACTOR → produto em SCALE_FACTOR^2 */
-            acc += (__int128)weights[i][j] * (__int128)in_[j];
+            acc = mac_i128(acc, weights[i][j], in_[j]);
         }}
 
-        out_[i] = (long long)fixed_point_layer_value_i128(
+        __int128 value = div_round_half_away_from_zero_i128(
             acc,
-            (__int128)SCALE_FACTOR,
-            (__int128)biases[i],
-            TOTAL_BITS,
-            0
-        );
+            (__int128)SCALE_FACTOR
+        ) + (__int128)biases[i];
+        value = clamp_to_signed_range_i128(value, TOTAL_BITS);
+        out_[i] = (long long)clamp_to_signed_range_i128(value, TOTAL_BITS);
     }}
 }}
 
@@ -167,7 +166,7 @@ long long input_bounds_high[INPUT_SIZE] = {input_bounds_high_int};
 void __ESBMC_assert(_Bool, const char *);
 #define QNN_ASSERT(cond, msg) __ESBMC_assert((cond), (msg))
 
-{fixed_point_c_kernel_source()}
+{render_arith_kernel()}
 
 static inline __int128 abs_i128(__int128 x)
 {{
@@ -176,8 +175,8 @@ static inline __int128 abs_i128(__int128 x)
 
 static inline void clamp_bounds_to_signed_range(__int128 *lb, __int128 *ub, int total_bits)
 {{
-    *lb = clamp_to_signed_range(*lb, total_bits);
-    *ub = clamp_to_signed_range(*ub, total_bits);
+    *lb = clamp_to_signed_range_i128(*lb, total_bits);
+    *ub = clamp_to_signed_range_i128(*ub, total_bits);
     __ESBMC_assert(*lb <= *ub, "invalid interval after clamp");
 }}
 
@@ -256,19 +255,20 @@ static void check_affine_bounds_fixed_bounds_only(void)
 
         for (int j = 0; j < INPUT_SIZE; ++j)
         {{
-            const __int128 w = (__int128)weights[i][j];
-            const __int128 lo = (__int128)input_bounds_low[j];
-            const __int128 hi = (__int128)input_bounds_high[j];
+            const long long w = weights[i][j];
+            const long long lo = input_bounds_low[j];
+            const long long hi = input_bounds_high[j];
 
             __ESBMC_assert(lo <= hi, "invalid input interval");
 
-            const __int128 cmin = (w >= 0) ? (w * lo) : (w * hi);
-            const __int128 cmax = (w >= 0) ? (w * hi) : (w * lo);
-
-            s_lb += cmin;
-            s_ub += cmax;
+            s_lb = mac_i128(s_lb, w, (w >= 0) ? lo : hi);
+            s_ub = mac_i128(s_ub, w, (w >= 0) ? hi : lo);
         }}
 
+        /*
+         * round-half-away-from-zero division by a positive denominator is
+         * monotone non-decreasing, so propagating interval endpoints is sound.
+         */
         __int128 out_lb = div_round_half_away_from_zero_i128(s_lb, (__int128)SCALE_FACTOR)
             + (__int128)biases[i];
         __int128 out_ub = div_round_half_away_from_zero_i128(s_ub, (__int128)SCALE_FACTOR)
@@ -294,6 +294,34 @@ int main(void)
     return 0;
 }}
 """
+
+
+def innerlayer_fixed_int(
+    cur_layer_layer_size: int,
+    in_layer_layer_size: int,
+    weights_c_int: str,
+    biases_c_int: str,
+    preimage_low_int: str,
+    preimage_high_int: str,
+    input_bounds_low_int: str,
+    input_bounds_high_int: str,
+    scale_factor: int,
+    total_bits: int,
+    activation: str = "none",
+) -> str:
+    return innerlayer_fixed_int_bounds_only(
+        cur_layer_layer_size=cur_layer_layer_size,
+        in_layer_layer_size=in_layer_layer_size,
+        weights_c_int=weights_c_int,
+        biases_c_int=biases_c_int,
+        preimage_low_int=preimage_low_int,
+        preimage_high_int=preimage_high_int,
+        input_bounds_low_int=input_bounds_low_int,
+        input_bounds_high_int=input_bounds_high_int,
+        scale_factor=scale_factor,
+        total_bits=total_bits,
+        activation=activation,
+    )
 
 
 def render_no_saturation_program(
@@ -339,29 +367,10 @@ long long biases[LAYER_SIZE] = {biases_c_int};
 long long input_bounds_low[INPUT_SIZE] = {input_bounds_low_c_int};
 long long input_bounds_high[INPUT_SIZE] = {input_bounds_high_c_int};
 
-static inline __int128 floor_div_i128(__int128 n, __int128 d)
-{{
-    __ESBMC_assert(d > 0, "division denominator must be positive");
+void __ESBMC_assert(_Bool, const char *);
+#define QNN_ASSERT(cond, msg) __ESBMC_assert((cond), (msg))
 
-    if (n >= 0)
-    {{
-        return n / d;
-    }}
-
-    return -(((-n) + d - 1) / d);
-}}
-
-static inline __int128 ceil_div_i128(__int128 n, __int128 d)
-{{
-    __ESBMC_assert(d > 0, "division denominator must be positive");
-
-    if (n >= 0)
-    {{
-        return (n + d - 1) / d;
-    }}
-
-    return -((-n) / d);
-}}
+{render_arith_kernel()}
 
 static void check_no_saturation_fixed_bounds(void)
 {{
@@ -378,26 +387,22 @@ static void check_no_saturation_fixed_bounds(void)
 
         for (int j = 0; j < INPUT_SIZE; ++j)
         {{
-            const __int128 w = (__int128)weights[i][j];
-            const __int128 lo = (__int128)input_bounds_low[j];
-            const __int128 hi = (__int128)input_bounds_high[j];
+            const long long w = weights[i][j];
+            const long long lo = input_bounds_low[j];
+            const long long hi = input_bounds_high[j];
 
             __ESBMC_assert(lo <= hi, "invalid input interval");
 
-            if (w >= 0)
-            {{
-                lower += w * lo;
-                upper += w * hi;
-            }}
-            else
-            {{
-                lower += w * hi;
-                upper += w * lo;
-            }}
+            lower = mac_i128(lower, w, (w >= 0) ? lo : hi);
+            upper = mac_i128(upper, w, (w >= 0) ? hi : lo);
         }}
 
-        const __int128 lower_rescaled = floor_div_i128(lower, (__int128)SCALE_FACTOR);
-        const __int128 upper_rescaled = ceil_div_i128(upper, (__int128)SCALE_FACTOR);
+        /*
+         * round-half-away-from-zero division by a positive denominator is
+         * monotone non-decreasing, so propagating interval endpoints is sound.
+         */
+        const __int128 lower_rescaled = div_round_half_away_from_zero_i128(lower, (__int128)SCALE_FACTOR);
+        const __int128 upper_rescaled = div_round_half_away_from_zero_i128(upper, (__int128)SCALE_FACTOR);
         const __int128 lower_pre_clamp = lower_rescaled + (__int128)biases[i];
         const __int128 upper_pre_clamp = upper_rescaled + (__int128)biases[i];
 
@@ -461,21 +466,10 @@ extern long long nondet_longlong(void);
  * the generated backend's int64_t storage interface.
  */
 
-static inline __int128 clamp_to_signed_range_i128(__int128 value, int total_bits)
-{{
-    const __int128 q_min = -((__int128)1 << (total_bits - 1));
-    const __int128 q_max = (((__int128)1 << (total_bits - 1)) - 1);
+void __ESBMC_assert(_Bool, const char *);
+#define QNN_ASSERT(cond, msg) __ESBMC_assert((cond), (msg))
 
-    if (value < q_min)
-    {{
-        return q_min;
-    }}
-    if (value > q_max)
-    {{
-        return q_max;
-    }}
-    return value;
-}}
+{render_arith_kernel()}
 
 int main(void)
 {{
@@ -546,7 +540,7 @@ int valid_classes[NUM_VALID_CLASSES] = {valid_classes_array};
 void __ESBMC_assert(_Bool, const char *);
 #define QNN_ASSERT(cond, msg) __ESBMC_assert((cond), (msg))
 
-{fixed_point_c_kernel_source()}
+{render_arith_kernel()}
 
 /* Verifica se uma classe está no conjunto de classes válidas */
 static bool is_valid_class(int class_id) {{
@@ -565,16 +559,15 @@ static void affine_transform_fixed(const long long in_[INPUT_SIZE], long long ou
         __int128 acc = 0;
 
         for (int j = 0; j < INPUT_SIZE; ++j) {{
-            acc += (__int128)weights[i][j] * (__int128)in_[j];
+            acc = mac_i128(acc, weights[i][j], in_[j]);
         }}
 
-        out_[i] = (long long)fixed_point_layer_value_i128(
+        __int128 value = div_round_half_away_from_zero_i128(
             acc,
-            (__int128)SCALE_FACTOR,
-            (__int128)biases[i],
-            TOTAL_BITS,
-            0
-        );
+            (__int128)SCALE_FACTOR
+        ) + (__int128)biases[i];
+        value = clamp_to_signed_range_i128(value, TOTAL_BITS);
+        out_[i] = (long long)clamp_to_signed_range_i128(value, TOTAL_BITS);
     }}
 }}
 

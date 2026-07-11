@@ -8,8 +8,8 @@ from typing import Any
 
 import numpy as np
 
-from .fixed_point_c_kernel import fixed_point_c_kernel_source
 from .fixed_point import FixedPointNetwork, forward_fixed_point_single, quantize_network_input
+from verification.arith_kernel import render_arith_kernel
 
 
 def _c_array_1d(values: np.ndarray) -> str:
@@ -57,22 +57,28 @@ static const int64_t LAYER_{index}_BIASES[{layer.biases_int.shape[0]}] = {_c_arr
         in_buffer = "buffer_a" if index % 2 == 0 else "buffer_b"
         out_buffer = "buffer_b" if index % 2 == 0 else "buffer_a"
         layer_input_frac = current_input_frac
+        relu_step = (
+            "        if (value < 0) {\n"
+            "            value = 0;\n"
+            "        }\n"
+            if not layer.is_output_layer
+            else ""
+        )
         layer_steps.append(
             f"""
     for (int out_idx = 0; out_idx < LAYER_{index}_OUT; ++out_idx) {{
         __int128 acc = 0;
         for (int in_idx = 0; in_idx < LAYER_{index}_IN; ++in_idx) {{
-            acc += (__int128)LAYER_{index}_WEIGHTS[out_idx][in_idx] * (__int128){in_buffer}[in_idx];
+            acc = mac_i128(acc, LAYER_{index}_WEIGHTS[out_idx][in_idx], {in_buffer}[in_idx]);
         }}
         /* acc has F_in({layer_input_frac}) + F_w(LAYER_{index}_F) fractional bits.
            Divide by 2**F_in to keep LAYER_{index}_F, matching Python exactly. */
-        __int128 value = fixed_point_layer_value_i128(
+        __int128 value = div_round_half_away_from_zero_i128(
             acc,
-            ((__int128)1 << {current_input_frac}),
-            (__int128)LAYER_{index}_BIASES[out_idx],
-            LAYER_{index}_Q,
-            {0 if layer.is_output_layer else 1}
-        );
+            ((__int128)1 << {current_input_frac})
+        ) + (__int128)LAYER_{index}_BIASES[out_idx];
+        value = clamp_to_signed_range_i128(value, LAYER_{index}_Q);
+{relu_step}        value = clamp_to_signed_range_i128(value, LAYER_{index}_Q);
         {out_buffer}[out_idx] = (int64_t)value;
     }}
 """
@@ -92,7 +98,7 @@ void __ESBMC_assert(_Bool, const char *);
 #define QNN_ASSERT(cond, msg) ((void)0)
 #endif
 
-{fixed_point_c_kernel_source()}
+{render_arith_kernel()}
 
 {''.join(layer_blocks)}
 
@@ -135,14 +141,14 @@ def generate_fixed_point_semantics_test_source() -> str:
     return """\
 #include <stdint.h>
 
-""" + fixed_point_c_kernel_source() + """\
+""" + render_arith_kernel() + """\
 
 int64_t qnn_semantic_round_div_i64(int64_t numerator, int64_t denominator) {
     return (int64_t)div_round_half_away_from_zero_i128((__int128)numerator, (__int128)denominator);
 }
 
 int64_t qnn_semantic_clamp_i64(int64_t value, int total_bits) {
-    return (int64_t)clamp_to_signed_range((__int128)value, total_bits);
+    return (int64_t)clamp_to_signed_range_i128((__int128)value, total_bits);
 }
 
 int64_t qnn_semantic_relu_i64(int64_t value) {
@@ -156,13 +162,15 @@ int64_t qnn_semantic_step_i64(
     int total_bits,
     int apply_relu
 ) {
-    return (int64_t)fixed_point_layer_value_i128(
+    __int128 value = div_round_half_away_from_zero_i128(
         (__int128)accumulator,
-        ((__int128)1 << input_fractional_bits),
-        (__int128)bias,
-        total_bits,
-        apply_relu
-    );
+        ((__int128)1 << input_fractional_bits)
+    ) + (__int128)bias;
+    value = clamp_to_signed_range_i128(value, total_bits);
+    if (apply_relu && value < 0) {
+        value = 0;
+    }
+    return (int64_t)clamp_to_signed_range_i128(value, total_bits);
 }
 
 int64_t qnn_semantic_affine2_i64(
@@ -175,11 +183,13 @@ int64_t qnn_semantic_affine2_i64(
     int total_bits,
     int apply_relu
 ) {
-    __int128 accumulator = (__int128)x0 * (__int128)w0 + (__int128)x1 * (__int128)w1;
-    return (int64_t)fixed_point_layer_value_i128(
-        accumulator,
-        ((__int128)1 << input_fractional_bits),
-        (__int128)bias,
+    __int128 accumulator = 0;
+    accumulator = mac_i128(accumulator, w0, x0);
+    accumulator = mac_i128(accumulator, w1, x1);
+    return qnn_semantic_step_i64(
+        (int64_t)accumulator,
+        input_fractional_bits,
+        bias,
         total_bits,
         apply_relu
     );

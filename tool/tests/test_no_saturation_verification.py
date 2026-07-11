@@ -81,9 +81,9 @@ class NoSaturationVerificationTest(unittest.TestCase):
         )
 
         self.assertIn("__int128 acc", source)
+        self.assertIn("mac_i128", source)
         self.assertIn("div_round_half_away_from_zero_i128", source)
-        self.assertIn("clamp_to_signed_range", source)
-        self.assertIn("fixed_point_layer_value_i128", source)
+        self.assertIn("clamp_to_signed_range_i128", source)
         self.assertNotIn("(acc / SCALE_FACTOR)", source)
         self.assertNotIn("long long acc = 0LL", source)
 
@@ -103,7 +103,8 @@ class NoSaturationVerificationTest(unittest.TestCase):
         )
 
         self.assertIn("TOTAL_BITS 4", source)
-        self.assertIn("fixed_point_layer_value_i128", source)
+        self.assertIn("mac_i128", source)
+        self.assertIn("clamp_to_signed_range_i128", source)
         self.assertIn("div_round_half_away_from_zero_i128(s_lb", source)
         self.assertIn("div_round_half_away_from_zero_i128(s_ub", source)
         self.assertIn("clamp_bounds_to_signed_range(&out_lb, &out_ub, TOTAL_BITS);", source)
