@@ -25,7 +25,7 @@ jobs:
       - name: Run no-solver unit tests
         run: |
           python -m unittest \
-            tool.tests.test_c_qnn_generation \
-            tool.tests.test_fixed_point_forward \
-            tool.tests.test_no_saturation_verification \
-            tool.tests.test_solver_backend
+            src.tests.test_c_qnn_generation \
+            src.tests.test_fixed_point_forward \
+            src.tests.test_no_saturation_verification \
+            src.tests.test_solver_backend

@@ -21,4 +21,4 @@ symbolic_pp
 venv/
 image_gen
 logs
-tool/benchmark/
+src/benchmark/
