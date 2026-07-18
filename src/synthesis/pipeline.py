@@ -309,6 +309,7 @@ def _refresh_article_metrics(
         "gurobi_threads": int(config.gurobi_threads),
         "formal_no_saturation": bool(config.formal_saturation_check),
         "require_formal_no_saturation": bool(config.require_formal_no_saturation),
+        "no_saturation_continue_on_unknown": bool(config.no_saturation_continue_on_unknown),
     }
 
 
@@ -1126,6 +1127,11 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         "fixed_point_semantics": {
             "claim_type": "declared_backend_semantics",
             "layers": [],
+        },
+        "contract_harness_semantics": {
+            "uses_shared_deployed_arithmetic_kernel": True,
+            "clamp_in_contract_harnesses": True,
+            "no_saturation_required_for_deployed_transfer": False,
         },
         "accumulator_range": [],
         "verification_claims": {
