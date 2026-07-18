@@ -121,6 +121,60 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Stop no-saturation block checks after TIMEOUT/MEMOUT/UNKNOWN.",
     )
+    parser.add_argument(
+        "--unsound-contract-tolerance",
+        "--unsound_contract_tolerance",
+        dest="unsound_contract_tolerance",
+        action="store_true",
+        default=False,
+        help=(
+            "Debug only: restore legacy hidden-contract tolerance. This weakens "
+            "assume-guarantee composition and marks summaries with soundness=degraded."
+        ),
+    )
+    parser.add_argument(
+        "--no-unsound-contract-tolerance",
+        "--no_unsound_contract_tolerance",
+        dest="unsound_contract_tolerance",
+        action="store_false",
+        help="Use the default strict zero-tolerance hidden contracts.",
+    )
+    parser.add_argument(
+        "--propagate-contract-tolerance",
+        "--propagate_contract_tolerance",
+        dest="propagate_contract_tolerance",
+        action="store_true",
+        default=False,
+        help=(
+            "Sound mode for non-zero contract tolerance: use the verified widened "
+            "hidden contract as the downstream layer input assumption."
+        ),
+    )
+    parser.add_argument(
+        "--no-propagate-contract-tolerance",
+        "--no_propagate_contract_tolerance",
+        dest="propagate_contract_tolerance",
+        action="store_false",
+        help="Do not widen downstream assumptions from verified hidden contracts.",
+    )
+    parser.add_argument(
+        "--enforce-contract-chaining",
+        "--enforce_contract_chaining",
+        dest="enforce_contract_chaining",
+        action="store_true",
+        default=True,
+        help="Reject hidden-layer candidates whose guarantee does not compose with the next layer assumption.",
+    )
+    parser.add_argument(
+        "--no-enforce-contract-chaining",
+        "--no_enforce_contract_chaining",
+        dest="enforce_contract_chaining",
+        action="store_false",
+        help=(
+            "Diagnostic only: record chaining_ok but accept candidates even when the "
+            "assume-guarantee chain is unsound. This restores historical acceptance behavior."
+        ),
+    )
     parser.add_argument("--target-label", type=int, default=None)
     parser.add_argument("--valid-labels", default=None, help="Comma-separated valid output labels for the output property.")
     parser.add_argument("--compare-split", default="test", choices=["train", "test"])
@@ -298,6 +352,9 @@ def main(argv: list[str] | None = None) -> None:
         esbmc_timeout_seconds=max(1, int(args.esbmc_timeout_seconds)),
         gurobi_threads=max(1, int(args.gurobi_threads)),
         no_saturation_continue_on_unknown=bool(args.no_saturation_continue_on_unknown),
+        unsound_contract_tolerance=bool(args.unsound_contract_tolerance),
+        propagate_contract_tolerance=bool(args.propagate_contract_tolerance),
+        enforce_contract_chaining=bool(args.enforce_contract_chaining),
         export_paper_tables=args.export_paper_tables,
         baseline_results_json=args.baseline_results_json,
     )

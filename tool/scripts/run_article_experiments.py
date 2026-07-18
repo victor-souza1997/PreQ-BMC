@@ -35,6 +35,51 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--esbmc-jobs", type=int, default=1)
     parser.add_argument("--solver", choices=["cbc", "gurobi"], default="gurobi")
     parser.add_argument("--gurobi-threads", type=int, default=4)
+    parser.add_argument(
+        "--unsound-contract-tolerance",
+        "--unsound_contract_tolerance",
+        dest="unsound_contract_tolerance",
+        action="store_true",
+        default=None,
+        help="Force legacy non-zero hidden-contract tolerance for all runs.",
+    )
+    parser.add_argument(
+        "--no-unsound-contract-tolerance",
+        "--no_unsound_contract_tolerance",
+        dest="unsound_contract_tolerance",
+        action="store_false",
+        help="Force strict zero hidden-contract tolerance for all runs.",
+    )
+    parser.add_argument(
+        "--enforce-contract-chaining",
+        "--enforce_contract_chaining",
+        dest="enforce_contract_chaining",
+        action="store_true",
+        default=None,
+        help="Force assume-guarantee chaining enforcement for all runs.",
+    )
+    parser.add_argument(
+        "--no-enforce-contract-chaining",
+        "--no_enforce_contract_chaining",
+        dest="enforce_contract_chaining",
+        action="store_false",
+        help="Diagnostic only: accept runs even when chaining_ok is false.",
+    )
+    parser.add_argument(
+        "--propagate-contract-tolerance",
+        "--propagate_contract_tolerance",
+        dest="propagate_contract_tolerance",
+        action="store_true",
+        default=None,
+        help="Force sound propagation of widened hidden contracts for all runs.",
+    )
+    parser.add_argument(
+        "--no-propagate-contract-tolerance",
+        "--no_propagate_contract_tolerance",
+        dest="propagate_contract_tolerance",
+        action="store_false",
+        help="Do not propagate widened hidden contracts for all runs.",
+    )
     parser.add_argument("--esbmc-generate-smt-formula", action="store_true")
     parser.add_argument("--mrr-mode", choices=["none", "discrete", "binary"], default=None)
     parser.add_argument("--mrr-eps-values", default=None)
@@ -125,6 +170,14 @@ def _expand_runs(config: dict[str, Any], args: argparse.Namespace) -> list[dict[
     binary_values = _binary_probe_values(args.mrr_binary_low, args.mrr_binary_high, args.mrr_binary_iters)
     for index, raw in enumerate(config["runs"]):
         base = {**defaults, **raw}
+        if args.unsound_contract_tolerance is not None:
+            base["unsound_contract_tolerance"] = bool(args.unsound_contract_tolerance)
+        if args.propagate_contract_tolerance is not None:
+            base["propagate_contract_tolerance"] = bool(args.propagate_contract_tolerance)
+            if args.propagate_contract_tolerance and args.enforce_contract_chaining is None:
+                base["enforce_contract_chaining"] = True
+        if args.enforce_contract_chaining is not None:
+            base["enforce_contract_chaining"] = bool(args.enforce_contract_chaining)
         sample_ids = base.pop("sample_ids", None)
         if sample_ids is None:
             sample_ids = [base.get("sample_id", 0)]
@@ -197,6 +250,9 @@ def _runtime_metadata(args: argparse.Namespace, run: dict[str, Any], command: li
         "solver": str(run.get("solver", args.solver)),
         "gurobi_threads": int(run.get("gurobi_threads", args.gurobi_threads)),
         "esbmc_jobs": int(run.get("esbmc_jobs", args.esbmc_jobs)),
+        "unsound_contract_tolerance": bool(run.get("unsound_contract_tolerance", False)),
+        "propagate_contract_tolerance": bool(run.get("propagate_contract_tolerance", False)),
+        "enforce_contract_chaining": bool(run.get("enforce_contract_chaining", True)),
         "dataset": run.get("dataset"),
         "architecture": run.get("arch"),
         "sample_id": run.get("sample_id"),
@@ -336,6 +392,12 @@ def _build_pipeline_command(
         _add_flag(command, supported_flags, "--export-paper-tables")
     else:
         _add_flag(command, supported_flags, "--no-export-paper-tables")
+    if bool(run.get("unsound_contract_tolerance", False)):
+        _add_flag(command, supported_flags, "--unsound-contract-tolerance")
+    if bool(run.get("propagate_contract_tolerance", False)):
+        _add_flag(command, supported_flags, "--propagate-contract-tolerance")
+    if not bool(run.get("enforce_contract_chaining", True)):
+        _add_flag(command, supported_flags, "--no-enforce-contract-chaining")
 
     formal_no_saturation = bool(run.get("formal_no_saturation", run.get("formal_saturation_check", False)))
     _add_flag(

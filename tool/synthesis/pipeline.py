@@ -90,6 +90,9 @@ class RobustnessPipelineConfig:
     esbmc_profile: ESBMCProfile = "paper-fast"
     esbmc_timeout_seconds: int = 9000
     gurobi_threads: int = 4
+    unsound_contract_tolerance: bool = False
+    propagate_contract_tolerance: bool = False
+    enforce_contract_chaining: bool = True
     export_paper_tables: bool = True
     baseline_results_json: Path | None = None
 
@@ -1054,6 +1057,9 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         esbmc_jobs=max(1, int(config.esbmc_jobs)),
         solver=config.solver,
         gurobi_threads=max(1, int(config.gurobi_threads)),
+        unsound_contract_tolerance=bool(config.unsound_contract_tolerance),
+        propagate_contract_tolerance=bool(config.propagate_contract_tolerance),
+        enforce_contract_chaining=bool(config.enforce_contract_chaining),
         esbmc=ESBMCConfig(
             timeout_seconds=max(1, int(config.esbmc_timeout_seconds)),
             memlimit=str(config.esbmc_memlimit),
@@ -1089,6 +1095,16 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         "compare_split": config.compare_split,
         "solver": str(config.solver),
         "cached_preimage": bool(config.no_gurobi),
+        "soundness": (
+            "degraded"
+            if (
+                not config.enforce_contract_chaining
+                or (config.unsound_contract_tolerance and not config.propagate_contract_tolerance)
+            )
+            else "tolerance_propagated" if config.unsound_contract_tolerance else "strict"
+        ),
+        "contract_tolerance": synthesizer.contract_tolerance_summary(),
+        "chaining_ok": synthesizer.chaining_summary(),
         "sample_label": sample_label,
         "predicted_label": predicted_label,
         "sample_logits": sample_logits.tolist(),
@@ -1130,6 +1146,16 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
     if not synthesis_result.success:
         summary["blockwise_verification"] = synthesizer.blockwise_verification_summary()
         summary.update(synthesizer.no_saturation_block_summary())
+        summary["contract_tolerance"] = synthesizer.contract_tolerance_summary()
+        summary["chaining_ok"] = synthesizer.chaining_summary()
+        summary["soundness"] = (
+            "degraded"
+            if (
+                not config.enforce_contract_chaining
+                or (config.unsound_contract_tolerance and not config.propagate_contract_tolerance)
+            )
+            else "tolerance_propagated" if config.unsound_contract_tolerance else "strict"
+        )
         _refresh_article_metrics(
             summary,
             pipeline_start_time=pipeline_start_time,
@@ -1191,6 +1217,16 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
     summary["formal_saturation_verification"] = _formal_saturation_summary(config, quality_summary)
     summary["blockwise_verification"] = synthesizer.blockwise_verification_summary()
     summary.update(synthesizer.no_saturation_block_summary())
+    summary["contract_tolerance"] = synthesizer.contract_tolerance_summary()
+    summary["chaining_ok"] = synthesizer.chaining_summary()
+    summary["soundness"] = (
+        "degraded"
+        if (
+            not config.enforce_contract_chaining
+            or (config.unsound_contract_tolerance and not config.propagate_contract_tolerance)
+        )
+        else "tolerance_propagated" if config.unsound_contract_tolerance else "strict"
+    )
     summary["comparison"] = comparison
     _refresh_article_metrics(
         summary,

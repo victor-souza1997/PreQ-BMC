@@ -115,6 +115,7 @@ def innerlayer_fixed_int_bounds_only(
     scale_factor: int,
     total_bits: int,
     activation: str = "none",
+    unsound_contract_tolerance: bool = False,
 ) -> str:
     if activation not in {"none", "relu", "relu6"}:
         raise ValueError(
@@ -126,6 +127,13 @@ def innerlayer_fixed_int_bounds_only(
         "relu": 1,
         "relu6": 2,
     }[activation]
+    abs_tol_expr = "(__int128)(SCALE_FACTOR / 1000)" if unsound_contract_tolerance else "0"
+    rel_tol_num = 1 if unsound_contract_tolerance else 0
+    preimage_tolerance_expr = (
+        "abs_tol + (rel_tol_num * range) / rel_tol_den"
+        if unsound_contract_tolerance
+        else "0"
+    )
 
     return f"""\
 #include <stdint.h>
@@ -230,12 +238,12 @@ static void check_affine_bounds_fixed_bounds_only(void)
     __ESBMC_assert(TOTAL_BITS > 1 && TOTAL_BITS < 127, "TOTAL_BITS must fit in __int128");
 
     /*
-     * Tolerance around the preimage interval.
-     * abs_tol = 0.001 * scale
-     * rel_tol = 1%
+     * Contract tolerance is zero for sound assume-guarantee composition.
+     * The legacy non-zero tolerance is only emitted by the explicit
+     * --unsound-contract-tolerance debug flag.
      */
-    const __int128 abs_tol = (__int128)(SCALE_FACTOR / 1000);
-    const __int128 rel_tol_num = 1;
+    const __int128 abs_tol = {abs_tol_expr};
+    const __int128 rel_tol_num = {rel_tol_num};
     const __int128 rel_tol_den = 100;
 
     __ESBMC_assert(rel_tol_den > 0, "relative tolerance denominator must be positive");
@@ -251,7 +259,7 @@ static void check_affine_bounds_fixed_bounds_only(void)
         __ESBMC_assert(pre_lo <= pre_hi, "invalid preimage interval");
 
         const __int128 range = abs_i128(pre_hi - pre_lo);
-        const __int128 preimage_tolerance = abs_tol + (rel_tol_num * range) / rel_tol_den;
+        const __int128 preimage_tolerance = {preimage_tolerance_expr};
 
         for (int j = 0; j < INPUT_SIZE; ++j)
         {{
@@ -308,6 +316,7 @@ def innerlayer_fixed_int(
     scale_factor: int,
     total_bits: int,
     activation: str = "none",
+    unsound_contract_tolerance: bool = False,
 ) -> str:
     return innerlayer_fixed_int_bounds_only(
         cur_layer_layer_size=cur_layer_layer_size,
@@ -321,6 +330,7 @@ def innerlayer_fixed_int(
         scale_factor=scale_factor,
         total_bits=total_bits,
         activation=activation,
+        unsound_contract_tolerance=unsound_contract_tolerance,
     )
 
 
@@ -628,6 +638,7 @@ def render_hidden_affine_bounds_program(
     scale_factor: int,
     total_bits: int,
     activation: str = "none",
+    unsound_contract_tolerance: bool = False,
 ) -> str:
     return innerlayer_fixed_int_bounds_only(
         cur_layer_layer_size=output_size,
@@ -641,6 +652,7 @@ def render_hidden_affine_bounds_program(
         scale_factor=scale_factor,
         total_bits=total_bits,
         activation=activation,
+        unsound_contract_tolerance=unsound_contract_tolerance,
     )
 
 
@@ -656,6 +668,7 @@ def render_hidden_affine_bounds_block_program(
     scale_factor: int,
     total_bits: int,
     activation: str = "none",
+    unsound_contract_tolerance: bool = False,
 ) -> str:
     """Render a hidden affine contract harness for a contiguous output-neuron block."""
 
@@ -671,6 +684,7 @@ def render_hidden_affine_bounds_block_program(
         scale_factor=scale_factor,
         total_bits=total_bits,
         activation=activation,
+        unsound_contract_tolerance=unsound_contract_tolerance,
     )
 
 

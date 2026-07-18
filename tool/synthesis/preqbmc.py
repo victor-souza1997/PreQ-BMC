@@ -60,6 +60,9 @@ class QuadapterConfig:
     esbmc_jobs: int = 1
     gurobi_threads: int = 4
     solver: SolverBackendName = "cbc"
+    unsound_contract_tolerance: bool = False
+    propagate_contract_tolerance: bool = False
+    enforce_contract_chaining: bool = True
 
     @classmethod
     def from_namespace(cls, args: Any) -> "QuadapterConfig":
@@ -97,6 +100,9 @@ class QuadapterConfig:
             esbmc_jobs=max(1, int(getattr(args, "esbmc_jobs", 1))),
             gurobi_threads=max(1, int(getattr(args, "gurobi_threads", 4))),
             solver=solver,  # type: ignore[arg-type]
+            unsound_contract_tolerance=bool(getattr(args, "unsound_contract_tolerance", False)),
+            propagate_contract_tolerance=bool(getattr(args, "propagate_contract_tolerance", False)),
+            enforce_contract_chaining=bool(getattr(args, "enforce_contract_chaining", True)),
         )
 
 
@@ -151,6 +157,9 @@ class LayerEncoding:
         self.qu_ub = np.zeros(layer_size, dtype=np.float32)
         self.qu_clipped_lb = np.zeros(layer_size, dtype=np.float32)
         self.qu_clipped_ub = np.zeros(layer_size, dtype=np.float32)
+        self.verified_activation_lb: np.ndarray | None = None
+        self.verified_activation_ub: np.ndarray | None = None
+        self.verified_activation_source: str = "deeppoly_clipped"
 
         if layer_index > 0:
             self.max_weight = np.round(max(np.max(layer_paras[0]), np.max(layer_paras[1])))
@@ -256,9 +265,13 @@ class GPEncoding:
         self.blockwise_run_all_blocks_on_failure = bool(self.config.blockwise_run_all_blocks_on_failure)
         self.no_saturation_continue_on_unknown = bool(self.config.no_saturation_continue_on_unknown)
         self.esbmc_jobs = max(1, int(self.config.esbmc_jobs))
+        self.unsound_contract_tolerance = bool(self.config.unsound_contract_tolerance)
+        self.propagate_contract_tolerance = bool(self.config.propagate_contract_tolerance)
+        self.enforce_contract_chaining = bool(self.config.enforce_contract_chaining)
         self.esbmc_call_records: list[dict[str, Any]] = []
         self.esbmc_block_records: list[dict[str, Any]] = []
         self.esbmc_no_saturation_block_records: list[dict[str, Any]] = []
+        self.chaining_records: list[dict[str, Any]] = []
         self.blockwise_skipped_blocks_due_to_fail_fast = 0
         self.blockwise_first_failed_block: dict[str, Any] | None = None
 
@@ -955,6 +968,28 @@ class GPEncoding:
                 )
 
                 if esbmc_result.status == "VERIFIED":
+                    if cur_layer.layer_index < (len(self.dense_layers) + 1):
+                        chaining_record = self._record_hidden_chaining_check(
+                            cur_layer=cur_layer,
+                            layer_index=in_layer_index,
+                            all_bit=all_bit,
+                            frac_bit=frac_bit,
+                        )
+                        if not chaining_record["chaining_ok"]:
+                            if self.enforce_contract_chaining:
+                                LOGGER.warning(
+                                    "Rejecting layer=%s bits(Q=%s,F=%s): hidden contract does not compose with downstream input box.",
+                                    cur_layer.layer_index,
+                                    all_bit,
+                                    frac_bit,
+                                )
+                                continue
+                            LOGGER.warning(
+                                "Accepting layer=%s bits(Q=%s,F=%s) despite chaining_ok=false because contract chaining enforcement is disabled.",
+                                cur_layer.layer_index,
+                                all_bit,
+                                frac_bit,
+                            )
                     cur_layer.frac_bit = frac_bit
                     qu_frac_list.append(frac_bit)
                     qu_int_list.append(_export_integer_bits(int_bit))
@@ -1050,6 +1085,24 @@ class GPEncoding:
                 record["no_saturation_status"] = "SKIPPED"
                 records.append(record)
                 return False, records
+
+            if cur_layer.layer_index < (len(self.dense_layers) + 1):
+                chaining_record = self._record_hidden_chaining_check(
+                    cur_layer=cur_layer,
+                    layer_index=layer_index,
+                    all_bit=q_bits,
+                    frac_bit=f_bits,
+                )
+                record["chaining_ok"] = bool(chaining_record["chaining_ok"])
+                record["chaining_enforced"] = bool(self.enforce_contract_chaining)
+                record["chaining"] = chaining_record
+                if not chaining_record["chaining_ok"] and self.enforce_contract_chaining:
+                    record["status"] = "FAILED"
+                    record["final_status"] = "FAILED"
+                    record["failure_type"] = "assume_guarantee_chain_failed"
+                    record["no_saturation_status"] = "SKIPPED"
+                    records.append(record)
+                    return False, records
 
             if formal_saturation_check:
                 no_saturation_result = self.verify_layer_no_saturation_with_esbmc(
@@ -1217,6 +1270,13 @@ class GPEncoding:
         if cur_layer.layer_index == 1:
             x_lo = np.array(self.x_low_real, dtype=np.float64)
             x_hi = np.array(self.x_high_real, dtype=np.float64)
+        elif (
+            self.propagate_contract_tolerance
+            and getattr(in_layer, "verified_activation_lb", None) is not None
+            and getattr(in_layer, "verified_activation_ub", None) is not None
+        ):
+            x_lo = np.array(in_layer.verified_activation_lb, dtype=np.float64)
+            x_hi = np.array(in_layer.verified_activation_ub, dtype=np.float64)
         else:
             x_lo = np.array(in_layer.clipped_lb, dtype=np.float64)
             x_hi = np.array(in_layer.clipped_ub, dtype=np.float64)
@@ -1236,6 +1296,145 @@ class GPEncoding:
             np.floor(pre_lo * scale).astype(np.int64),
             np.ceil(pre_hi * scale).astype(np.int64),
         )
+
+    def _contract_tolerance_int(
+        self,
+        pre_lo_int: np.ndarray,
+        pre_hi_int: np.ndarray,
+        scale: int,
+    ) -> np.ndarray:
+        """Return the integer slack emitted in hidden contract harnesses."""
+
+        pre_lo = np.asarray(pre_lo_int, dtype=np.int64)
+        pre_hi = np.asarray(pre_hi_int, dtype=np.int64)
+        if not self.unsound_contract_tolerance:
+            return np.zeros_like(pre_lo, dtype=np.int64)
+
+        abs_tol = int(scale) // 1000
+        rel_tol_num = 1
+        rel_tol_den = 100
+        ranges = np.abs(pre_hi - pre_lo)
+        return (abs_tol + (rel_tol_num * ranges) // rel_tol_den).astype(np.int64)
+
+    @staticmethod
+    def _containment_margins_int(
+        guaranteed_low: np.ndarray,
+        guaranteed_high: np.ndarray,
+        assumed_low: np.ndarray,
+        assumed_high: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, bool, np.ndarray]:
+        lower_margin = np.asarray(guaranteed_low, dtype=np.int64) - np.asarray(assumed_low, dtype=np.int64)
+        upper_margin = np.asarray(assumed_high, dtype=np.int64) - np.asarray(guaranteed_high, dtype=np.int64)
+        lower_ok = lower_margin >= 0
+        upper_ok = upper_margin >= 0
+        ok = bool(np.all(lower_ok & upper_ok))
+        violation_indices = np.flatnonzero(~(lower_ok & upper_ok))
+        return lower_margin, upper_margin, ok, violation_indices
+
+    def _store_verified_activation_bounds(
+        self,
+        cur_layer: LayerEncoding,
+        guaranteed_low_int: np.ndarray,
+        guaranteed_high_int: np.ndarray,
+        scale: int,
+        *,
+        source: str,
+    ) -> None:
+        cur_layer.verified_activation_lb = np.asarray(guaranteed_low_int, dtype=np.float64) / float(scale)
+        cur_layer.verified_activation_ub = np.asarray(guaranteed_high_int, dtype=np.float64) / float(scale)
+        cur_layer.verified_activation_source = source
+
+    def _record_hidden_chaining_check(
+        self,
+        cur_layer: LayerEncoding,
+        layer_index: int,
+        all_bit: int,
+        frac_bit: int,
+    ) -> dict[str, Any]:
+        """Check that a hidden contract guarantee composes with the next input box.
+
+        The ESBMC hidden harness proves a pre-activation guarantee. The next layer
+        assumes the current layer's post-activation clipped box. In integer domain,
+        ReLU(G_l +/- tol) must be contained in that assumed box.
+        """
+
+        scale = 1 << int(frac_bit)
+        pre_lo_int, pre_hi_int = self._layer_preimage_bounds_int(cur_layer, scale)
+        tolerance_int = self._contract_tolerance_int(pre_lo_int, pre_hi_int, scale)
+
+        guaranteed_low = np.maximum(pre_lo_int - tolerance_int, 0)
+        guaranteed_high = np.maximum(pre_hi_int + tolerance_int, 0)
+
+        legacy_assumed_low = np.floor(np.asarray(cur_layer.clipped_lb, dtype=np.float64) * scale).astype(np.int64)
+        legacy_assumed_high = np.ceil(np.asarray(cur_layer.clipped_ub, dtype=np.float64) * scale).astype(np.int64)
+        legacy_lower_margin, legacy_upper_margin, legacy_ok, legacy_violations = self._containment_margins_int(
+            guaranteed_low,
+            guaranteed_high,
+            legacy_assumed_low,
+            legacy_assumed_high,
+        )
+
+        if self.propagate_contract_tolerance:
+            assumed_low = guaranteed_low
+            assumed_high = guaranteed_high
+            assumption_source = "verified_contract"
+        else:
+            assumed_low = legacy_assumed_low
+            assumed_high = legacy_assumed_high
+            assumption_source = "deeppoly_clipped"
+
+        lower_margin, upper_margin, ok, violation_indices = self._containment_margins_int(
+            guaranteed_low,
+            guaranteed_high,
+            assumed_low,
+            assumed_high,
+        )
+        if ok and self.propagate_contract_tolerance:
+            self._store_verified_activation_bounds(
+                cur_layer,
+                guaranteed_low,
+                guaranteed_high,
+                scale,
+                source=assumption_source,
+            )
+
+        record: dict[str, Any] = {
+            "layer_index": int(layer_index),
+            "network_layer_index": int(cur_layer.layer_index),
+            "Q": int(all_bit),
+            "I": int(max(all_bit - frac_bit - 1, 0)),
+            "F": int(frac_bit),
+            "scale_factor": int(scale),
+            "contract_tolerance_enabled": bool(self.unsound_contract_tolerance),
+            "contract_tolerance_propagated": bool(self.propagate_contract_tolerance),
+            "chaining_enforced": bool(self.enforce_contract_chaining),
+            "soundness": (
+                "degraded"
+                if (
+                    not self.enforce_contract_chaining
+                    or (self.unsound_contract_tolerance and not self.propagate_contract_tolerance)
+                )
+                else "tolerance_propagated" if self.unsound_contract_tolerance else "strict"
+            ),
+            "assumption_source": assumption_source,
+            "legacy_box_chaining_ok": legacy_ok,
+            "legacy_min_lower_margin_int": int(np.min(legacy_lower_margin)) if legacy_lower_margin.size else 0,
+            "legacy_min_upper_margin_int": int(np.min(legacy_upper_margin)) if legacy_upper_margin.size else 0,
+            "legacy_violating_neuron_count": int(legacy_violations.size),
+            "abs_tol_int": int((scale // 1000) if self.unsound_contract_tolerance else 0),
+            "rel_tol_num": int(1 if self.unsound_contract_tolerance else 0),
+            "rel_tol_den": 100,
+            "max_tolerance_int": int(np.max(tolerance_int)) if tolerance_int.size else 0,
+            "min_lower_margin_int": int(np.min(lower_margin)) if lower_margin.size else 0,
+            "min_upper_margin_int": int(np.min(upper_margin)) if upper_margin.size else 0,
+            "chaining_ok": ok,
+            "ok": ok,
+            "status": "VERIFIED" if ok else "FAILED",
+            "violating_neurons": [int(index) for index in violation_indices[:20]],
+            "violating_neuron_count": int(violation_indices.size),
+        }
+        self.chaining_records.append(record)
+        return record
 
     def verify_layer_with_esbmc(
         self,
@@ -1733,6 +1932,7 @@ class GPEncoding:
             input_bounds_high_c_int=self.numpy_to_c_int_array(input_hi_int),
             scale_factor=scale,
             total_bits=all_bit,
+            unsound_contract_tolerance=self.unsound_contract_tolerance,
         )
 
     def generate_esbmc_hidden_block_verification_code(
@@ -1761,6 +1961,7 @@ class GPEncoding:
             input_bounds_high_c_int=self.numpy_to_c_int_array(input_hi_int),
             scale_factor=scale,
             total_bits=all_bit,
+            unsound_contract_tolerance=self.unsound_contract_tolerance,
         )
 
     def generate_esbmc_no_saturation_code(
@@ -1880,6 +2081,52 @@ class GPEncoding:
             "largest_estimated_macs_per_query": int(largest_estimated_macs),
             "first_failed_block": self.blockwise_first_failed_block,
             "layers": layers,
+        }
+
+    def contract_tolerance_summary(self) -> dict[str, Any]:
+        soundness = (
+            "degraded"
+            if (
+                not self.enforce_contract_chaining
+                or (self.unsound_contract_tolerance and not self.propagate_contract_tolerance)
+            )
+            else "tolerance_propagated" if self.unsound_contract_tolerance else "strict"
+        )
+        return {
+            "mode": (
+                "legacy_propagated"
+                if self.unsound_contract_tolerance and self.propagate_contract_tolerance
+                else "unsound_debug" if self.unsound_contract_tolerance else "zero"
+            ),
+            "abs_tol_num": int(1 if self.unsound_contract_tolerance else 0),
+            "abs_tol_den": 1000,
+            "rel_tol_num": int(1 if self.unsound_contract_tolerance else 0),
+            "rel_tol_den": 100,
+            "propagated": bool(self.propagate_contract_tolerance),
+            "soundness": soundness,
+        }
+
+    def chaining_summary(self) -> dict[str, Any]:
+        records = [dict(record) for record in self.chaining_records]
+        failed = [record for record in records if not bool(record.get("chaining_ok", False))]
+        soundness = (
+            "degraded"
+            if (
+                not self.enforce_contract_chaining
+                or (self.unsound_contract_tolerance and not self.propagate_contract_tolerance)
+            )
+            else "tolerance_propagated" if self.unsound_contract_tolerance else "strict"
+        )
+        return {
+            "enabled": bool(self.verify_mode == "esbmc"),
+            "enforced": bool(self.enforce_contract_chaining),
+            "contract_tolerance_propagated": bool(self.propagate_contract_tolerance),
+            "policy": "activation_of_hidden_contract_subset_downstream_assumption",
+            "soundness": soundness,
+            "unsound_contract_tolerance": bool(self.unsound_contract_tolerance),
+            "all_ok": len(failed) == 0,
+            "failed_count": int(len(failed)),
+            "layers": records,
         }
 
     def esbmc_call_summary(self) -> dict[str, Any]:

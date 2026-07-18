@@ -20,6 +20,9 @@
     "compile_c_backend": true,
     "enable_diagnostics": true,
     "export_paper_tables": true,
+    "unsound_contract_tolerance": true,
+    "propagate_contract_tolerance": false,
+    "enforce_contract_chaining": false,
     "quality_refinement": true,
     "formal_no_saturation": true,
     "require_formal_no_saturation": false,
@@ -31,7 +34,7 @@
     "esbmc_layer_block_size": 10,
     "esbmc_profile": "paper-fast",
     "esbmc_timeout_seconds": 900,
-    "esbmc_memlimit": "6g",
+    "esbmc_memlimit": "20g",
     "esbmc_jobs": 1,
     "gurobi_threads": 4,
     "enabled": true
@@ -55,7 +58,7 @@
       "eps": 0.01,
       "compare_limit": 0,
       "mrr_enabled": true,
-      "eps_sweep": [0.005, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.1],
+      "eps_sweep": [0.005, 0.0001, 0.01, 0.02, 0.05, 0.1, 0.2],
       "expected_difficulty": "low"
     },
     {

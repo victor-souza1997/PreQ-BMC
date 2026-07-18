@@ -9,6 +9,7 @@ import unittest
 import numpy as np
 
 from synthesis.preqbmc import GPEncoding
+from scripts import run_article_experiments, run_paper_experiments
 from verification.c_templates import (
     render_clamp_correctness_program,
     render_hidden_affine_bounds_block_program,
@@ -109,9 +110,34 @@ class NoSaturationVerificationTest(unittest.TestCase):
         self.assertIn("div_round_half_away_from_zero_i128(s_ub", source)
         self.assertIn("clamp_bounds_to_signed_range(&out_lb, &out_ub, TOTAL_BITS);", source)
         self.assertIn("out_lb >= accepted_low && out_ub <= accepted_high", source)
+        self.assertIn("const __int128 abs_tol = 0;", source)
+        self.assertIn("const __int128 rel_tol_num = 0;", source)
+        self.assertIn("const __int128 preimage_tolerance = 0;", source)
         self.assertNotIn("(acc / SCALE_FACTOR)", source)
         self.assertNotIn("div_floor_i128", source)
         self.assertNotIn("div_ceil_i128", source)
+
+    def test_hidden_contract_harness_requires_debug_flag_for_legacy_tolerance(self) -> None:
+        source = render_hidden_affine_bounds_block_program(
+            block_size=1,
+            input_size=1,
+            weights_c_int="{{1}}",
+            biases_c_int="{0}",
+            preimage_low_c_int="{0}",
+            preimage_high_c_int="{1}",
+            input_bounds_low_c_int="{0}",
+            input_bounds_high_c_int="{1}",
+            scale_factor=1000,
+            total_bits=8,
+            unsound_contract_tolerance=True,
+        )
+
+        self.assertIn("const __int128 abs_tol = (__int128)(SCALE_FACTOR / 1000);", source)
+        self.assertIn("const __int128 rel_tol_num = 1;", source)
+        self.assertIn(
+            "const __int128 preimage_tolerance = abs_tol + (rel_tol_num * range) / rel_tol_den;",
+            source,
+        )
 
     def test_no_saturation_block_template_uses_block_size_with_full_input_bounds(self) -> None:
         source = render_no_saturation_block_program(
@@ -149,6 +175,307 @@ class NoSaturationVerificationTest(unittest.TestCase):
         self.assertIn("--esbmc-memlimit", source)
         self.assertIn("--esbmc-profile", source)
         self.assertIn("--gurobi-threads", source)
+        self.assertIn("--unsound-contract-tolerance", source)
+        self.assertIn("--unsound_contract_tolerance", source)
+        self.assertIn("--propagate-contract-tolerance", source)
+        self.assertIn("--propagate_contract_tolerance", source)
+        self.assertIn("--no-enforce-contract-chaining", source)
+        self.assertIn("--no_enforce_contract_chaining", source)
+        self.assertIn("default=False", source)
+
+    def test_article_runner_forwards_unsound_contract_tolerance_config(self) -> None:
+        args = SimpleNamespace(
+            solver="cbc",
+            esbmc_profile="paper-fast",
+            esbmc_timeout_seconds=900,
+            esbmc_memlimit="6g",
+            esbmc_layer_block_size=10,
+            esbmc_jobs=1,
+            gurobi_threads=4,
+        )
+        command = run_article_experiments._build_pipeline_command(
+            python_executable="python",
+            run={
+                "dataset": "iris",
+                "arch": "1blk_10",
+                "sample_id": 0,
+                "eps": 0.01,
+                "unsound_contract_tolerance": True,
+            },
+            output_dir=Path("output/test"),
+            args=args,
+            supported_flags={"--unsound-contract-tolerance"},
+        )
+
+        self.assertIn("--unsound-contract-tolerance", command)
+
+    def test_article_runner_forwards_propagated_contract_tolerance_config(self) -> None:
+        args = SimpleNamespace(
+            solver="cbc",
+            esbmc_profile="paper-fast",
+            esbmc_timeout_seconds=900,
+            esbmc_memlimit="6g",
+            esbmc_layer_block_size=10,
+            esbmc_jobs=1,
+            gurobi_threads=4,
+        )
+        command = run_article_experiments._build_pipeline_command(
+            python_executable="python",
+            run={
+                "dataset": "iris",
+                "arch": "1blk_10",
+                "sample_id": 0,
+                "eps": 0.01,
+                "propagate_contract_tolerance": True,
+            },
+            output_dir=Path("output/test"),
+            args=args,
+            supported_flags={"--propagate-contract-tolerance"},
+        )
+
+        self.assertIn("--propagate-contract-tolerance", command)
+
+    def test_article_runner_forwards_disabled_chaining_enforcement_config(self) -> None:
+        args = SimpleNamespace(
+            solver="cbc",
+            esbmc_profile="paper-fast",
+            esbmc_timeout_seconds=900,
+            esbmc_memlimit="6g",
+            esbmc_layer_block_size=10,
+            esbmc_jobs=1,
+            gurobi_threads=4,
+        )
+        command = run_article_experiments._build_pipeline_command(
+            python_executable="python",
+            run={
+                "dataset": "iris",
+                "arch": "1blk_10",
+                "sample_id": 0,
+                "eps": 0.01,
+                "enforce_contract_chaining": False,
+            },
+            output_dir=Path("output/test"),
+            args=args,
+            supported_flags={"--no-enforce-contract-chaining"},
+        )
+
+        self.assertIn("--no-enforce-contract-chaining", command)
+
+    def test_article_runner_global_no_unsound_override_clears_config_default(self) -> None:
+        args = run_article_experiments.build_parser().parse_args(
+            [
+                "--dry-run",
+                "--no_unsound_contract_tolerance",
+            ]
+        )
+        runs = run_article_experiments._expand_runs(
+            {
+                "defaults": {
+                    "dataset": "iris",
+                    "arch": "1blk_10",
+                    "unsound_contract_tolerance": True,
+                },
+                "runs": [{"sample_id": 0, "eps": 0.01}],
+            },
+            args,
+        )
+
+        self.assertFalse(runs[0]["unsound_contract_tolerance"])
+
+    def test_article_runner_global_no_chaining_override_clears_config_default(self) -> None:
+        args = run_article_experiments.build_parser().parse_args(
+            [
+                "--dry-run",
+                "--no_enforce_contract_chaining",
+            ]
+        )
+        runs = run_article_experiments._expand_runs(
+            {
+                "defaults": {
+                    "dataset": "iris",
+                    "arch": "1blk_10",
+                    "enforce_contract_chaining": True,
+                },
+                "runs": [{"sample_id": 0, "eps": 0.01}],
+            },
+            args,
+        )
+
+        self.assertFalse(runs[0]["enforce_contract_chaining"])
+
+    def test_article_runner_propagation_override_enforces_chaining_by_default(self) -> None:
+        args = run_article_experiments.build_parser().parse_args(
+            [
+                "--dry-run",
+                "--propagate_contract_tolerance",
+            ]
+        )
+        runs = run_article_experiments._expand_runs(
+            {
+                "defaults": {
+                    "dataset": "iris",
+                    "arch": "1blk_10",
+                    "enforce_contract_chaining": False,
+                },
+                "runs": [{"sample_id": 0, "eps": 0.01}],
+            },
+            args,
+        )
+
+        self.assertTrue(runs[0]["propagate_contract_tolerance"])
+        self.assertTrue(runs[0]["enforce_contract_chaining"])
+
+    def test_paper_runner_forwards_unsound_contract_tolerance_config(self) -> None:
+        command = run_paper_experiments._build_pipeline_command(
+            python_executable="python",
+            run={
+                "dataset": "iris",
+                "arch": "1blk_10",
+                "sample_id": 0,
+                "eps": 0.01,
+                "unsound_contract_tolerance": True,
+            },
+            output_dir=Path("output/test"),
+            supported_flags={"--unsound-contract-tolerance"},
+            default_solver="cbc",
+        )
+
+        self.assertIn("--unsound-contract-tolerance", command)
+
+    def test_paper_runner_forwards_disabled_chaining_enforcement_config(self) -> None:
+        command = run_paper_experiments._build_pipeline_command(
+            python_executable="python",
+            run={
+                "dataset": "iris",
+                "arch": "1blk_10",
+                "sample_id": 0,
+                "eps": 0.01,
+                "enforce_contract_chaining": False,
+            },
+            output_dir=Path("output/test"),
+            supported_flags={"--no-enforce-contract-chaining"},
+            default_solver="cbc",
+        )
+
+        self.assertIn("--no-enforce-contract-chaining", command)
+
+    def test_paper_runner_forwards_propagated_contract_tolerance_config(self) -> None:
+        command = run_paper_experiments._build_pipeline_command(
+            python_executable="python",
+            run={
+                "dataset": "iris",
+                "arch": "1blk_10",
+                "sample_id": 0,
+                "eps": 0.01,
+                "propagate_contract_tolerance": True,
+            },
+            output_dir=Path("output/test"),
+            supported_flags={"--propagate-contract-tolerance"},
+            default_solver="cbc",
+        )
+
+        self.assertIn("--propagate-contract-tolerance", command)
+
+    def test_chaining_summary_marks_disabled_enforcement_as_degraded(self) -> None:
+        encoder = object.__new__(GPEncoding)
+        encoder.unsound_contract_tolerance = False
+        encoder.propagate_contract_tolerance = False
+        encoder.enforce_contract_chaining = False
+        encoder.verify_mode = "esbmc"
+        encoder.chaining_records = []
+
+        summary = encoder.chaining_summary()
+
+        self.assertFalse(summary["enforced"])
+        self.assertEqual(summary["soundness"], "degraded")
+
+    def test_propagated_contract_tolerance_preserves_effective_chaining(self) -> None:
+        encoder = object.__new__(GPEncoding)
+        encoder.unsound_contract_tolerance = True
+        encoder.propagate_contract_tolerance = True
+        encoder.enforce_contract_chaining = True
+        encoder.verify_mode = "esbmc"
+        encoder.chaining_records = []
+        layer = SimpleNamespace(
+            layer_index=1,
+            relaxed_lb=np.array([0.0], dtype=np.float64),
+            relaxed_ub=np.array([1.0], dtype=np.float64),
+            clipped_lb=np.array([0.0], dtype=np.float64),
+            clipped_ub=np.array([1.0], dtype=np.float64),
+            verified_activation_lb=None,
+            verified_activation_ub=None,
+            verified_activation_source="deeppoly_clipped",
+        )
+
+        record = encoder._record_hidden_chaining_check(
+            cur_layer=layer,
+            layer_index=0,
+            all_bit=12,
+            frac_bit=10,
+        )
+        summary = encoder.chaining_summary()
+
+        self.assertTrue(record["chaining_ok"])
+        self.assertFalse(record["legacy_box_chaining_ok"])
+        self.assertEqual(record["assumption_source"], "verified_contract")
+        self.assertEqual(summary["soundness"], "tolerance_propagated")
+        self.assertIsNotNone(layer.verified_activation_lb)
+        self.assertIsNotNone(layer.verified_activation_ub)
+
+    def test_hidden_chaining_check_is_strict_by_default(self) -> None:
+        encoder = object.__new__(GPEncoding)
+        encoder.unsound_contract_tolerance = False
+        encoder.propagate_contract_tolerance = False
+        encoder.enforce_contract_chaining = True
+        encoder.verify_mode = "esbmc"
+        encoder.chaining_records = []
+        layer = SimpleNamespace(
+            layer_index=1,
+            relaxed_lb=np.array([0.0], dtype=np.float64),
+            relaxed_ub=np.array([1.0], dtype=np.float64),
+            clipped_lb=np.array([0.0], dtype=np.float64),
+            clipped_ub=np.array([1.0], dtype=np.float64),
+        )
+
+        record = encoder._record_hidden_chaining_check(
+            cur_layer=layer,
+            layer_index=0,
+            all_bit=12,
+            frac_bit=10,
+        )
+        summary = encoder.chaining_summary()
+
+        self.assertTrue(record["chaining_ok"])
+        self.assertTrue(summary["all_ok"])
+        self.assertEqual(summary["soundness"], "strict")
+
+    def test_hidden_chaining_check_flags_debug_tolerance_hole(self) -> None:
+        encoder = object.__new__(GPEncoding)
+        encoder.unsound_contract_tolerance = True
+        encoder.propagate_contract_tolerance = False
+        encoder.enforce_contract_chaining = True
+        encoder.verify_mode = "esbmc"
+        encoder.chaining_records = []
+        layer = SimpleNamespace(
+            layer_index=1,
+            relaxed_lb=np.array([0.0], dtype=np.float64),
+            relaxed_ub=np.array([1.0], dtype=np.float64),
+            clipped_lb=np.array([0.0], dtype=np.float64),
+            clipped_ub=np.array([1.0], dtype=np.float64),
+        )
+
+        record = encoder._record_hidden_chaining_check(
+            cur_layer=layer,
+            layer_index=0,
+            all_bit=12,
+            frac_bit=10,
+        )
+        summary = encoder.chaining_summary()
+
+        self.assertFalse(record["chaining_ok"])
+        self.assertGreater(record["max_tolerance_int"], 0)
+        self.assertFalse(summary["all_ok"])
+        self.assertEqual(summary["soundness"], "degraded")
 
     def test_paper_fast_profile_uses_low_noise_resource_limited_flags(self) -> None:
         runner = ESBMCRunner(ESBMCConfig())

@@ -26,6 +26,51 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--python-executable", default=sys.executable)
     parser.add_argument("--solver", choices=["cbc", "gurobi"], default="gurobi")
     parser.add_argument(
+        "--unsound-contract-tolerance",
+        "--unsound_contract_tolerance",
+        dest="unsound_contract_tolerance",
+        action="store_true",
+        default=None,
+        help="Force legacy non-zero hidden-contract tolerance for all runs.",
+    )
+    parser.add_argument(
+        "--no-unsound-contract-tolerance",
+        "--no_unsound_contract_tolerance",
+        dest="unsound_contract_tolerance",
+        action="store_false",
+        help="Force strict zero hidden-contract tolerance for all runs.",
+    )
+    parser.add_argument(
+        "--enforce-contract-chaining",
+        "--enforce_contract_chaining",
+        dest="enforce_contract_chaining",
+        action="store_true",
+        default=None,
+        help="Force assume-guarantee chaining enforcement for all runs.",
+    )
+    parser.add_argument(
+        "--no-enforce-contract-chaining",
+        "--no_enforce_contract_chaining",
+        dest="enforce_contract_chaining",
+        action="store_false",
+        help="Diagnostic only: accept runs even when chaining_ok is false.",
+    )
+    parser.add_argument(
+        "--propagate-contract-tolerance",
+        "--propagate_contract_tolerance",
+        dest="propagate_contract_tolerance",
+        action="store_true",
+        default=None,
+        help="Force sound propagation of widened hidden contracts for all runs.",
+    )
+    parser.add_argument(
+        "--no-propagate-contract-tolerance",
+        "--no_propagate_contract_tolerance",
+        dest="propagate_contract_tolerance",
+        action="store_false",
+        help="Do not propagate widened hidden contracts for all runs.",
+    )
+    parser.add_argument(
         "--discover-benchmarks",
         action="store_true",
         help="Print benchmark weights discovered under tool/benchmark and exit.",
@@ -170,6 +215,12 @@ def _build_pipeline_command(
         _add_if_supported(command, supported_flags, "--export-paper-tables")
     else:
         _add_if_supported(command, supported_flags, "--no-export-paper-tables")
+    if bool(run.get("unsound_contract_tolerance", False)):
+        _add_if_supported(command, supported_flags, "--unsound-contract-tolerance")
+    if bool(run.get("propagate_contract_tolerance", False)):
+        _add_if_supported(command, supported_flags, "--propagate-contract-tolerance")
+    if not bool(run.get("enforce_contract_chaining", True)):
+        _add_if_supported(command, supported_flags, "--no-enforce-contract-chaining")
 
     if "formal_saturation_check" in run:
         _add_if_supported(
@@ -404,6 +455,14 @@ def main(argv: list[str] | None = None) -> None:
     executed = 0
     failed = False
     for run in runs:
+        if args.unsound_contract_tolerance is not None:
+            run["unsound_contract_tolerance"] = bool(args.unsound_contract_tolerance)
+        if args.propagate_contract_tolerance is not None:
+            run["propagate_contract_tolerance"] = bool(args.propagate_contract_tolerance)
+            if args.propagate_contract_tolerance and args.enforce_contract_chaining is None:
+                run["enforce_contract_chaining"] = True
+        if args.enforce_contract_chaining is not None:
+            run["enforce_contract_chaining"] = bool(args.enforce_contract_chaining)
         output_dir = output_root / run["name"]
         if run.get("_skip_reason"):
             if not args.dry_run:
