@@ -22,6 +22,7 @@ pip install -e '.[full]'
 Smaller optional groups are available:
 
 ```bash
+pip install -e '.[cbc]'
 pip install -e '.[gurobi]'
 pip install -e '.[plots]'
 pip install -e '.[dev]'
@@ -40,9 +41,17 @@ preqbmc verify-environment
 
 The cached demo and article verification runs require ESBMC.
 
+## CBC
+
+CBC is the default license-free MILP backend for the active robustness pipeline:
+
+```bash
+pip install -e '.[cbc]'
+```
+
 ## Gurobi
 
-Full MILP preimage synthesis requires a valid Gurobi installation and an importable `gurobipy` Python package.
+Gurobi is optional and is used only for reference runs selected with `--solver gurobi`. It requires a valid Gurobi installation and an importable `gurobipy` Python package.
 
 Cached artifact demos do not require Gurobi:
 
