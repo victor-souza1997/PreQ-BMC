@@ -19,7 +19,7 @@ This command executes all enabled runs in `experiments/paper_experiments.json`, 
 Required:
 
 - Python environment with the repository dependencies installed.
-- ESBMC available on `PATH`.
+- ESBMC available through `PREQBMC_ESBMC`, the repo-local `.local/bin/esbmc`, or system `PATH`.
 - Gurobi and `gurobipy` when using `preimg_mode = "milp"` without `--no-gurobi`.
 - GCC or another configured compiler when C backend compilation is enabled.
 - Matplotlib for plotting.
@@ -27,7 +27,8 @@ Required:
 Recommended preflight checks:
 
 ```bash
-which esbmc
+preqbmc install-esbmc
+preqbmc verify-environment
 python -c "import gurobipy; print('gurobi ok')"
 gcc --version
 python tool/scripts/run_paper_experiments.py \

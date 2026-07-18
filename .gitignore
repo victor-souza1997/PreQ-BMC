@@ -8,6 +8,7 @@ venv/
 *.log
 *.smt2
 .env
+.local/
 *.lic
 gurobi.lic
 .pytest_cache/

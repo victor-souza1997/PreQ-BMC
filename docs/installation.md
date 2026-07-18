@@ -32,7 +32,33 @@ No strict version pins are declared in `pyproject.toml` because the article envi
 
 ## ESBMC
 
-Install ESBMC separately and ensure it is on `PATH`:
+Install ESBMC into this repository:
+
+```bash
+preqbmc install-esbmc
+preqbmc verify-environment
+```
+
+The installer downloads the latest ESBMC GitHub release asset matching the current platform and creates a repo-local executable at `.local/bin/esbmc`. The PreQ-BMC ESBMC runner resolves executables in this order:
+
+1. `PREQBMC_ESBMC`, if set;
+2. `.local/bin/esbmc` in this repository;
+3. `esbmc` from the system `PATH`.
+
+For an opt-in check-and-install flow, use:
+
+```bash
+preqbmc verify-environment --install-missing-esbmc
+preqbmc demo --install-missing-esbmc --no-gurobi --output output/demo_run
+```
+
+For a direct checkout without installing the `preqbmc` console command, use:
+
+```bash
+PYTHONPATH=src python src/scripts/install_esbmc.py
+```
+
+If you prefer a system installation, install ESBMC separately and ensure it is on `PATH`:
 
 ```bash
 esbmc --version

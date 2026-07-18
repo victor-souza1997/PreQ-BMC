@@ -2,9 +2,16 @@
 
 ## ESBMC
 
-ESBMC is the bounded model checker used to verify generated C harnesses. PreQ-BMC expects an `esbmc` executable on `PATH`.
+ESBMC is the bounded model checker used to verify generated C harnesses. The recommended artifact setup is repo-local:
 
-Check:
+```bash
+preqbmc install-esbmc
+preqbmc verify-environment
+```
+
+The installer downloads the latest matching ESBMC GitHub release asset and exposes it under `.local/bin/esbmc`. The runner checks `PREQBMC_ESBMC`, then `.local/bin/esbmc`, then the system `PATH`.
+
+System installations are also supported. Check:
 
 ```bash
 esbmc --version

@@ -59,7 +59,23 @@ pip install -e '.[cbc]'
 pip install -e '.[plots]'
 ```
 
-Install ESBMC separately and ensure it is on `PATH`:
+Install ESBMC into this repository:
+
+```bash
+preqbmc install-esbmc
+preqbmc verify-environment
+```
+
+This downloads the latest ESBMC GitHub release asset for the current platform and exposes the binary as `.local/bin/esbmc`. PreQ-BMC automatically checks this repo-local binary before falling back to the system `PATH`.
+
+For an opt-in check-and-install flow, use:
+
+```bash
+preqbmc verify-environment --install-missing-esbmc
+preqbmc demo --install-missing-esbmc --no-gurobi --output output/demo_run
+```
+
+If you prefer a system installation, install ESBMC separately and ensure it is on `PATH`:
 
 ```bash
 esbmc --version
@@ -73,7 +89,7 @@ Install CBC with `pip install -e '.[cbc]'` for the default license-free MILP bac
 preqbmc verify-environment
 ```
 
-This command reports Python version, ESBMC availability, CBC/python-mip availability, optional Gurobi availability, and Python package availability.
+This command reports Python version, repo-local/system ESBMC availability, CBC/python-mip availability, optional Gurobi availability, and Python package availability.
 
 ## Quickstart With Cached Preimage
 
@@ -92,7 +108,7 @@ output/demo_run/layers/
 output/demo_run/c_export/qnn_model.c
 ```
 
-If ESBMC is not installed, the command stops before running the pipeline and prints installation guidance.
+If ESBMC is not installed, the command stops before running the pipeline and points to `preqbmc install-esbmc`.
 
 ## Full Synthesis With CBC Or Gurobi
 
