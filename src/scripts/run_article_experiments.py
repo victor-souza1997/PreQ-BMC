@@ -12,6 +12,11 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from verification.esbmc_install import resolve_esbmc_executable
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run article experiments for deployment-aware QNN verification.")
@@ -236,13 +241,15 @@ def _run_capture(command: list[str], timeout: float = 5.0) -> str:
 
 
 def _runtime_metadata(args: argparse.Namespace, run: dict[str, Any], command: list[str]) -> dict[str, Any]:
+    esbmc_executable = resolve_esbmc_executable() or "esbmc"
     return {
         "git_commit": _run_capture(["git", "rev-parse", "HEAD"]),
         "git_branch": _run_capture(["git", "branch", "--show-current"]),
         "command": _command_text(command),
         "python_version": sys.version.replace("\n", " "),
         "python_executable": args.python_executable,
-        "esbmc_version": _run_capture(["esbmc", "--version"]),
+        "esbmc_executable": esbmc_executable,
+        "esbmc_version": _run_capture([esbmc_executable, "--version"]),
         "solver_profile": run.get("esbmc_profile", args.esbmc_profile),
         "timeout": int(run.get("esbmc_timeout_seconds", args.esbmc_timeout_seconds)),
         "memlimit": str(run.get("esbmc_memlimit", args.esbmc_memlimit)),

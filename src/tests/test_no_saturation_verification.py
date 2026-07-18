@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +17,7 @@ from verification.c_templates import (
     render_output_target_program,
 )
 from verification.esbmc import ESBMCConfig, ESBMCRunner, ESBMCResult
+from verification.esbmc_install import resolve_esbmc_executable
 
 
 def _single_neuron_program(total_bits: int) -> str:
@@ -674,7 +674,7 @@ class NoSaturationVerificationTest(unittest.TestCase):
         self.assertFalse(full_layer_harness.exists())
         self.assertTrue(all("no_sat_block" in call.name for call in encoder.esbmc_runner.calls))
 
-    @unittest.skipUnless(shutil.which("esbmc"), "esbmc binary is not installed")
+    @unittest.skipUnless(resolve_esbmc_executable(), "esbmc binary is not installed")
     def test_esbmc_no_saturation_fails_for_too_small_q_and_passes_for_larger_q(self) -> None:
         runner = ESBMCRunner(ESBMCConfig(timeout_seconds=20, verbosity=10))
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 import unittest
+
+from verification.esbmc_install import resolve_esbmc_executable
 
 
 def _has_gurobi() -> bool:
@@ -25,7 +26,7 @@ def _has_tensorflow() -> bool:
     return True
 
 
-@unittest.skipUnless(shutil.which("esbmc"), "esbmc binary is not installed")
+@unittest.skipUnless(resolve_esbmc_executable(), "esbmc binary is not installed")
 @unittest.skipUnless(_has_gurobi(), "gurobipy is not installed/configured")
 @unittest.skipUnless(_has_tensorflow(), "tensorflow is not installed")
 class BlockwiseESBMCSanityTest(unittest.TestCase):

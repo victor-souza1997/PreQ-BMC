@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,6 +12,7 @@ import unittest
 from synthesis.preqbmc import GPEncoding
 from synthesis.solver_backend import BackendConstants as GRB
 from synthesis.solver_backend import SolverStatus, build_model
+from verification.esbmc_install import resolve_esbmc_executable
 
 
 def _module_available(name: str) -> bool:
@@ -62,7 +62,7 @@ class SolverParityTest(unittest.TestCase):
         os.environ.get("PREQBMC_RUN_SOLVER_PARITY") == "1",
         "set PREQBMC_RUN_SOLVER_PARITY=1 to run end-to-end CBC/Gurobi pipeline parity",
     )
-    @unittest.skipUnless(shutil.which("esbmc"), "esbmc binary is not installed")
+    @unittest.skipUnless(resolve_esbmc_executable(), "esbmc binary is not installed")
     @unittest.skipUnless(_module_available("tensorflow"), "tensorflow is not installed")
     @unittest.skipUnless(_module_available("h5py"), "h5py is not installed")
     @unittest.skipUnless(_module_available("sklearn"), "scikit-learn is not installed")
