@@ -1,171 +1,86 @@
 # PreQ-BMC
 
-PreQ-BMC is a preimage-guided bounded model checking framework for deployment-aware verification of fixed-point Quantized Neural Network implementations.
+## Documentation Guide
+- **Step 1: Setup:** [[Complete installation guide](docs/installation.md)] 
+- **Step 2: Validation:** [[Complete evaluation](docs/reproducing_article_results.md)] 
+- **Step 3: Experiments:** [[Complete reproducibility](docs/artifact_evaluation.md)]
 
-The repository contains the research prototype used for the article experiments and the SBSeg 2026 Tool Track / Salao de Ferramentas artifact. Some internal modules still use historical project names for compatibility, but public commands and documentation use the name PreQ-BMC.
+## Tool Description
+PreQ-BMC is a methodology and tool pipeline designed to synthesize a fixed-point Quantized Neural Network (QNN) from a trained floating-point model, preserving local robustness properties and maintaining deployment accuracy.
 
-## Key Features
+The central goal is to find a per-layer fixed-point configuration `(Q, I, F)` that is compact enough for embedded systems, but still preserves the original robustness contract. Instead of simply verifying the entire network at once, the tool decomposes the problem: it uses preimages to create per-layer contracts and invokes `ESBMC` to mathematically prove that the quantized version respects these boundaries. This is complemented with empirical and formal saturation tests to ensure the C code behaves exactly as expected in the real world.
 
-- Layer-wise preimage contracts for neural-network robustness properties.
-- Fixed-point C harness generation for ESBMC/BMC checks.
-- Block-wise verification for dense hidden layers using a shared layer `<Q,I,F>` format.
-- Formal no-saturation checks and empirical implementation diagnostics.
-- Python and generated-C deployment comparisons.
-- Article experiment runners, aggregation scripts, tables, and plots.
+### Key Features
+- Preimage-Guided Synthesis: Uses backward preimage propagation (via `DeepPoly` abstraction and `MILP`) to break the end-to-end problem into layer-wise robustness contracts.
+- Rigorous Formal Verification: Generates C harnesses and invokes `ESBMC` to verify whether the quantized affine transformations respect the preimage conditions.
+- Block-wise Verification: Scales the verification of larger layers by breaking them down into smaller blocks of neurons in `ESBMC`, without introducing mixed precision.
+- Quality and Saturation Validation: Iteratively refines bit-widths `(Q, I, F)` if the network suffers accuracy drops, mismatch errors, or saturation, offering both empirical and formal guarantees against saturation.
+- Absolute Semantic Fidelity: The Python interpreter and the generated C backend share the exact same arithmetic operations as `ESBMC` (such as `__int128` accumulators, round-half-away-from-zero, and exact clamp limits).
 
-## Scope and Limitations
-
-PreQ-BMC currently targets the supported benchmark subset in this repository: fixed-point affine/ReLU MLP-style networks loaded from the provided benchmark weights. The formal pipeline verifies the existing generated ESBMC harnesses and fixed-point contracts; this artifact preparation does not change the mathematical verification semantics.
-
-Full end-to-end MILP-based preimage synthesis uses CBC through `python-mip` by default. Gurobi remains supported as an optional reference backend via `--solver gurobi`. For artifact evaluation, we also provide cached preimage contracts for small examples so that reviewers can run harness generation, ESBMC verification, and diagnostics without solving the preimage MILP.
-
-Deployment C export already exists for runs with the C backend enabled. The pipeline writes it under:
-
-```text
-<run-output>/c_export/qnn_model.c
-<run-output>/c_export/qnn_model.so
-```
-
-ESBMC verification harnesses are distinct artifacts and are written under:
-
-```text
-<run-output>/layers/
-```
+## Dependencies
+- Python 3.10 or newer.
+- ESBMC (can be installed locally in the repository via an included script).
+- GCC (or another configured compiler) for local C backend compilation.
+- CBC / python-mip (Installed by default via pip to ensure open-source reproducibility of the MILP synthesis).
+- Optional: Gurobi and gurobipy (only required if you want to export new preimage caches or use the commercial solver as a baseline/reference).
 
 ## Installation
+Clone this repository, create a virtual environment, and activate it:
 
-Clone the repository and create a virtual environment:
-
-```bash
-git clone https://github.com/victor-souza1997/PreQ-BMC.git
-cd PreQ-BMC
+```ash
 python -m venv .venv
-. .venv/bin/activate
+source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -e .
 ```
-
-For the full experiment pipeline, install optional dependencies:
-
-```bash
+Install the package with all pipeline dependencies, including the default solver (CBC) and plotting libraries:
+```Bash
 pip install -e '.[full]'
 ```
-
-Optional solver and plotting groups are also available:
-
-```bash
-pip install -e '.[gurobi]'
-pip install -e '.[cbc]'
-pip install -e '.[plots]'
-```
-
-Install ESBMC into this repository:
-
-```bash
+Install ESBMC into the repository environment and verify that the tools are recognized:
+```Bash
 preqbmc install-esbmc
 preqbmc verify-environment
 ```
+## First Example
+To confirm the entire architecture is working, run the quick demo. It uses the repository's included cache to perform the quantization, C generation, and verification steps without needing the Gurobi solver:
 
-This downloads the latest ESBMC GitHub release asset for the current platform and exposes the binary as `.local/bin/esbmc`. PreQ-BMC automatically checks this repo-local binary before falling back to the system `PATH`.
-
-For an opt-in check-and-install flow, use:
-
-```bash
-preqbmc verify-environment --install-missing-esbmc
-preqbmc demo --install-missing-esbmc --no-gurobi --output output/demo_run
-```
-
-If you prefer a system installation, install ESBMC separately and ensure it is on `PATH`:
-
-```bash
-esbmc --version
-```
-
-Install CBC with `pip install -e '.[cbc]'` for the default license-free MILP backend. Configure Gurobi only if you will run reference checks with `--solver gurobi`.
-
-## Verify the Environment
-
-```bash
-preqbmc verify-environment
-```
-
-This command reports Python version, repo-local/system ESBMC availability, CBC/python-mip availability, optional Gurobi availability, and Python package availability.
-
-## Quickstart With Cached Preimage
-
-Run the cached Iris demo:
-
-```bash
+```Bash
 preqbmc demo --no-gurobi --output output/demo_run
 ```
+This command will create an `output/demo_run/` folder containing:
 
-The demo uses the cache in `examples/preimage_cache/` and writes:
+- The verification and synthesis reports (reports/).
+- The generated C verification code (harnesses) for each layer (layers/).
+- The final library and code ready for embedded systems (c_export/qnn_model.c).
 
-```text
-output/demo_run/reports/pipeline_summary.json
-output/demo_run/reports/experiment_summary.json
-output/demo_run/layers/
-output/demo_run/c_export/qnn_model.c
+## How to Reproduce Experiments
+The tool already includes a runner programmed to execute the test batches required for the article and generate spreadsheets and plots automatically.
+
+### 1. Dry Run
+Before running everything, test if the config reader is working properly by simulating a single case without invoking ESBMC:
+
+```Bash
+preqbmc reproduce --config experiments/article_experiments.json --only iris --max-runs 1 --dry-run
 ```
+### 2. Full Run and Aggregation
+To run the experiments, generate raw data, consolidate them into .csv files, and create the final plots, use:
 
-If ESBMC is not installed, the command stops before running the pipeline and points to `preqbmc install-esbmc`.
-
-## Full Synthesis With CBC Or Gurobi
-
-With ESBMC and CBC/python-mip installed, run the same small example end to end:
-
-```bash
-preqbmc demo --output output/demo_run_cbc
-```
-
-Or call the existing pipeline directly:
-
-```bash
-python tool/scripts/run_robustness_pipeline.py \
-  --dataset iris_15x2 \
-  --arch 2blk_15_15 \
-  --sample-id 27 \
-  --eps 0.05 \
-  --preimage-mode milp \
-  --verify-mode esbmc \
-  --solver cbc \
-  --output-dir output/iris_full
-```
-
-For a Gurobi reference run, add `--solver gurobi` and ensure `gurobipy` plus a valid license are configured.
-
-## Reproducing Article Experiments
-
-Dry-run one Iris article experiment:
-
-```bash
-preqbmc reproduce \
-  --config experiments/article_experiments.json \
-  --only iris \
-  --max-runs 1 \
-  --dry-run
-```
-
-Run and aggregate article experiments:
-
-```bash
+```Bash
 preqbmc reproduce \
   --config experiments/article_experiments.json \
   --continue-on-error \
   --aggregate \
   --plots
 ```
+### 3. Aggregation Only
+If the experiments have already been successfully completed and the results are saved in output/article_runs, you can skip the synthesis and run only the table and plot generation:
 
-Aggregate existing outputs:
-
-```bash
+```Bash
 preqbmc aggregate \
   --input-root output/article_runs \
   --output-root output/article_results \
   --plots
 ```
-
-See [docs/reproducing_article_results.md](docs/reproducing_article_results.md) for table and figure commands.
 
 ## Outputs
 
@@ -180,30 +95,6 @@ Important per-run files:
 - `c_export/qnn_model.c`: generated fixed-point deployment C implementation.
 
 Aggregate outputs under `output/article_results/` include `all_experiments.csv`, `table_quality_metrics.csv`, `table_scalability.csv`, `table_mrr.csv`, plot PNGs, and LaTeX table fragments.
-
-## Tests
-
-Run the available unit tests:
-
-```bash
-python -m unittest discover tool/tests
-```
-
-Some tests require optional packages such as TensorFlow or host tools such as `gcc`. ESBMC-dependent tests are skipped automatically when `esbmc` is not installed.
-
-## Artifact Evaluation
-
-Start with [docs/artifact_evaluation.md](docs/artifact_evaluation.md). It lists minimal software requirements, which commands require Gurobi or ESBMC, and expected runtime for the cached demo.
-
-## Documentation
-
-- [docs/architecture.md](docs/architecture.md)
-- [docs/installation.md](docs/installation.md)
-- [docs/artifact_evaluation.md](docs/artifact_evaluation.md)
-- [docs/metrics.md](docs/metrics.md)
-- [docs/reproducing_article_results.md](docs/reproducing_article_results.md)
-- [docs/solver_backends.md](docs/solver_backends.md)
-- [docs/gurobi_and_esbmc.md](docs/gurobi_and_esbmc.md)
 
 ## Citation
 
