@@ -17,6 +17,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cbc = [
+  "mip"
+]
 gurobi = [
   "gurobipy"
 ]
@@ -35,18 +38,19 @@ full = [
   "scikit-learn",
   "matplotlib",
   "pandas",
+  "mip",
   "gurobipy"
 ]
 
 [project.scripts]
 preqbmc = "cli:main"
 
-[tool.setuptools]
-package-dir = { "" = "tool" }
+[src.setuptools]
+package-dir = { "" = "src" }
 py-modules = ["cli"]
 
-[tool.setuptools.packages.find]
-where = ["tool"]
+[src.setuptools.packages.find]
+where = ["src"]
 include = [
   "backends*",
   "configs*",
@@ -54,6 +58,7 @@ include = [
   "models*",
   "reports*",
   "scripts*",
+  "symbolic_pp*",
   "synthesis*",
   "utils*",
   "verification*"

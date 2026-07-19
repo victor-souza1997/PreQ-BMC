@@ -8,6 +8,7 @@ venv/
 *.log
 *.smt2
 .env
+.local/
 *.lic
 gurobi.lic
 .pytest_cache/
@@ -17,8 +18,7 @@ staticfiles/
 media/
 output/
 shells
-symbolic_pp
 venv/
 image_gen
 logs
-tool/benchmark/
+src/benchmark/
