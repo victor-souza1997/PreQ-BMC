@@ -18,7 +18,6 @@ staticfiles/
 media/
 output/
 shells
-symbolic_pp
 venv/
 image_gen
 logs
