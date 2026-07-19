@@ -9,6 +9,7 @@ import subprocess
 import time
 
 from utils.logging_utils import get_logger
+from verification.esbmc_install import resolve_esbmc_executable
 
 LOGGER = get_logger(__name__)
 
@@ -102,8 +103,9 @@ class ESBMCRunner:
         unwind: int,
         profile: ESBMCProfile,
     ) -> tuple[str, ...]:
+        executable = resolve_esbmc_executable(self.config.executable) or self.config.executable
         command: list[str] = [
-            self.config.executable,
+            executable,
             str(c_file),
             "--function",
             "main",

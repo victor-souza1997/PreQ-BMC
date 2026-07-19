@@ -1,126 +1,75 @@
 # PreQ-BMC
 
-PreQ-BMC is a preimage-guided bounded model checking framework for deployment-aware verification of fixed-point Quantized Neural Network implementations.
+PreQ-BMC is a research tool for deployment-aware fixed-point quantization of neural-network classifiers. It synthesizes one fixed-point format `<Q,I,F>` per affine layer and checks whether the generated fixed-point implementation preserves a local robustness contract.
 
-The repository contains the research prototype used for the article experiments and the SBSeg 2026 Tool Track / Salao de Ferramentas artifact. Some internal modules still use historical project names for compatibility, but public commands and documentation use the name PreQ-BMC.
+This repository is prepared for the SBSeg Tool Track / Salao de Ferramentas artifact. The public entry point is the `preqbmc` command, with the lower-level scripts kept under `src/scripts/` for reproducibility.
 
-## Key Features
+## Documentation Guide
 
-- Layer-wise preimage contracts for neural-network robustness properties.
-- Fixed-point C harness generation for ESBMC/BMC checks.
-- Block-wise verification for dense hidden layers using a shared layer `<Q,I,F>` format.
-- Formal no-saturation checks and empirical implementation diagnostics.
-- Python and generated-C deployment comparisons.
-- Article experiment runners, aggregation scripts, tables, and plots.
+- [Installation](docs/installation.md): Python dependencies, CBC/Gurobi options, and repo-local ESBMC installation.
+- [Reproducibility](docs/REPRODUCIBILITY.md): smoke test, article runner, JSON configuration reference, strict/diagnostic run modes, and manual commands.
+- [Expected results](docs/expected_results.md): output files, status fields, aggregate tables, and how to interpret failed or unknown runs.
 
-## Scope and Limitations
 
-PreQ-BMC currently targets the supported benchmark subset in this repository: fixed-point affine/ReLU MLP-style networks loaded from the provided benchmark weights. The formal pipeline verifies the existing generated ESBMC harnesses and fixed-point contracts; this artifact preparation does not change the mathematical verification semantics.
+## Tool Description
 
-Full end-to-end MILP-based preimage synthesis uses CBC through `python-mip` by default. Gurobi remains supported as an optional reference backend via `--solver gurobi`. For artifact evaluation, we also provide cached preimage contracts for small examples so that reviewers can run harness generation, ESBMC verification, and diagnostics without solving the preimage MILP.
+The tool starts from a trained floating-point model, an input sample, and an input perturbation radius. It computes layer-wise preimage contracts and searches for compact fixed-point formats that preserve those contracts. Generated C harnesses are checked by ESBMC, and the selected configuration is evaluated through Python fixed-point and generated-C deployment backends.
 
-Deployment C export already exists for runs with the C backend enabled. The pipeline writes it under:
+The main engineering contributions in this artifact are:
 
-```text
-<run-output>/c_export/qnn_model.c
-<run-output>/c_export/qnn_model.so
-```
+- preimage-guided per-layer fixed-point bit-width synthesis;
+- generated ESBMC C harnesses for layer-wise contract checking;
+- block-wise hidden-layer ESBMC verification with a shared layer `<Q,I,F>`, not mixed precision;
+- optional formal no-saturation checks and empirical saturation diagnostics;
+- CBC through `python-mip` as the default open-source MILP backend, with Gurobi retained as an optional reference backend;
+- generated C fixed-point backend and Python-vs-C exact-match diagnostics;
+- article experiment runners, aggregation scripts, tables, plots, and machine-readable summaries.
 
-ESBMC verification harnesses are distinct artifacts and are written under:
+## Scope
 
-```text
-<run-output>/layers/
-```
+PreQ-BMC currently targets the supported affine/ReLU MLP-style benchmark pipeline in this repository, including Iris, Seeds, and selected MNIST architectures. Claims are local to the selected input region and benchmark configuration. `TIMEOUT`, `MEMOUT`, and `UNKNOWN` statuses are reported as inconclusive solver outcomes, not as proofs.
 
-## Installation
+The strongest deployment-oriented claim should be read through `guarantee_level` in `reports/experiment_summary.json`:
 
-Clone the repository and create a virtual environment:
+- `deployed-transfer`: all transfer preconditions recorded by the artifact are satisfied;
+- `harness-verified`: ESBMC harness contracts verified, but at least one transfer precondition is missing or diagnostic-only;
+- `failed`: a definite formal or deployment-quality failure;
+- `unknown`: insufficient conclusive evidence.
+
+## Quick Installation
 
 ```bash
-git clone https://github.com/victor-souza1997/PreQ-BMC.git
-cd PreQ-BMC
 python -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -e .
-```
-
-For the full experiment pipeline, install optional dependencies:
-
-```bash
 pip install -e '.[full]'
-```
-
-Optional solver and plotting groups are also available:
-
-```bash
-pip install -e '.[gurobi]'
-pip install -e '.[cbc]'
-pip install -e '.[plots]'
-```
-
-Install ESBMC separately and ensure it is on `PATH`:
-
-```bash
-esbmc --version
-```
-
-Install CBC with `pip install -e '.[cbc]'` for the default license-free MILP backend. Configure Gurobi only if you will run reference checks with `--solver gurobi`.
-
-## Verify the Environment
-
-```bash
+preqbmc install-esbmc
 preqbmc verify-environment
 ```
 
-This command reports Python version, ESBMC availability, CBC/python-mip availability, optional Gurobi availability, and Python package availability.
+The ESBMC installer downloads the latest matching ESBMC release into `.local/` and exposes `.local/bin/esbmc`. The runner checks `PREQBMC_ESBMC`, then `.local/bin/esbmc`, then the system `PATH`.
 
-## Quickstart With Cached Preimage
+## Quick Artifact Demo
 
-Run the cached Iris demo:
+The cached Iris demo avoids Gurobi and exercises harness generation, ESBMC verification, deployment export, and reports:
 
 ```bash
 preqbmc demo --no-gurobi --output output/demo_run
 ```
 
-The demo uses the cache in `examples/preimage_cache/` and writes:
+Expected key outputs:
 
 ```text
 output/demo_run/reports/pipeline_summary.json
 output/demo_run/reports/experiment_summary.json
+output/demo_run/reports/qnn_vs_keras_metrics.json
 output/demo_run/layers/
 output/demo_run/c_export/qnn_model.c
 ```
 
-If ESBMC is not installed, the command stops before running the pipeline and prints installation guidance.
-
-## Full Synthesis With CBC Or Gurobi
-
-With ESBMC and CBC/python-mip installed, run the same small example end to end:
-
-```bash
-preqbmc demo --output output/demo_run_cbc
-```
-
-Or call the existing pipeline directly:
-
-```bash
-python tool/scripts/run_robustness_pipeline.py \
-  --dataset iris_15x2 \
-  --arch 2blk_15_15 \
-  --sample-id 27 \
-  --eps 0.05 \
-  --preimage-mode milp \
-  --verify-mode esbmc \
-  --solver cbc \
-  --output-dir output/iris_full
-```
-
-For a Gurobi reference run, add `--solver gurobi` and ensure `gurobipy` plus a valid license are configured.
-
 ## Reproducing Article Experiments
 
-Dry-run one Iris article experiment:
+Dry run one Iris case:
 
 ```bash
 preqbmc reproduce \
@@ -130,7 +79,7 @@ preqbmc reproduce \
   --dry-run
 ```
 
-Run and aggregate article experiments:
+Run configured article experiments, aggregate CSV tables, and generate plots:
 
 ```bash
 preqbmc reproduce \
@@ -140,7 +89,7 @@ preqbmc reproduce \
   --plots
 ```
 
-Aggregate existing outputs:
+Aggregate existing runs:
 
 ```bash
 preqbmc aggregate \
@@ -149,60 +98,8 @@ preqbmc aggregate \
   --plots
 ```
 
-See [docs/reproducing_article_results.md](docs/reproducing_article_results.md) for table and figure commands.
-
-## Outputs
-
-Important per-run files:
-
-- `reports/pipeline_summary.json`: full run configuration, verification status, block summaries, and artifact paths.
-- `reports/experiment_summary.json`: paper-oriented summary with formal and deployment metrics.
-- `reports/qnn_vs_keras_metrics.json`: Python fixed-point, Keras, and generated-C deployment comparison.
-- `reports/refinement_history.json`: quality-refinement attempts when enabled.
-- `reports/table_*.csv`: per-run CSV tables.
-- `layers/*.c`: ESBMC verification harnesses.
-- `c_export/qnn_model.c`: generated fixed-point deployment C implementation.
-
-Aggregate outputs under `output/article_results/` include `all_experiments.csv`, `table_quality_metrics.csv`, `table_scalability.csv`, `table_mrr.csv`, plot PNGs, and LaTeX table fragments.
-
-## Tests
-
-Run the available unit tests:
-
-```bash
-python -m unittest discover tool/tests
-```
-
-Some tests require optional packages such as TensorFlow or host tools such as `gcc`. ESBMC-dependent tests are skipped automatically when `esbmc` is not installed.
-
-## Artifact Evaluation
-
-Start with [docs/artifact_evaluation.md](docs/artifact_evaluation.md). It lists minimal software requirements, which commands require Gurobi or ESBMC, and expected runtime for the cached demo.
-
-## Documentation
-
-- [docs/architecture.md](docs/architecture.md)
-- [docs/installation.md](docs/installation.md)
-- [docs/artifact_evaluation.md](docs/artifact_evaluation.md)
-- [docs/metrics.md](docs/metrics.md)
-- [docs/reproducing_article_results.md](docs/reproducing_article_results.md)
-- [docs/solver_backends.md](docs/solver_backends.md)
-- [docs/gurobi_and_esbmc.md](docs/gurobi_and_esbmc.md)
-
-## Citation
-
-```bibtex
-@inproceedings{preqbmc2026,
-  title = {PreQ-BMC: Preimage-Guided Bounded Model Checking of Fixed-Point Quantized Neural Network Implementations},
-  author = {TODO},
-  booktitle = {SBSeg 2026 Tool Track},
-  year = {2026},
-  doi = {TODO}
-}
-```
+See [docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md) for strict soundness-oriented flags and diagnostic compatibility modes.
 
 ## License
 
-This repository includes an Apache-2.0 `LICENSE` file.
-
-License choice must be confirmed by all authors before final submission.
+This repository includes an Apache-2.0 `LICENSE` file. Confirm the final citation metadata and any third-party redistribution constraints before the camera-ready artifact release.

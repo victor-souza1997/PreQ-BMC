@@ -4,10 +4,11 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 from typing import Any
+
+from verification.esbmc_install import install_esbmc, local_esbmc_path, resolve_esbmc_executable
 
 
 DEMO_DATASET = "iris_15x2"
@@ -67,8 +68,17 @@ def _python_package_report() -> list[dict[str, Any]]:
     ]
 
 
-def _print_environment_report() -> dict[str, Any]:
-    esbmc = shutil.which("esbmc")
+def _ensure_esbmc_installed_if_requested(install_missing: bool) -> None:
+    if not install_missing or resolve_esbmc_executable() is not None:
+        return
+    print("ESBMC is missing; installing repo-local ESBMC...", flush=True)
+    install_esbmc(root=_repo_root())
+
+
+def _print_environment_report(*, install_missing_esbmc: bool = False) -> dict[str, Any]:
+    _ensure_esbmc_installed_if_requested(install_missing_esbmc)
+    esbmc = resolve_esbmc_executable()
+    repo_local_esbmc = local_esbmc_path()
     cbc_available = _module_available("mip")
     gurobi_available = _module_available("gurobipy")
     packages = _python_package_report()
@@ -78,13 +88,15 @@ def _print_environment_report() -> dict[str, Any]:
         "python_ok": sys.version_info >= (3, 10),
         "esbmc_path": esbmc,
         "esbmc_available": esbmc is not None,
+        "repo_local_esbmc_path": str(repo_local_esbmc),
+        "repo_local_esbmc_available": repo_local_esbmc.exists(),
         "cbc_available": cbc_available,
         "gurobipy_available": gurobi_available,
         "packages": packages,
     }
     print(json.dumps(report, indent=2))
     if esbmc is None:
-        print("\nESBMC was not found on PATH. Install ESBMC and ensure `esbmc --version` works.")
+        print("\nESBMC was not found. Run `preqbmc install-esbmc`, or install ESBMC and ensure `esbmc --version` works.")
     if not cbc_available:
         print("\nCBC/python-mip is the default license-free MILP backend. Install it with `pip install -e '.[cbc]'`.")
     if not gurobi_available:
@@ -104,8 +116,29 @@ def _print_environment_report() -> dict[str, Any]:
 
 
 def cmd_verify_environment(args: argparse.Namespace, extra: list[str]) -> int:
-    del args, extra
-    _print_environment_report()
+    del extra
+    _print_environment_report(install_missing_esbmc=bool(args.install_missing_esbmc))
+    return 0
+
+
+def cmd_install_esbmc(args: argparse.Namespace, extra: list[str]) -> int:
+    del extra
+    result = install_esbmc(
+        root=_repo_root(),
+        asset_pattern=args.asset_pattern,
+        force=bool(args.force),
+    )
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"ESBMC path: {result['esbmc_path']}", flush=True)
+        if result.get("installed"):
+            print(f"Installed {result['release']} from {result['asset']}", flush=True)
+            version_output = str(result.get("version_output", "")).strip()
+            if version_output:
+                print(version_output, flush=True)
+        else:
+            print(f"Skipped: {result.get('reason')}", flush=True)
     return 0
 
 
@@ -126,7 +159,8 @@ def _demo_required_modules_available() -> tuple[bool, list[str]]:
 
 
 def cmd_demo(args: argparse.Namespace, extra: list[str]) -> int:
-    esbmc = shutil.which("esbmc")
+    _ensure_esbmc_installed_if_requested(bool(args.install_missing_esbmc))
+    esbmc = resolve_esbmc_executable()
     cbc_available = _module_available("mip")
     gurobi_available = _module_available("gurobipy")
     cache_dir = Path(args.preimage_cache_dir)
@@ -140,8 +174,8 @@ def cmd_demo(args: argparse.Namespace, extra: list[str]) -> int:
         print(f"preimage cache: {cache_dir}", flush=True)
 
     if esbmc is None:
-        print("Cannot run the ESBMC demo because `esbmc` is not on PATH.")
-        print("Install ESBMC, then rerun `preqbmc verify-environment`.")
+        print("Cannot run the ESBMC demo because `esbmc` was not found.")
+        print("Run `preqbmc install-esbmc`, then rerun `preqbmc verify-environment`.")
         return 2
 
     modules_ok, missing_modules = _demo_required_modules_available()
@@ -289,6 +323,11 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--bit-ub", type=int, default=16)
     demo.add_argument("--preimage-mode", default="milp", choices=["milp", "abstr", "comp"])
     demo.add_argument("--compare-limit", type=int, default=10)
+    demo.add_argument(
+        "--install-missing-esbmc",
+        action="store_true",
+        help="Download repo-local ESBMC automatically if no ESBMC executable is found.",
+    )
     demo.set_defaults(func=cmd_demo)
 
     reproduce = subparsers.add_parser("reproduce", help="Run article experiment configurations.")
@@ -310,7 +349,18 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate.set_defaults(func=cmd_aggregate)
 
     verify = subparsers.add_parser("verify-environment", help="Report solver and Python package availability.")
+    verify.add_argument(
+        "--install-missing-esbmc",
+        action="store_true",
+        help="Download repo-local ESBMC automatically if no ESBMC executable is found.",
+    )
     verify.set_defaults(func=cmd_verify_environment)
+
+    install = subparsers.add_parser("install-esbmc", help="Download ESBMC into this repository under .local/.")
+    install.add_argument("--asset-pattern", default=None, help="Release asset glob, e.g. '*linux*.zip'.")
+    install.add_argument("--force", action="store_true", help="Replace an existing repo-local ESBMC install.")
+    install.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    install.set_defaults(func=cmd_install_esbmc)
     return parser
 
 

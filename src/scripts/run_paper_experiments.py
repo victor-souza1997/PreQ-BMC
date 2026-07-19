@@ -24,7 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--aggregate", action="store_true", help="Run aggregate_paper_results.py after experiments.")
     parser.add_argument("--plots", action="store_true", help="Run plot_paper_results.py after aggregation.")
     parser.add_argument("--python-executable", default=sys.executable)
-    parser.add_argument("--solver", choices=["cbc", "gurobi"], default="gurobi")
+    parser.add_argument("--solver", choices=["cbc", "gurobi"], default="cbc")
     parser.add_argument(
         "--unsound-contract-tolerance",
         "--unsound_contract_tolerance",
