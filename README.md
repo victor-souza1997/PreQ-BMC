@@ -7,7 +7,7 @@ This repository is prepared for the SBSeg Tool Track / Salao de Ferramentas arti
 ## Documentation Guide
 
 - [Installation](docs/installation.md): Python dependencies, CBC/Gurobi options, and repo-local ESBMC installation.
-- [Reproducibility](docs/REPRODUCIBILITY.md): smoke test, article runner, strict/diagnostic run modes, and manual commands.
+- [Reproducibility](docs/REPRODUCIBILITY.md): smoke test, article runner, JSON configuration reference, strict/diagnostic run modes, and manual commands.
 - [Expected results](docs/expected_results.md): output files, status fields, aggregate tables, and how to interpret failed or unknown runs.
 
 
