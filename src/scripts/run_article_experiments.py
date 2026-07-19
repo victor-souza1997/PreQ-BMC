@@ -38,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--esbmc-memlimit", default="6g")
     parser.add_argument("--esbmc-layer-block-size", type=int, default=10)
     parser.add_argument("--esbmc-jobs", type=int, default=1)
-    parser.add_argument("--solver", choices=["cbc", "gurobi"], default="gurobi")
+    parser.add_argument("--solver", choices=["cbc", "gurobi"], default="cbc")
     parser.add_argument("--gurobi-threads", type=int, default=4)
     parser.add_argument(
         "--unsound-contract-tolerance",
@@ -257,6 +257,9 @@ def _runtime_metadata(args: argparse.Namespace, run: dict[str, Any], command: li
         "solver": str(run.get("solver", args.solver)),
         "gurobi_threads": int(run.get("gurobi_threads", args.gurobi_threads)),
         "esbmc_jobs": int(run.get("esbmc_jobs", args.esbmc_jobs)),
+        "blockwise_fail_fast": bool(run.get("blockwise_fail_fast", True)),
+        "blockwise_run_all_blocks_on_failure": bool(run.get("blockwise_run_all_blocks_on_failure", False)),
+        "no_saturation_continue_on_unknown": bool(run.get("no_saturation_continue_on_unknown", False)),
         "unsound_contract_tolerance": bool(run.get("unsound_contract_tolerance", False)),
         "propagate_contract_tolerance": bool(run.get("propagate_contract_tolerance", False)),
         "enforce_contract_chaining": bool(run.get("enforce_contract_chaining", True)),
@@ -399,6 +402,18 @@ def _build_pipeline_command(
         _add_flag(command, supported_flags, "--export-paper-tables")
     else:
         _add_flag(command, supported_flags, "--no-export-paper-tables")
+    if bool(run.get("blockwise_fail_fast", True)):
+        _add_flag(command, supported_flags, "--blockwise-fail-fast")
+    else:
+        _add_flag(command, supported_flags, "--no-blockwise-fail-fast")
+    if bool(run.get("blockwise_run_all_blocks_on_failure", False)):
+        _add_flag(command, supported_flags, "--blockwise-run-all-blocks-on-failure")
+    else:
+        _add_flag(command, supported_flags, "--no-blockwise-run-all-blocks-on-failure")
+    if bool(run.get("no_saturation_continue_on_unknown", False)):
+        _add_flag(command, supported_flags, "--no-saturation-continue-on-unknown")
+    else:
+        _add_flag(command, supported_flags, "--no-no-saturation-continue-on-unknown")
     if bool(run.get("unsound_contract_tolerance", False)):
         _add_flag(command, supported_flags, "--unsound-contract-tolerance")
     if bool(run.get("propagate_contract_tolerance", False)):
@@ -417,6 +432,12 @@ def _build_pipeline_command(
         command,
         supported_flags,
         "--require-formal-no-saturation" if require_no_saturation else "--no-require-formal-no-saturation",
+    )
+    empirical_saturation = bool(run.get("empirical_saturation_check", True))
+    _add_flag(
+        command,
+        supported_flags,
+        "--empirical-saturation-check" if empirical_saturation else "--no-empirical-saturation-check",
     )
 
     for flag, key in (

@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--solver",
         choices=["cbc", "gurobi"],
-        default="gurobi",
+        default="cbc",
         help="MILP solver backend for preimage synthesis and MILP forward checks. CBC is license-free and the default.",
     )
     parser.add_argument(
