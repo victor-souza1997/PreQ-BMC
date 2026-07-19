@@ -13,6 +13,7 @@
     "bit_ub": 40,
     "preimg_mode": "milp",
     "verify_mode": "esbmc",
+    "solver": "cbc",
     "method": "both",
     "mode": "full_pipeline",
     "compare_split": "test",
@@ -36,6 +37,9 @@
     "esbmc_timeout_seconds": 900,
     "esbmc_memlimit": "20g",
     "esbmc_jobs": 1,
+    "blockwise_fail_fast": true,
+    "blockwise_run_all_blocks_on_failure": false,
+    "no_saturation_continue_on_unknown": false,
     "gurobi_threads": 4,
     "enabled": true
   },
@@ -58,7 +62,7 @@
       "eps": 0.01,
       "compare_limit": 0,
       "mrr_enabled": true,
-      "eps_sweep": [0.005, 0.0001, 0.01, 0.02, 0.05, 0.1, 0.2],
+      "eps_sweep": [0.005, 0.0001, 0.0002, 0.00001, 0.01, 0.02, 0.05, 0.1, 0.2],
       "expected_difficulty": "low"
     },
     {
