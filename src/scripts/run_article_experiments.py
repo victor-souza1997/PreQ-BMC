@@ -168,11 +168,127 @@ def _binary_probe_values(low: float | None, high: float | None, iters: int) -> l
     return sorted(values)
 
 
+def _clean_margin(logits: Any, predicted_class: int) -> float:
+    import numpy as np
+
+    values = np.asarray(logits, dtype=np.float64).reshape(-1)
+    if values.size <= 1:
+        return float("inf")
+    other_logits = np.delete(values, int(predicted_class))
+    return float(values[int(predicted_class)] - np.max(other_logits))
+
+
+def _margin_records_for_benchmark(dataset_name: str, arch: str) -> list[dict[str, Any]]:
+    import numpy as np
+
+    from datasets.loaders import load_dataset
+    from models.loading import (
+        build_and_load_deep_model,
+        infer_dense_architecture_from_h5,
+        normalize_dataset_selection,
+        parse_architecture,
+        resolve_weight_path,
+    )
+
+    selection = normalize_dataset_selection(dataset_name)
+    dataset = load_dataset(selection.base_name)
+    weights_path = resolve_weight_path(_repo_root(), dataset_name, arch)
+    inferred_arch = infer_dense_architecture_from_h5(weights_path)
+    input_dim = dataset.input_dim
+    num_classes = dataset.num_classes
+    layer_units = parse_architecture(arch, num_classes)
+    if inferred_arch:
+        input_dim = inferred_arch[0]
+        layer_units = inferred_arch[1:]
+    model = build_and_load_deep_model(
+        input_dim=input_dim,
+        layer_units=layer_units,
+        weights_path=weights_path,
+        input_scale=dataset.input_scale,
+    )
+    logits = np.asarray(model(np.asarray(dataset.x_test, dtype=np.float32), training=False).numpy(), dtype=np.float64)
+    predicted = np.argmax(logits, axis=1).astype(int)
+    labels = np.asarray(dataset.y_test).reshape(-1).astype(int)
+    records: list[dict[str, Any]] = []
+    for sample_id, (prediction, label) in enumerate(zip(predicted, labels, strict=True)):
+        margin = _clean_margin(logits[sample_id], int(prediction))
+        records.append(
+            {
+                "sample_id": int(sample_id),
+                "predicted_label": int(prediction),
+                "sample_label": int(label),
+                "clean_margin": margin,
+                "correctly_classified": bool(prediction == label),
+            }
+        )
+    return records
+
+
+def _window_around(values: list[dict[str, Any]], center: int, count: int) -> list[dict[str, Any]]:
+    if not values or count <= 0:
+        return []
+    left = max(0, int(center) - count // 2)
+    right = min(len(values), left + count)
+    left = max(0, right - count)
+    return values[left:right]
+
+
+def _select_stratified_by_margin(
+    *,
+    base: dict[str, Any],
+    margin_cache: dict[tuple[str, str], list[dict[str, Any]]],
+) -> tuple[list[int], dict[int, dict[str, Any]]]:
+    dataset_name = str(base["dataset"])
+    arch = str(base["arch"])
+    cache_key = (dataset_name, arch)
+    if cache_key not in margin_cache:
+        margin_cache[cache_key] = _margin_records_for_benchmark(dataset_name, arch)
+
+    correct_only = bool(base.get("sample_selection_correct_only", True))
+    candidates = [
+        record for record in margin_cache[cache_key]
+        if (record.get("correctly_classified") or not correct_only)
+    ]
+    if not candidates:
+        raise ValueError(f"No candidate samples found for stratified_by_margin selection on {dataset_name}/{arch}.")
+
+    per_stratum = int(base.get("samples_per_stratum", base.get("sample_selection_per_stratum", 1)))
+    per_stratum = max(1, per_stratum)
+    sorted_records = sorted(candidates, key=lambda item: (float(item["clean_margin"]), int(item["sample_id"])))
+    n = len(sorted_records)
+    selections: list[tuple[str, dict[str, Any]]] = []
+    selections.extend(("low", record) for record in sorted_records[:per_stratum])
+    selections.extend(("median", record) for record in _window_around(sorted_records, n // 2, per_stratum))
+    selections.extend(("high", record) for record in sorted_records[-per_stratum:])
+
+    selected_ids: list[int] = []
+    selected_meta: dict[int, dict[str, Any]] = {}
+    ranks = {int(record["sample_id"]): index for index, record in enumerate(sorted_records)}
+    for stratum, record in selections:
+        sample_id = int(record["sample_id"])
+        if sample_id in selected_meta:
+            continue
+        rank = ranks[sample_id]
+        quantile = float(rank / (n - 1)) if n > 1 else 0.0
+        selected_ids.append(sample_id)
+        selected_meta[sample_id] = {
+            **record,
+            "sample_selection": "stratified_by_margin",
+            "sample_selection_stratum": stratum,
+            "sample_selection_rank": int(rank),
+            "sample_selection_quantile": quantile,
+            "sample_selection_candidates": int(n),
+            "samples_per_stratum": int(per_stratum),
+        }
+    return selected_ids, selected_meta
+
+
 def _expand_runs(config: dict[str, Any], args: argparse.Namespace) -> list[dict[str, Any]]:
     defaults = dict(config.get("defaults", {}))
     runs: list[dict[str, Any]] = []
     mrr_values = _parse_eps_values(args.mrr_eps_values)
     binary_values = _binary_probe_values(args.mrr_binary_low, args.mrr_binary_high, args.mrr_binary_iters)
+    margin_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for index, raw in enumerate(config["runs"]):
         base = {**defaults, **raw}
         if args.unsound_contract_tolerance is not None:
@@ -184,8 +300,15 @@ def _expand_runs(config: dict[str, Any], args: argparse.Namespace) -> list[dict[
         if args.enforce_contract_chaining is not None:
             base["enforce_contract_chaining"] = bool(args.enforce_contract_chaining)
         sample_ids = base.pop("sample_ids", None)
+        sample_metadata: dict[int, dict[str, Any]] = {}
         if sample_ids is None:
-            sample_ids = [base.get("sample_id", 0)]
+            sample_selection = base.get("sample_selection")
+            if sample_selection == "stratified_by_margin":
+                sample_ids, sample_metadata = _select_stratified_by_margin(base=base, margin_cache=margin_cache)
+            elif sample_selection in (None, "", "explicit"):
+                sample_ids = [base.get("sample_id", 0)]
+            else:
+                raise ValueError(f"Unsupported sample_selection={sample_selection!r}.")
         eps_sweep = base.pop("eps_sweep", None)
         if mrr_values and bool(base.get("mrr_enabled", False)):
             eps_sweep = mrr_values
@@ -197,6 +320,8 @@ def _expand_runs(config: dict[str, Any], args: argparse.Namespace) -> list[dict[
             for eps_value in eps_values:
                 run = dict(base)
                 run["sample_id"] = int(sample_id)
+                if int(sample_id) in sample_metadata:
+                    run.update(sample_metadata[int(sample_id)])
                 run["eps"] = float(eps_value)
                 run["input_epsilon"] = float(eps_value)
                 run["perturbation_radius"] = float(eps_value)
@@ -266,6 +391,13 @@ def _runtime_metadata(args: argparse.Namespace, run: dict[str, Any], command: li
         "dataset": run.get("dataset"),
         "architecture": run.get("arch"),
         "sample_id": run.get("sample_id"),
+        "sample_selection": run.get("sample_selection"),
+        "sample_selection_stratum": run.get("sample_selection_stratum"),
+        "sample_selection_rank": run.get("sample_selection_rank"),
+        "sample_selection_quantile": run.get("sample_selection_quantile"),
+        "clean_margin": run.get("clean_margin"),
+        "predicted_label": run.get("predicted_label"),
+        "sample_label": run.get("sample_label"),
         "input_epsilon": run.get("input_epsilon", run.get("eps")),
         "normalized_input_epsilon": _normalized_eps(run),
         "random_seed": run.get("random_seed"),
@@ -295,6 +427,13 @@ def _status_payload(
         "dataset": run.get("dataset"),
         "arch": run.get("arch"),
         "sample_id": run.get("sample_id"),
+        "sample_selection": run.get("sample_selection"),
+        "sample_selection_stratum": run.get("sample_selection_stratum"),
+        "sample_selection_rank": run.get("sample_selection_rank"),
+        "sample_selection_quantile": run.get("sample_selection_quantile"),
+        "clean_margin": run.get("clean_margin"),
+        "predicted_label": run.get("predicted_label"),
+        "sample_label": run.get("sample_label"),
         "eps": run.get("eps"),
         "input_epsilon": run.get("input_epsilon", run.get("eps")),
         "normalized_input_epsilon": _normalized_eps(run),
@@ -606,6 +745,10 @@ def _resume_success(output_dir: Path) -> bool:
     return status.get("status") == "success"
 
 
+def _has_existing_output(output_dir: Path) -> bool:
+    return output_dir.exists() and any(output_dir.iterdir())
+
+
 def _followup(command: list[str], dry_run: bool) -> None:
     print(_command_text(command), flush=True)
     if not dry_run:
@@ -636,6 +779,13 @@ def main(argv: list[str] | None = None) -> None:
             continue
         if args.resume and not args.force and _resume_success(output_dir):
             print(f"resume-skip {run['name']}", flush=True)
+            continue
+        if not args.dry_run and not args.force and not args.resume and _has_existing_output(output_dir):
+            message = f"existing-output-skip {run['name']} at {output_dir}; use --force to overwrite or --resume to reuse"
+            print(message, flush=True)
+            failed = True
+            if not args.continue_on_error:
+                break
             continue
 
         command = _build_pipeline_command(

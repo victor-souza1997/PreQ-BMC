@@ -70,6 +70,71 @@ def _num(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+def _values(rows: list[dict[str, Any]], field: str) -> list[float]:
+    return [value for value in (_num(row.get(field)) for row in rows) if value is not None]
+
+
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _std(values: list[float]) -> float | None:
+    if not values:
+        return None
+    if len(values) == 1:
+        return 0.0
+    mean = sum(values) / len(values)
+    return math.sqrt(sum((value - mean) ** 2 for value in values) / (len(values) - 1))
+
+
+def _quantile(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * q
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def _median(values: list[float]) -> float | None:
+    return _quantile(values, 0.5)
+
+
+def _iqr(values: list[float]) -> float | None:
+    q1 = _quantile(values, 0.25)
+    q3 = _quantile(values, 0.75)
+    if q1 is None or q3 is None:
+        return None
+    return q3 - q1
+
+
+def _fmt_number(value: Any, digits: int = 3) -> str:
+    number = _num(value)
+    if number is None:
+        return ""
+    if digits <= 0:
+        return f"{number:.0f}"
+    return f"{number:.{digits}f}".rstrip("0").rstrip(".")
+
+
+def _fmt_mean_std(mean_value: Any, std_value: Any) -> str:
+    if _num(mean_value) is None:
+        return ""
+    return f"{_fmt_number(mean_value)}+/-{_fmt_number(std_value)}"
+
+
+def _fmt_median_iqr(median_value: Any, iqr_value: Any) -> str:
+    if _num(median_value) is None:
+        return ""
+    return f"{_fmt_number(median_value)}[{_fmt_number(iqr_value)}]"
+
+
 def _bool(value: Any) -> bool | None:
     if value in (None, ""):
         return None
@@ -92,6 +157,13 @@ def _get(mapping: dict[str, Any], *keys: str, default: Any = None) -> Any:
             return default
         current = current.get(key)
     return default if current is None else current
+
+
+def _coalesce(*values: Any, default: Any = "") -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return default
 
 
 def _base_dataset(dataset: Any) -> str:
@@ -189,10 +261,33 @@ def _method_row(
     timing = pipeline.get("timing_metrics", {})
     esbmc = pipeline.get("esbmc_status_counts", {})
     blockwise = pipeline.get("blockwise_verification", {})
+    resource = section.get("resource_metrics", {})
     dataset = benchmark.get("dataset", pipeline.get("dataset", run_config.get("dataset", run_status.get("dataset"))))
     arch = benchmark.get("arch", pipeline.get("arch", run_config.get("arch", run_status.get("arch"))))
     input_epsilon = _input_epsilon(run_status, run_config, pipeline, benchmark)
     normalized_input_epsilon = _normalized_input_epsilon(dataset, input_epsilon, pipeline)
+    sample_id = benchmark.get("sample_id", pipeline.get("sample_id", run_config.get("sample_id", run_status.get("sample_id"))))
+    sample_label = _coalesce(
+        benchmark.get("sample_label"),
+        reference.get("sample_label"),
+        pipeline.get("sample_label"),
+        run_config.get("sample_label"),
+        run_status.get("sample_label"),
+    )
+    predicted_label = _coalesce(
+        benchmark.get("predicted_label"),
+        reference.get("predicted_label"),
+        pipeline.get("predicted_label"),
+        run_config.get("predicted_label"),
+        run_status.get("predicted_label"),
+    )
+    clean_margin = _coalesce(
+        benchmark.get("clean_margin"),
+        reference.get("clean_margin"),
+        pipeline.get("clean_margin"),
+        run_config.get("clean_margin"),
+        run_status.get("clean_margin"),
+    )
     float32_accuracy = reference.get("full_precision_keras_accuracy")
     quantized_acc = deployment.get("quantized_keras_accuracy")
     python_acc = deployment.get("python_fixed_accuracy")
@@ -213,6 +308,11 @@ def _method_row(
     contract_verified_value = bool(section.get("contract_verified", contract_status == "VERIFIED") or contract_status == "VERIFIED")
     no_saturation_status = section.get("no_saturation_status") or "SKIPPED"
     final_status = section.get("final_status") or run_status.get("final_status") or run_status.get("status", "UNKNOWN")
+    guarantee_level = _coalesce(
+        section.get("guarantee_level"),
+        experiment.get("guarantee_level"),
+        pipeline.get("guarantee_level"),
+    )
     layer_records = _layer_records_from_pipeline(pipeline, section)
     failure_layer = ""
     failure_block = ""
@@ -245,13 +345,14 @@ def _method_row(
         "run_name": run_status.get("name") or run_config.get("name") or run_dir.name,
         "dataset": dataset,
         "arch": arch,
-        "sample_id": benchmark.get("sample_id", pipeline.get("sample_id", run_config.get("sample_id", run_status.get("sample_id")))),
+        "sample_id": sample_id,
         "input_epsilon": input_epsilon,
         "normalized_input_epsilon": normalized_input_epsilon,
         "method": method,
         "mode": run_config.get("mode", run_config.get("ablation_mode", "full_pipeline")),
         "status": run_status.get("status", "success" if experiment else "failed"),
         "final_status": final_status,
+        "guarantee_level": guarantee_level,
         "contract_status": contract_status,
         "contract_verified": contract_verified_value,
         "no_saturation_status": no_saturation_status,
@@ -261,6 +362,13 @@ def _method_row(
         "deployment_success": deployment_success,
         "python_c_exact_match": python_c_exact,
         "full_success": full_success,
+        "sample_label": sample_label,
+        "predicted_label": predicted_label,
+        "clean_margin": clean_margin,
+        "sample_selection": run_config.get("sample_selection", run_status.get("sample_selection")),
+        "sample_selection_stratum": run_config.get("sample_selection_stratum", run_status.get("sample_selection_stratum")),
+        "sample_selection_rank": run_config.get("sample_selection_rank", run_status.get("sample_selection_rank")),
+        "sample_selection_quantile": run_config.get("sample_selection_quantile", run_status.get("sample_selection_quantile")),
         "float32_accuracy": float32_accuracy,
         "quantized_keras_accuracy": quantized_acc,
         "python_fixed_accuracy": python_acc,
@@ -315,6 +423,12 @@ def _method_row(
         "largest_neurons_per_query": blockwise.get("largest_neurons_per_query"),
         "largest_input_dim_per_query": blockwise.get("largest_input_dim_per_query"),
         "largest_estimated_macs_per_query": blockwise.get("largest_estimated_macs_per_query"),
+        "num_parameters": resource.get("num_parameters"),
+        "float_parameter_memory_bytes": resource.get("float_parameter_memory_bytes"),
+        "fixed_parameter_memory_bytes": resource.get("fixed_parameter_memory_bytes"),
+        "compression_ratio_vs_float32": resource.get("compression_ratio_vs_float32"),
+        "activation_memory_bytes_estimate": resource.get("activation_memory_bytes_estimate"),
+        "peak_activation_values": resource.get("peak_activation_values"),
         "output_dir": str(run_dir),
     }
 
@@ -346,6 +460,10 @@ ALL_FIELDS = [
     "block_size", "total_blocks", "verified_blocks", "failed_blocks", "timeout_blocks",
     "memout_blocks", "unknown_blocks", "skipped_blocks_due_to_fail_fast", "largest_neurons_per_query",
     "largest_input_dim_per_query", "largest_estimated_macs_per_query", "output_dir",
+    "deployment_quality_accepted", "guarantee_level", "sample_label", "predicted_label", "clean_margin",
+    "sample_selection", "sample_selection_stratum", "sample_selection_rank", "sample_selection_quantile",
+    "num_parameters", "float_parameter_memory_bytes", "fixed_parameter_memory_bytes",
+    "compression_ratio_vs_float32", "activation_memory_bytes_estimate", "peak_activation_values",
 ]
 
 
@@ -504,6 +622,429 @@ def _ablation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return output
 
 
+def _summary_key_value(value: Any) -> str:
+    number = _num(value)
+    if number is not None:
+        return f"{number:.12g}"
+    return "" if value is None else str(value)
+
+
+def _summary_key(row: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+    return (
+        _summary_key_value(row.get("dataset")),
+        _summary_key_value(row.get("arch")),
+        _summary_key_value(row.get("input_epsilon")),
+        _summary_key_value(row.get("normalized_input_epsilon")),
+        _summary_key_value(row.get("method")),
+        _summary_key_value(row.get("mode") or "full_pipeline"),
+    )
+
+
+def _group_for_summary(rows: list[dict[str, Any]]) -> dict[tuple[str, str, str, str, str, str], list[dict[str, Any]]]:
+    grouped: dict[tuple[str, str, str, str, str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(_summary_key(row), []).append(row)
+    return grouped
+
+
+def _summary_base(group: list[dict[str, Any]]) -> dict[str, Any]:
+    row = group[0]
+    return {
+        "benchmark": f"{row.get('dataset')}/{row.get('arch')}",
+        "dataset": row.get("dataset"),
+        "arch": row.get("arch"),
+        "input_epsilon": row.get("input_epsilon"),
+        "normalized_input_epsilon": row.get("normalized_input_epsilon"),
+        "method": row.get("method"),
+        "mode": row.get("mode") or "full_pipeline",
+        "n_regions": len(group),
+    }
+
+
+def _status_present(row: dict[str, Any], target: str) -> bool:
+    target = target.upper()
+    statuses = {
+        str(row.get("status", "")).upper(),
+        str(row.get("final_status", "")).upper(),
+        str(row.get("contract_status", "")).upper(),
+        str(row.get("no_saturation_status", "")).upper(),
+    }
+    if target in statuses:
+        return True
+    if target == "TIMEOUT" and (_num(row.get("esbmc_timeout_count")) or 0.0) > 0:
+        return True
+    if target == "MEMOUT" and (_num(row.get("esbmc_memout_count")) or 0.0) > 0:
+        return True
+    if target == "UNKNOWN" and (_num(row.get("esbmc_unknown_count")) or 0.0) > 0:
+        return True
+    return False
+
+
+def _has_guarantee_level(group: list[dict[str, Any]]) -> bool:
+    return any(str(row.get("guarantee_level") or "").strip() for row in group)
+
+
+def _certified(row: dict[str, Any], *, guarantee_level_available: bool) -> bool:
+    if guarantee_level_available:
+        return str(row.get("guarantee_level") or "") == "deployed-transfer"
+    if str(row.get("final_status") or "") in {"VERIFIED", "PARTIAL_VERIFIED"}:
+        return True
+    return bool(_bool(row.get("formal_success")) is True and _bool(row.get("deployment_success")) is True)
+
+
+def _level_count(group: list[dict[str, Any]], level: str, *, available: bool) -> int | str:
+    if not available:
+        return ""
+    return sum(1 for row in group if str(row.get("guarantee_level") or "") == level)
+
+
+def _sum_numeric(group: list[dict[str, Any]], field: str) -> float | None:
+    values = _values(group, field)
+    return sum(values) if values else None
+
+
+def _max_numeric(group: list[dict[str, Any]], field: str) -> float | None:
+    values = _values(group, field)
+    return max(values) if values else None
+
+
+def _size_ratio_vs_fp32(row: dict[str, Any]) -> float | None:
+    fixed_bytes = _num(row.get("fixed_parameter_memory_bytes"))
+    float_bytes = _num(row.get("float_parameter_memory_bytes"))
+    if fixed_bytes is not None and float_bytes and float_bytes > 0:
+        return fixed_bytes / float_bytes
+    bits = _num(row.get("weighted_avg_bits_per_parameter"))
+    if bits is not None:
+        return bits / 32.0
+    compression = _num(row.get("compression_ratio_vs_float32"))
+    if compression and compression > 0:
+        return 1.0 / compression
+    return None
+
+
+def _mean_std_payload(group: list[dict[str, Any]], field: str) -> dict[str, Any]:
+    values = _values(group, field)
+    return {
+        f"{field}_mean": _mean(values),
+        f"{field}_std": _std(values),
+    }
+
+
+def _median_iqr_payload(group: list[dict[str, Any]], field: str) -> dict[str, Any]:
+    values = _values(group, field)
+    return {
+        f"{field}_median": _median(values),
+        f"{field}_iqr": _iqr(values),
+    }
+
+
+def _region_certification_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for group in _group_for_summary(rows).values():
+        guarantee_available = _has_guarantee_level(group)
+        certified_count = sum(1 for row in group if _certified(row, guarantee_level_available=guarantee_available))
+        bits = _values(group, "weighted_avg_bits_per_parameter")
+        size_ratios = [value for value in (_size_ratio_vs_fp32(row) for row in group) if value is not None]
+        compression = _values(group, "compression_ratio_vs_float32")
+        n_regions = len(group)
+        output.append(
+            {
+                **_summary_base(group),
+                "certified_count": certified_count,
+                "certified_fraction": certified_count / n_regions if n_regions else "",
+                "L3_count": _level_count(group, "deployed-transfer", available=guarantee_available),
+                "L2_count": _level_count(group, "harness-verified", available=guarantee_available),
+                "L1_count": _level_count(group, "unknown", available=guarantee_available),
+                "L0_count": _level_count(group, "failed", available=guarantee_available),
+                "timeout_count": sum(1 for row in group if _status_present(row, "TIMEOUT")),
+                "memout_count": sum(1 for row in group if _status_present(row, "MEMOUT")),
+                "unknown_count": sum(1 for row in group if _status_present(row, "UNKNOWN")),
+                "bits_per_param_mean": _mean(bits),
+                "bits_per_param_std": _std(bits),
+                "size_vs_FP32_mean": _mean(size_ratios),
+                "size_vs_FP32_std": _std(size_ratios),
+                "compression_ratio_vs_float32_mean": _mean(compression),
+                "compression_ratio_vs_float32_std": _std(compression),
+                "max_neurons_query": _max_numeric(group, "largest_neurons_per_query"),
+                "max_input_dim_query": _max_numeric(group, "largest_input_dim_per_query"),
+                "max_estimated_macs_query": _max_numeric(group, "largest_estimated_macs_per_query"),
+            }
+        )
+    return sorted(output, key=_summary_key)
+
+
+def _exact_rate(group: list[dict[str, Any]], field: str) -> float | None:
+    values = [_bool(row.get(field)) for row in group]
+    known = [value for value in values if value is not None]
+    if not known:
+        return None
+    return sum(1 for value in known if value) / len(known)
+
+
+def _deployment_quality_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for group in _group_for_summary(rows).values():
+        row = {
+            **_summary_base(group),
+            **_mean_std_payload(group, "quantized_keras_accuracy"),
+            **_mean_std_payload(group, "python_fixed_accuracy"),
+            **_mean_std_payload(group, "c_fixed_accuracy"),
+            **_mean_std_payload(group, "mismatch_rate_vs_keras"),
+            **_mean_std_payload(group, "max_abs_logit_error"),
+            **_mean_std_payload(group, "mean_abs_logit_error"),
+            **_mean_std_payload(group, "max_saturation_rate"),
+            **_mean_std_payload(group, "mean_saturation_rate"),
+            "max_abs_logit_error_max": _max_numeric(group, "max_abs_logit_error"),
+            "max_saturation_rate_max": _max_numeric(group, "max_saturation_rate"),
+            "python_c_exact_rate": _exact_rate(group, "python_c_exact_match"),
+        }
+        output.append(row)
+    return sorted(output, key=_summary_key)
+
+
+def _runtime_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for group in _group_for_summary(rows).values():
+        timeout_count = sum(1 for row in group if _status_present(row, "TIMEOUT"))
+        memout_count = sum(1 for row in group if _status_present(row, "MEMOUT"))
+        n_regions = len(group)
+        row = {
+            **_summary_base(group),
+            **_median_iqr_payload(group, "total_runtime_seconds"),
+            **_median_iqr_payload(group, "total_esbmc_time_seconds"),
+            **_median_iqr_payload(group, "number_of_esbmc_calls"),
+            "number_of_esbmc_calls_sum": _sum_numeric(group, "number_of_esbmc_calls"),
+            "max_esbmc_query_time_seconds_max": _max_numeric(group, "max_esbmc_query_time_seconds"),
+            "median_esbmc_query_time_seconds": _median(_values(group, "max_esbmc_query_time_seconds")),
+            "timeout_count": timeout_count,
+            "memout_count": memout_count,
+            "unknown_count": sum(1 for row in group if _status_present(row, "UNKNOWN")),
+            "timeout_memout_rate": (timeout_count + memout_count) / n_regions if n_regions else "",
+        }
+        output.append(row)
+    return sorted(output, key=_summary_key)
+
+
+def _delta_star_summary_rows(mrr_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for row in mrr_rows:
+        if _num(row.get("mrr_discrete")) is None:
+            continue
+        key = (
+            _summary_key_value(row.get("dataset")),
+            _summary_key_value(row.get("arch")),
+            _summary_key_value(row.get("method")),
+        )
+        grouped.setdefault(key, []).append(row)
+
+    output: list[dict[str, Any]] = []
+    for group in grouped.values():
+        row = group[0]
+        values = _values(group, "mrr_discrete")
+        output.append(
+            {
+                "benchmark": f"{row.get('dataset')}/{row.get('arch')}",
+                "dataset": row.get("dataset"),
+                "arch": row.get("arch"),
+                "method": row.get("method"),
+                "n_regions": len(group),
+                "delta_star_median": _median(values),
+                "delta_star_iqr": _iqr(values),
+                "delta_star_min": min(values) if values else "",
+                "delta_star_max": max(values) if values else "",
+            }
+        )
+    return sorted(output, key=lambda row: (str(row.get("dataset")), str(row.get("arch")), str(row.get("method"))))
+
+
+def _preferred_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    quality_rows = [row for row in rows if row.get("method") == "quality_refined"]
+    return quality_rows or rows
+
+
+def _index_by_summary_key(rows: list[dict[str, Any]]) -> dict[tuple[str, str, str, str, str, str], dict[str, Any]]:
+    return {_summary_key(row): row for row in rows}
+
+
+def _index_delta_rows(rows: list[dict[str, Any]]) -> dict[tuple[str, str, str], dict[str, Any]]:
+    return {
+        (
+            _summary_key_value(row.get("dataset")),
+            _summary_key_value(row.get("arch")),
+            _summary_key_value(row.get("method")),
+        ): row
+        for row in rows
+    }
+
+
+def _compact_main_summary_rows(
+    region_rows: list[dict[str, Any]],
+    deployment_rows: list[dict[str, Any]],
+    runtime_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    deployment_by_key = _index_by_summary_key(deployment_rows)
+    runtime_by_key = _index_by_summary_key(runtime_rows)
+    output: list[dict[str, Any]] = []
+    for region in _preferred_summary_rows(region_rows):
+        key = _summary_key(region)
+        deployment = deployment_by_key.get(key, {})
+        runtime = runtime_by_key.get(key, {})
+        output.append(
+            {
+                "benchmark": region.get("benchmark"),
+                "epsilon": region.get("input_epsilon"),
+                "N": region.get("n_regions"),
+                "certified_fraction": _fmt_number(region.get("certified_fraction")),
+                "bits_per_param": _fmt_mean_std(region.get("bits_per_param_mean"), region.get("bits_per_param_std")),
+                "size_vs_FP32": _fmt_mean_std(region.get("size_vs_FP32_mean"), region.get("size_vs_FP32_std")),
+                "C_acc": _fmt_mean_std(deployment.get("c_fixed_accuracy_mean"), deployment.get("c_fixed_accuracy_std")),
+                "runtime": _fmt_median_iqr(runtime.get("total_runtime_seconds_median"), runtime.get("total_runtime_seconds_iqr")),
+            }
+        )
+    return output
+
+
+def _compact_implementation_gap_rows(
+    rows: list[dict[str, Any]],
+    delta_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    delta_by_key = _index_delta_rows(delta_rows)
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        key = (
+            _summary_key_value(row.get("dataset")),
+            _summary_key_value(row.get("arch")),
+            _summary_key_value(row.get("method")),
+        )
+        grouped.setdefault(key, []).append(row)
+
+    output: list[dict[str, Any]] = []
+    for key, group in sorted(grouped.items()):
+        row = group[0]
+        delta = delta_by_key.get(key, {})
+        output.append(
+            {
+                "benchmark": f"{row.get('dataset')}/{row.get('arch')}",
+                "method": row.get("method"),
+                "N": len(group),
+                "Keras-Q_acc": _fmt_mean_std(
+                    _mean(_values(group, "quantized_keras_accuracy")),
+                    _std(_values(group, "quantized_keras_accuracy")),
+                ),
+                "C_acc": _fmt_mean_std(_mean(_values(group, "c_fixed_accuracy")), _std(_values(group, "c_fixed_accuracy"))),
+                "mismatch": _fmt_mean_std(
+                    _mean(_values(group, "mismatch_rate_vs_keras")),
+                    _std(_values(group, "mismatch_rate_vs_keras")),
+                ),
+                "max_logit_error": _fmt_number(_max_numeric(group, "max_abs_logit_error")),
+                "max_saturation": _fmt_number(_max_numeric(group, "max_saturation_rate")),
+                "Py/C_exact_rate": _fmt_number(_exact_rate(group, "python_c_exact_match")),
+                "delta_star": _fmt_median_iqr(delta.get("delta_star_median"), delta.get("delta_star_iqr")),
+            }
+        )
+    return output
+
+
+def _compact_scalability_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selected_rows = [row for row in rows if row.get("method") == "quality_refined"] or rows
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for row in selected_rows:
+        key = (
+            _summary_key_value(row.get("dataset")),
+            _summary_key_value(row.get("arch")),
+            _summary_key_value(row.get("mode") or "full_pipeline"),
+        )
+        grouped.setdefault(key, []).append(row)
+
+    output: list[dict[str, Any]] = []
+    for group in sorted(grouped.values(), key=lambda group: (str(group[0].get("dataset")), str(group[0].get("arch")), str(group[0].get("mode")))):
+        row = group[0]
+        guarantee_available = _has_guarantee_level(group)
+        certified_count = sum(1 for item in group if _certified(item, guarantee_level_available=guarantee_available))
+        timeout_count = sum(1 for item in group if _status_present(item, "TIMEOUT"))
+        memout_count = sum(1 for item in group if _status_present(item, "MEMOUT"))
+        n_regions = len(group)
+        output.append(
+            {
+                "arch": f"{row.get('dataset')}/{row.get('arch')}",
+                "mode": row.get("mode") or "full_pipeline",
+                "N": n_regions,
+                "cert_fraction": _fmt_number(certified_count / n_regions if n_regions else ""),
+                "max_neurons_query": _fmt_number(_max_numeric(group, "largest_neurons_per_query"), digits=0),
+                "calls": _fmt_number(_sum_numeric(group, "number_of_esbmc_calls"), digits=0),
+                "median_ESBMC_time": _fmt_median_iqr(
+                    _median(_values(group, "total_esbmc_time_seconds")),
+                    _iqr(_values(group, "total_esbmc_time_seconds")),
+                ),
+                "max_query_time": _fmt_number(_max_numeric(group, "max_esbmc_query_time_seconds")),
+                "timeout_memout_rate": _fmt_number((timeout_count + memout_count) / n_regions if n_regions else ""),
+            }
+        )
+    return output
+
+
+def _write_compact_latex_tables(output_root: Path, tables: dict[str, list[dict[str, Any]]]) -> dict[str, str]:
+    latex_dir = output_root / "latex"
+    main_rows = _compact_main_summary_rows(
+        tables["region_certification"],
+        tables["deployment_quality_summary"],
+        tables["runtime_summary"],
+    )
+    implementation_gap_rows = _compact_implementation_gap_rows(
+        tables["all_rows"],
+        tables.get("delta_star_summary", []),
+    )
+    scalability_rows = _compact_scalability_rows(tables["all_rows"])
+    artifacts = {
+        "table_main_summary_compact_tex": _write_latex(
+            latex_dir / "table_main_summary_compact.tex",
+            main_rows,
+            [
+                ("Benchmark", "benchmark"),
+                ("epsilon", "epsilon"),
+                ("N", "N"),
+                ("certified", "certified_fraction"),
+                ("bits/param", "bits_per_param"),
+                ("size/FP32", "size_vs_FP32"),
+                ("C acc.", "C_acc"),
+                ("runtime", "runtime"),
+            ],
+        ),
+        "table_implementation_gap_compact_tex": _write_latex(
+            latex_dir / "table_implementation_gap_compact.tex",
+            implementation_gap_rows,
+            [
+                ("Benchmark", "benchmark"),
+                ("Method", "method"),
+                ("N", "N"),
+                ("Keras-Q acc.", "Keras-Q_acc"),
+                ("C acc.", "C_acc"),
+                ("mismatch", "mismatch"),
+                ("max logit err.", "max_logit_error"),
+                ("max sat.", "max_saturation"),
+                ("Py/C exact", "Py/C_exact_rate"),
+                ("delta*", "delta_star"),
+            ],
+        ),
+        "table_scalability_compact_tex": _write_latex(
+            latex_dir / "table_scalability_compact.tex",
+            scalability_rows,
+            [
+                ("Arch", "arch"),
+                ("Mode", "mode"),
+                ("N", "N"),
+                ("cert.", "cert_fraction"),
+                ("max neurons/query", "max_neurons_query"),
+                ("calls", "calls"),
+                ("median ESBMC", "median_ESBMC_time"),
+                ("max query", "max_query_time"),
+                ("timeout/memout", "timeout_memout_rate"),
+            ],
+        ),
+    }
+    return {key: str(value) for key, value in artifacts.items()}
+
+
 def _latex_escape(value: Any) -> str:
     text = "" if value is None else str(value)
     for old, new in {
@@ -646,6 +1187,8 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     failed_rows: list[dict[str, Any]] = []
     run_records: list[dict[str, Any]] = []
+    if output_root.exists() and any(output_root.iterdir()):
+        print(f"updating existing aggregate output directory: {output_root}", flush=True)
 
     for run_dir in run_dirs:
         run_status = _read_json(run_dir / "run_status.json")
@@ -707,6 +1250,10 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
     mrr_rows = _mrr_rows(rows)
     implementation_gap_rows = _implementation_gap_rows(rows)
     ablation_rows = _ablation_rows(rows)
+    region_certification_rows = _region_certification_summary_rows(rows)
+    deployment_quality_summary_rows = _deployment_quality_summary_rows(rows)
+    runtime_summary_rows = _runtime_summary_rows(rows)
+    delta_star_summary_rows = _delta_star_summary_rows(mrr_rows)
 
     smt_path = output_root / "smt_complexity.csv"
     smt_rows = _read_csv(smt_path)
@@ -725,6 +1272,12 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
             "num_method_rows": len(rows),
             "runs": run_records,
             "rows": rows,
+            "aggregate_tables": {
+                "region_certification": region_certification_rows,
+                "deployment_quality": deployment_quality_summary_rows,
+                "runtime": runtime_summary_rows,
+                "delta_star": delta_star_summary_rows,
+            },
         },
     )
     _write_csv(output_root / "table_quality_metrics.csv", quality_rows, QUALITY_FIELDS)
@@ -736,6 +1289,19 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
     _write_csv(output_root / "table_mrr.csv", mrr_rows, MRR_FIELDS)
     _write_csv(output_root / "table_implementation_gap.csv", implementation_gap_rows, IMPLEMENTATION_GAP_FIELDS)
     _write_csv(output_root / "table_ablation.csv", ablation_rows, ABLATION_FIELDS)
+    _write_csv(
+        output_root / "table_region_certification_summary.csv",
+        region_certification_rows,
+        REGION_CERTIFICATION_FIELDS,
+    )
+    _write_csv(
+        output_root / "table_deployment_quality_summary.csv",
+        deployment_quality_summary_rows,
+        DEPLOYMENT_QUALITY_SUMMARY_FIELDS,
+    )
+    _write_csv(output_root / "table_runtime_summary.csv", runtime_summary_rows, RUNTIME_SUMMARY_FIELDS)
+    if delta_star_summary_rows:
+        _write_csv(output_root / "table_delta_star_summary.csv", delta_star_summary_rows, DELTA_STAR_SUMMARY_FIELDS)
     _write_csv(output_root / "failed_runs.csv", failed_rows, FAILED_RUN_FIELDS)
     summary_path = _write_summary(output_root, rows, failed_rows)
     latex = _write_latex_tables(
@@ -749,11 +1315,30 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
             "implementation_gap": implementation_gap_rows,
         },
     )
+    compact_latex = _write_compact_latex_tables(
+        output_root,
+        {
+            "all_rows": rows,
+            "region_certification": region_certification_rows,
+            "deployment_quality_summary": deployment_quality_summary_rows,
+            "runtime_summary": runtime_summary_rows,
+            "delta_star_summary": delta_star_summary_rows,
+        },
+    )
     return {
         "all_experiments_csv": str(output_root / "all_experiments.csv"),
         "all_experiments_json": str(output_root / "all_experiments.json"),
+        "table_region_certification_summary_csv": str(output_root / "table_region_certification_summary.csv"),
+        "table_deployment_quality_summary_csv": str(output_root / "table_deployment_quality_summary.csv"),
+        "table_runtime_summary_csv": str(output_root / "table_runtime_summary.csv"),
+        **(
+            {"table_delta_star_summary_csv": str(output_root / "table_delta_star_summary.csv")}
+            if delta_star_summary_rows
+            else {}
+        ),
         "article_summary_md": str(summary_path),
         **latex,
+        **compact_latex,
     }
 
 
@@ -809,6 +1394,36 @@ ABLATION_FIELDS = [
 FAILED_RUN_FIELDS = [
     "name", "dataset", "arch", "sample_id", "eps", "input_epsilon", "status", "return_code",
     "started_at", "finished_at", "elapsed_seconds", "output_dir", "error_message",
+]
+REGION_CERTIFICATION_FIELDS = [
+    "benchmark", "dataset", "arch", "input_epsilon", "normalized_input_epsilon", "method", "mode",
+    "n_regions", "certified_count", "certified_fraction", "L3_count", "L2_count", "L1_count",
+    "L0_count", "timeout_count", "memout_count", "unknown_count", "bits_per_param_mean",
+    "bits_per_param_std", "size_vs_FP32_mean", "size_vs_FP32_std",
+    "compression_ratio_vs_float32_mean", "compression_ratio_vs_float32_std", "max_neurons_query",
+    "max_input_dim_query", "max_estimated_macs_query",
+]
+DEPLOYMENT_QUALITY_SUMMARY_FIELDS = [
+    "benchmark", "dataset", "arch", "input_epsilon", "normalized_input_epsilon", "method", "mode",
+    "n_regions", "quantized_keras_accuracy_mean", "quantized_keras_accuracy_std",
+    "python_fixed_accuracy_mean", "python_fixed_accuracy_std", "c_fixed_accuracy_mean",
+    "c_fixed_accuracy_std", "mismatch_rate_vs_keras_mean", "mismatch_rate_vs_keras_std",
+    "max_abs_logit_error_mean", "max_abs_logit_error_std", "max_abs_logit_error_max",
+    "mean_abs_logit_error_mean", "mean_abs_logit_error_std", "max_saturation_rate_mean",
+    "max_saturation_rate_std", "max_saturation_rate_max", "mean_saturation_rate_mean",
+    "mean_saturation_rate_std", "python_c_exact_rate",
+]
+RUNTIME_SUMMARY_FIELDS = [
+    "benchmark", "dataset", "arch", "input_epsilon", "normalized_input_epsilon", "method", "mode",
+    "n_regions", "total_runtime_seconds_median", "total_runtime_seconds_iqr",
+    "total_esbmc_time_seconds_median", "total_esbmc_time_seconds_iqr",
+    "number_of_esbmc_calls_median", "number_of_esbmc_calls_iqr", "number_of_esbmc_calls_sum",
+    "max_esbmc_query_time_seconds_max", "median_esbmc_query_time_seconds", "timeout_count",
+    "memout_count", "unknown_count", "timeout_memout_rate",
+]
+DELTA_STAR_SUMMARY_FIELDS = [
+    "benchmark", "dataset", "arch", "method", "n_regions", "delta_star_median", "delta_star_iqr",
+    "delta_star_min", "delta_star_max",
 ]
 
 

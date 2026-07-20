@@ -271,6 +271,10 @@ def cmd_reproduce(args: argparse.Namespace, extra: list[str]) -> int:
         command.append("--plots")
     if args.continue_on_error:
         command.append("--continue-on-error")
+    if args.resume:
+        command.append("--resume")
+    if args.force:
+        command.append("--force")
     command.extend(extra)
     print("Running: " + _command_text(command))
     completed = subprocess.run(command, cwd=_repo_root(), check=False)
@@ -340,6 +344,8 @@ def build_parser() -> argparse.ArgumentParser:
     reproduce.add_argument("--aggregate", action="store_true")
     reproduce.add_argument("--plots", action="store_true")
     reproduce.add_argument("--continue-on-error", action="store_true")
+    reproduce.add_argument("--resume", action="store_true")
+    reproduce.add_argument("--force", action="store_true")
     reproduce.set_defaults(func=cmd_reproduce)
 
     aggregate = subparsers.add_parser("aggregate", help="Aggregate article experiment outputs.")
