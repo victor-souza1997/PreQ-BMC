@@ -320,33 +320,53 @@ def _expand_runs(config: dict[str, Any], args: argparse.Namespace) -> list[dict[
         elif args.mrr_mode == "binary" and binary_values and bool(base.get("mrr_enabled", False)):
             eps_sweep = binary_values
         eps_values = list(eps_sweep) if eps_sweep is not None else [base.get("input_epsilon", base.get("eps", 1.0))]
+        block_sizes = base.pop("esbmc_layer_block_sizes", None)
+        if block_sizes is None:
+            block_sizes = [base.get("esbmc_layer_block_size")]
+        else:
+            block_sizes = [int(value) for value in block_sizes]
+            if not block_sizes:
+                raise ValueError("esbmc_layer_block_sizes must contain at least one block size.")
+            if any(value < 0 for value in block_sizes):
+                raise ValueError("esbmc_layer_block_sizes values must be non-negative.")
+            if len(set(block_sizes)) != len(block_sizes):
+                raise ValueError("esbmc_layer_block_sizes must not contain duplicates.")
 
         for sample_id in sample_ids:
             for eps_value in eps_values:
-                run = dict(base)
-                run["sample_id"] = int(sample_id)
-                if int(sample_id) in sample_metadata:
-                    run.update(sample_metadata[int(sample_id)])
-                run["eps"] = float(eps_value)
-                run["input_epsilon"] = float(eps_value)
-                run["perturbation_radius"] = float(eps_value)
-                run["run_index"] = int(index)
-                expanded_name = _run_name(run)
-                if len(sample_ids) > 1 and f"sample{sample_id}".lower() not in expanded_name.lower():
-                    expanded_name = _slug(f"{expanded_name}_sample{sample_id}")
-                if eps_sweep is not None:
-                    if f"eps{_slug(eps_value)}".lower() not in expanded_name.lower():
-                        expanded_name = _slug(f"{expanded_name}_eps{_slug(eps_value)}")
-                    run["mrr_mode"] = args.mrr_mode or "discrete"
-                    run["eps_values_tested"] = [float(value) for value in eps_values]
-                run["name"] = expanded_name
-                if not bool(run.get("enabled", True)) and not args.include_disabled:
-                    run["_skip_reason"] = "disabled"
-                elif args.only and not _matches(args.only, run):
-                    run["_skip_reason"] = "not matched by --only"
-                elif args.skip and _matches(args.skip, run):
-                    run["_skip_reason"] = "matched by --skip"
-                runs.append(run)
+                for block_size in block_sizes:
+                    run = dict(base)
+                    run["sample_id"] = int(sample_id)
+                    if int(sample_id) in sample_metadata:
+                        run.update(sample_metadata[int(sample_id)])
+                    run["eps"] = float(eps_value)
+                    run["input_epsilon"] = float(eps_value)
+                    run["perturbation_radius"] = float(eps_value)
+                    run["run_index"] = int(index)
+                    if block_size is not None:
+                        run["esbmc_layer_block_size"] = int(block_size)
+                    expanded_name = _run_name(run)
+                    if len(sample_ids) > 1 and f"sample{sample_id}".lower() not in expanded_name.lower():
+                        expanded_name = _slug(f"{expanded_name}_sample{sample_id}")
+                    if eps_sweep is not None:
+                        if f"eps{_slug(eps_value)}".lower() not in expanded_name.lower():
+                            expanded_name = _slug(f"{expanded_name}_eps{_slug(eps_value)}")
+                        run["mrr_mode"] = args.mrr_mode or "discrete"
+                        run["eps_values_tested"] = [float(value) for value in eps_values]
+                    if len(block_sizes) > 1:
+                        decomposition = "full_layer" if int(block_size) == 0 else f"blockwise_{int(block_size)}"
+                        run["verification_decomposition"] = decomposition
+                        run["mode"] = decomposition
+                        name_suffix = "full_layer" if int(block_size) == 0 else f"block{int(block_size)}"
+                        expanded_name = _slug(f"{expanded_name}_{name_suffix}")
+                    run["name"] = expanded_name
+                    if not bool(run.get("enabled", True)) and not args.include_disabled:
+                        run["_skip_reason"] = "disabled"
+                    elif args.only and not _matches(args.only, run):
+                        run["_skip_reason"] = "not matched by --only"
+                    elif args.skip and _matches(args.skip, run):
+                        run["_skip_reason"] = "matched by --skip"
+                    runs.append(run)
     return runs
 
 
@@ -751,7 +771,16 @@ def _resume_success(output_dir: Path) -> bool:
 
 
 def _has_existing_output(output_dir: Path) -> bool:
-    return output_dir.exists() and any(output_dir.iterdir())
+    if not output_dir.exists() or not any(output_dir.iterdir()):
+        return False
+    status_path = output_dir / "run_status.json"
+    if status_path.exists():
+        try:
+            if json.loads(status_path.read_text(encoding="utf-8")).get("status") == "skipped":
+                return False
+        except Exception:
+            pass
+    return True
 
 
 def _resolve_output_roots(config: dict[str, Any], args: argparse.Namespace) -> tuple[Path, Path]:

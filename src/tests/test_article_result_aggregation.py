@@ -167,6 +167,82 @@ class ArticleResultAggregationTest(unittest.TestCase):
             self.assertAlmostEqual(float(quality_runtime["total_runtime_seconds_median"]), 15.0)
             self.assertAlmostEqual(float(quality_runtime["total_runtime_seconds_iqr"]), 5.0)
 
+    def test_aggregate_excludes_intentionally_skipped_placeholders(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_root = root / "runs"
+            output_root = root / "results"
+            experiment, pipeline, status = _experiment_summary(0, c_accuracy=0.9, runtime=10.0)
+            completed_dir = input_root / "iris_sample0"
+            _write_json(completed_dir / "reports" / "experiment_summary.json", experiment)
+            _write_json(completed_dir / "reports" / "pipeline_summary.json", pipeline)
+            _write_json(completed_dir / "run_status.json", status)
+            _write_json(completed_dir / "run_config.json", {"mode": "blockwise_5"})
+
+            skipped_dir = input_root / "iris_sample1"
+            _write_json(
+                skipped_dir / "run_status.json",
+                {
+                    "name": "iris_sample1",
+                    "dataset": "iris",
+                    "arch": "1blk_10",
+                    "sample_id": 1,
+                    "input_epsilon": 0.01,
+                    "status": "skipped",
+                    "error_message": "skipped by --max-runs",
+                },
+            )
+            _write_json(skipped_dir / "run_config.json", {"mode": "blockwise_5"})
+
+            aggregate_script.aggregate(input_root, output_root)
+
+            with (output_root / "all_experiments.csv").open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 2)
+            with (output_root / "table_region_certification_summary.csv").open(newline="", encoding="utf-8") as handle:
+                region_rows = list(csv.DictReader(handle))
+            quality_region = next(row for row in region_rows if row["method"] == "quality_refined")
+            self.assertEqual(quality_region["n_regions"], "1")
+            aggregate_json = json.loads((output_root / "all_experiments.json").read_text(encoding="utf-8"))
+            self.assertEqual(aggregate_json["num_run_dirs"], 2)
+            self.assertEqual(aggregate_json["num_skipped_run_dirs"], 1)
+
+    def test_full_layer_query_extent_comes_from_esbmc_call_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_root = root / "runs"
+            output_root = root / "results"
+            experiment, pipeline, status = _experiment_summary(0, c_accuracy=0.9, runtime=10.0)
+            pipeline["blockwise_verification"] = {
+                "enabled": False,
+                "block_size": 0,
+                "largest_neurons_per_query": 0,
+                "largest_input_dim_per_query": 0,
+                "largest_estimated_macs_per_query": 0,
+            }
+            pipeline["esbmc_call_records"] = [
+                {
+                    "mode": "full_layer",
+                    "neurons_per_query": 10,
+                    "input_dim": 4,
+                    "estimated_macs": 40,
+                }
+            ]
+            run_dir = input_root / "iris_full_layer"
+            _write_json(run_dir / "reports" / "experiment_summary.json", experiment)
+            _write_json(run_dir / "reports" / "pipeline_summary.json", pipeline)
+            _write_json(run_dir / "run_status.json", status)
+            _write_json(run_dir / "run_config.json", {"mode": "full_layer"})
+
+            aggregate_script.aggregate(input_root, output_root)
+
+            with (output_root / "table_region_certification_summary.csv").open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            quality_row = next(row for row in rows if row["method"] == "quality_refined")
+            self.assertEqual(quality_row["max_neurons_query"], "10.0")
+            self.assertEqual(quality_row["max_input_dim_query"], "4.0")
+            self.assertEqual(quality_row["max_estimated_macs_query"], "40.0")
+
 
 class ArticleSampleSelectionTest(unittest.TestCase):
     def test_stratified_margin_selection_expands_low_median_high_regions(self) -> None:
@@ -247,6 +323,49 @@ class ArticleOutputRootTest(unittest.TestCase):
 
         self.assertEqual(output_root, Path("output/cli_runs"))
         self.assertEqual(aggregate_output_root, Path("output/custom_results"))
+
+    def test_skipped_placeholder_does_not_block_a_later_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "placeholder"
+            _write_json(output_dir / "run_status.json", {"status": "skipped"})
+            _write_json(output_dir / "run_config.json", {"name": "placeholder"})
+
+            self.assertFalse(article_runner._has_existing_output(output_dir))
+
+
+class ArticleBlockComparisonExpansionTest(unittest.TestCase):
+    def test_block_size_list_expands_paired_runs_with_distinct_modes(self) -> None:
+        args = article_runner.build_parser().parse_args([])
+        runs = article_runner._expand_runs(
+            {
+                "defaults": {},
+                "runs": [
+                    {
+                        "name": "iris_decomposition",
+                        "dataset": "iris",
+                        "arch": "1blk_10",
+                        "sample_id": 0,
+                        "eps_sweep": [0.01, 0.02],
+                        "esbmc_layer_block_sizes": [5, 0],
+                    }
+                ],
+            },
+            args,
+        )
+
+        self.assertEqual(len(runs), 4)
+        self.assertEqual(
+            [(run["input_epsilon"], run["esbmc_layer_block_size"], run["mode"]) for run in runs],
+            [
+                (0.01, 5, "blockwise_5"),
+                (0.01, 0, "full_layer"),
+                (0.02, 5, "blockwise_5"),
+                (0.02, 0, "full_layer"),
+            ],
+        )
+        self.assertEqual(len({run["name"] for run in runs}), 4)
+        self.assertTrue(runs[0]["name"].endswith("_block5"))
+        self.assertTrue(runs[1]["name"].endswith("_full_layer"))
 
 
 if __name__ == "__main__":

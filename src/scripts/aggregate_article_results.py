@@ -341,6 +341,16 @@ def _method_row(
     formal_success = bool(contract_verified_value or section_success)
     deployment_success = bool(section.get("deployment_quality_accepted", False))
     full_success = bool(formal_success and deployment_success and _bool(python_c_exact) is True)
+    esbmc_call_records = pipeline.get("esbmc_call_records") or []
+
+    def query_extent(summary_key: str, record_key: str) -> Any:
+        summary_value = _num(blockwise.get(summary_key))
+        if summary_value is not None and summary_value > 0:
+            return summary_value
+        record_values = [_num(record.get(record_key)) for record in esbmc_call_records]
+        numeric_values = [value for value in record_values if value is not None]
+        return max(numeric_values) if numeric_values else summary_value
+
     return {
         "run_name": run_status.get("name") or run_config.get("name") or run_dir.name,
         "dataset": dataset,
@@ -420,9 +430,9 @@ def _method_row(
         "memout_blocks": blockwise.get("memout_blocks"),
         "unknown_blocks": blockwise.get("unknown_blocks"),
         "skipped_blocks_due_to_fail_fast": blockwise.get("skipped_blocks_due_to_fail_fast"),
-        "largest_neurons_per_query": blockwise.get("largest_neurons_per_query"),
-        "largest_input_dim_per_query": blockwise.get("largest_input_dim_per_query"),
-        "largest_estimated_macs_per_query": blockwise.get("largest_estimated_macs_per_query"),
+        "largest_neurons_per_query": query_extent("largest_neurons_per_query", "neurons_per_query"),
+        "largest_input_dim_per_query": query_extent("largest_input_dim_per_query", "input_dim"),
+        "largest_estimated_macs_per_query": query_extent("largest_estimated_macs_per_query", "estimated_macs"),
         "num_parameters": resource.get("num_parameters"),
         "float_parameter_memory_bytes": resource.get("float_parameter_memory_bytes"),
         "fixed_parameter_memory_bytes": resource.get("fixed_parameter_memory_bytes"),
@@ -1201,6 +1211,16 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
                 "status": "success" if experiment or pipeline else "failed",
                 "output_dir": str(run_dir),
             }
+        run_records.append(
+            {
+                "run_dir": str(run_dir),
+                "run_status": run_status,
+                "has_pipeline_summary": bool(pipeline),
+                "has_experiment_summary": bool(experiment),
+            }
+        )
+        if run_status.get("status") == "skipped":
+            continue
         if run_status.get("status") != "success":
             failed_rows.append(run_status)
         for method in METHODS:
@@ -1214,14 +1234,6 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
                     method=method,
                 )
             )
-        run_records.append(
-            {
-                "run_dir": str(run_dir),
-                "run_status": run_status,
-                "has_pipeline_summary": bool(pipeline),
-                "has_experiment_summary": bool(experiment),
-            }
-        )
 
     quality_rows = [
         {field: row.get(field) for field in [
@@ -1269,6 +1281,9 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
             "input_root": str(input_root),
             "output_root": str(output_root),
             "num_run_dirs": len(run_dirs),
+            "num_skipped_run_dirs": sum(
+                1 for record in run_records if record["run_status"].get("status") == "skipped"
+            ),
             "num_method_rows": len(rows),
             "runs": run_records,
             "rows": rows,
