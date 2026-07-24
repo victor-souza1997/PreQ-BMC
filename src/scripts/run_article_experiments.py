@@ -26,7 +26,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-runs", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--continue-on-error", action="store_true")
-    parser.add_argument("--output-root", type=Path, default=Path("output/article_runs"))
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=None,
+        help="Override metadata.output_root from the experiment configuration.",
+    )
     parser.add_argument("--aggregate", action="store_true")
     parser.add_argument("--plots", action="store_true")
     parser.add_argument("--python-executable", default=sys.executable)
@@ -749,6 +754,14 @@ def _has_existing_output(output_dir: Path) -> bool:
     return output_dir.exists() and any(output_dir.iterdir())
 
 
+def _resolve_output_roots(config: dict[str, Any], args: argparse.Namespace) -> tuple[Path, Path]:
+    metadata = config.get("metadata", {})
+    configured_output_root = Path(metadata.get("output_root", "output/article_runs"))
+    output_root = Path(args.output_root) if args.output_root is not None else configured_output_root
+    aggregate_output_root = Path(metadata.get("aggregate_output_root", "output/article_results"))
+    return output_root, aggregate_output_root
+
+
 def _followup(command: list[str], dry_run: bool) -> None:
     print(_command_text(command), flush=True)
     if not dry_run:
@@ -759,9 +772,7 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     config = _load_config(args.config)
-    metadata = config.get("metadata", {})
-    output_root = args.output_root or Path(metadata.get("output_root", "output/article_runs"))
-    aggregate_output_root = Path(metadata.get("aggregate_output_root", "output/article_results"))
+    output_root, aggregate_output_root = _resolve_output_roots(config, args)
     supported_flags = _discover_cli_flags()
     runs = _expand_runs(config, args)
 

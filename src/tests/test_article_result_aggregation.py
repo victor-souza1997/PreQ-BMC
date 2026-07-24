@@ -217,5 +217,37 @@ class ArticleSampleSelectionTest(unittest.TestCase):
         self.assertEqual([run["clean_margin"] for run in runs], [0.1, 1.0, 10.0])
 
 
+class ArticleOutputRootTest(unittest.TestCase):
+    def test_configured_output_roots_are_used_without_cli_override(self) -> None:
+        args = article_runner.build_parser().parse_args([])
+        output_root, aggregate_output_root = article_runner._resolve_output_roots(
+            {
+                "metadata": {
+                    "output_root": "output/custom_runs",
+                    "aggregate_output_root": "output/custom_results",
+                }
+            },
+            args,
+        )
+
+        self.assertEqual(output_root, Path("output/custom_runs"))
+        self.assertEqual(aggregate_output_root, Path("output/custom_results"))
+
+    def test_cli_output_root_overrides_configured_run_root(self) -> None:
+        args = article_runner.build_parser().parse_args(["--output-root", "output/cli_runs"])
+        output_root, aggregate_output_root = article_runner._resolve_output_roots(
+            {
+                "metadata": {
+                    "output_root": "output/custom_runs",
+                    "aggregate_output_root": "output/custom_results",
+                }
+            },
+            args,
+        )
+
+        self.assertEqual(output_root, Path("output/cli_runs"))
+        self.assertEqual(aggregate_output_root, Path("output/custom_results"))
+
+
 if __name__ == "__main__":
     unittest.main()
