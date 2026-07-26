@@ -161,6 +161,30 @@ def _demo_required_modules_available() -> tuple[bool, list[str]]:
     return not missing, missing
 
 
+def _demo_result_summary(output_dir: Path) -> dict[str, Any] | None:
+    report_path = output_dir / "reports" / "experiment_summary.json"
+    if not report_path.exists():
+        return None
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    refined = report.get("quality_refined", {})
+    method = "quality_refined" if refined.get("accepted") is True else "formal_only"
+    result = report.get(method, {})
+    return {
+        "method": method,
+        "final_status": str(result.get("final_status", "UNKNOWN")),
+        "guarantee_level": str(result.get("guarantee_level", "unknown")),
+        "contract_status": str(result.get("contract_status", "UNKNOWN")),
+        "no_saturation_status": str(result.get("no_saturation_status", "SKIPPED")),
+        "Q": [int(value) for value in result.get("Q", [])],
+        "I": [int(value) for value in result.get("I", [])],
+        "F": [int(value) for value in result.get("F", [])],
+    }
+
+
 def cmd_demo(args: argparse.Namespace, extra: list[str]) -> int:
     _ensure_esbmc_installed_if_requested(bool(args.install_missing_esbmc))
     esbmc = resolve_esbmc_executable()
@@ -173,8 +197,15 @@ def cmd_demo(args: argparse.Namespace, extra: list[str]) -> int:
     print(f"Gurobi/gurobipy: {'available' if gurobi_available else 'not available'}", flush=True)
     print(f"MILP solver: {args.solver}", flush=True)
     print(f"no-gurobi mode: {bool(args.no_gurobi)}", flush=True)
+    print(f"contract profile: {args.contract_profile}", flush=True)
     if args.no_gurobi:
         print(f"preimage cache: {cache_dir}", flush=True)
+    if args.contract_profile == "paper-slack":
+        print(
+            "Contract profile paper-slack reproduces the article/demo compatibility mode. "
+            "Its strongest possible guarantee level is harness-verified, not deployed-transfer.",
+            flush=True,
+        )
 
     if esbmc is None:
         print("Cannot run the ESBMC demo because `esbmc` was not found.")
@@ -228,6 +259,13 @@ def cmd_demo(args: argparse.Namespace, extra: list[str]) -> int:
                 str(args.preimage_cache_key),
             ]
         )
+    if args.contract_profile == "paper-slack":
+        command.extend(
+            [
+                "--unsound-contract-tolerance",
+                "--no-enforce-contract-chaining",
+            ]
+        )
     command.extend(extra)
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -248,7 +286,23 @@ def cmd_demo(args: argparse.Namespace, extra: list[str]) -> int:
     if completed.returncode != 0:
         print(f"Demo failed with return code {completed.returncode}. Last stderr lines:")
         print(_tail(stderr_path) or "(stderr was empty)")
-    return int(completed.returncode)
+        return int(completed.returncode)
+
+    result = _demo_result_summary(output_dir)
+    if result is None:
+        print("Demo failed: experiment_summary.json was not produced or could not be read.")
+        return 1
+
+    print(f"Reported method: {result['method']}")
+    print(f"Final status: {result['final_status']}")
+    print(f"Guarantee level: {result['guarantee_level']}")
+    print(f"Contract status: {result['contract_status']}")
+    print(f"No-saturation status: {result['no_saturation_status']}")
+    print(f"Selected Q/I/F: {result['Q']} / {result['I']} / {result['F']}")
+    if result["final_status"] in {"FAILED", "UNKNOWN"}:
+        print("Demo completed operationally, but the selected verification result was not accepted.")
+        return 1
+    return 0
 
 
 def cmd_reproduce(args: argparse.Namespace, extra: list[str]) -> int:
@@ -330,6 +384,15 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--bit-ub", type=int, default=16)
     demo.add_argument("--preimage-mode", default="milp", choices=["milp", "abstr", "comp"])
     demo.add_argument("--compare-limit", type=int, default=10)
+    demo.add_argument(
+        "--contract-profile",
+        choices=["paper-slack", "strict"],
+        default="paper-slack",
+        help=(
+            "paper-slack reproduces the bundled article cache and can claim at most "
+            "harness-verified; strict enforces zero tolerance and contract chaining."
+        ),
+    )
     demo.add_argument(
         "--install-missing-esbmc",
         action="store_true",
