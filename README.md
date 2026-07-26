@@ -43,12 +43,17 @@ The strongest deployment-oriented claim should be read through `guarantee_level`
 python -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -e '.[full]'
+python -m pip install -r requirements.txt
 preqbmc install-esbmc
 preqbmc verify-environment
 ```
 
-The ESBMC installer downloads the latest matching ESBMC release into `.local/` and exposes `.local/bin/esbmc`. The runner checks `PREQBMC_ESBMC`, then `.local/bin/esbmc`, then the system `PATH`.
+The default requirements install the license-free `paper` dependency group,
+including CBC. Gurobi remains optional through
+`python -m pip install -e '.[gurobi]'`. The ESBMC installer downloads the
+latest matching ESBMC release into `.local/` and exposes
+`.local/bin/esbmc`. The runner checks `PREQBMC_ESBMC`, then
+`.local/bin/esbmc`, then the system `PATH`.
 
 ## Quick Artifact Demo
 

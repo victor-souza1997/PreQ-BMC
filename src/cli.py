@@ -52,7 +52,6 @@ def _python_package_report() -> list[dict[str, Any]]:
         ("h5py", "required for HDF5 benchmark weights"),
         ("sklearn", "required for Iris/Seeds dataset loading"),
         ("matplotlib", "optional for plots"),
-        ("pandas", "optional for result analysis"),
         ("torch", "optional for legacy conversion utilities"),
         ("onnx", "optional for ONNX conversion utilities"),
         ("mip", "optional; provides the default CBC MILP backend"),
@@ -98,7 +97,10 @@ def _print_environment_report(*, install_missing_esbmc: bool = False) -> dict[st
     if esbmc is None:
         print("\nESBMC was not found. Run `preqbmc install-esbmc`, or install ESBMC and ensure `esbmc --version` works.")
     if not cbc_available:
-        print("\nCBC/python-mip is the default license-free MILP backend. Install it with `pip install -e '.[cbc]'`.")
+        print(
+            "\nCBC/python-mip is the default license-free MILP backend. "
+            "Install it with `python -m pip install -e '.[cbc]'`."
+        )
     if not gurobi_available:
         print("\nGurobi/gurobipy is optional and only needed for `--solver gurobi` reference runs.")
     missing_demo = [
@@ -110,7 +112,8 @@ def _print_environment_report(*, install_missing_esbmc: bool = False) -> dict[st
         print(
             "\nMissing packages for the full demo/pipeline: "
             + ", ".join(missing_demo)
-            + ". Install with `pip install -e '.[full]'`; Gurobi licensing is only needed for `--solver gurobi`."
+            + ". Install with `python -m pip install -e '.[paper]'`; "
+            "Gurobi licensing is only needed for `--solver gurobi`."
         )
     return report
 
@@ -181,7 +184,7 @@ def cmd_demo(args: argparse.Namespace, extra: list[str]) -> int:
     modules_ok, missing_modules = _demo_required_modules_available()
     if not modules_ok:
         print("Cannot run the demo because required Python packages are missing: " + ", ".join(missing_modules))
-        print("Install them with `pip install -e '.[full]'`.")
+        print("Install them with `python -m pip install -e '.[paper]'`.")
         return 2
 
     if args.no_gurobi and not _demo_cache_available(cache_dir):
