@@ -21,4 +21,3 @@ shells
 venv/
 image_gen
 logs
-src/benchmark/
