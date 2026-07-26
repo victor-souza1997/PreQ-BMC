@@ -6,10 +6,11 @@
   "eps": 0.05,
   "preimage_mode": "milp",
   "verify_mode": "esbmc",
+  "contract_profile": "paper-slack",
   "requires_gurobi": false,
   "requires_esbmc": true,
   "preimage_cache_dir": "examples/preimage_cache",
-  "command": "preqbmc demo --no-gurobi --output output/demo_run",
+  "command": "preqbmc demo --no-gurobi --contract-profile paper-slack --output output/demo_run",
   "expected_outputs": [
     "output/demo_run/reports/pipeline_summary.json",
     "output/demo_run/reports/experiment_summary.json",

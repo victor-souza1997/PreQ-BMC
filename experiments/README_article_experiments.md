@@ -37,6 +37,40 @@ python tool/scripts/run_article_experiments.py \
   --plots
 ```
 
+## Paired Block-Wise Comparison
+
+The SBSeg decomposition benchmark uses a fixed geometric epsilon grid and expands
+each region into a block-wise and full-layer ESBMC run:
+
+```bash
+preqbmc reproduce \
+  --config experiments/article_experiments_block_comparison.json \
+  --continue-on-error \
+  --aggregate \
+  --plots
+```
+
+Each pair differs only in `esbmc_layer_block_size`. The generated run names end
+in `_block5`, `_block10`, or `_full_layer`, and aggregate rows use the modes
+`blockwise_5`, `blockwise_10`, and `full_layer`. Outputs are written under
+`output/article_runs_block_comparison_v1` and
+`output/article_results_block_comparison_v1`.
+
+The complete configuration expands to 102 runs. A short validation can be
+performed first:
+
+```bash
+preqbmc reproduce \
+  --config experiments/article_experiments_block_comparison.json \
+  --only iris \
+  --max-runs 2 \
+  --continue-on-error \
+  --aggregate
+```
+
+Use `--resume` after an interruption. Full-layer `TIMEOUT`, `MEMOUT`, and
+`UNKNOWN` outcomes are retained as decomposition/scalability evidence.
+
 ## Resume After a Crash
 
 ```bash
@@ -89,6 +123,10 @@ The reported SMT metrics are syntactic complexity indicators, including file siz
 
 Runs with `eps_sweep` are expanded into one run per epsilon. The aggregate script computes `mrr_discrete`, the largest tested input epsilon whose contract verification succeeds.
 
+Runs with `esbmc_layer_block_sizes` are additionally expanded once per requested
+block size. A value of `0` selects full-layer verification. Positive values
+select block-wise verification while retaining one shared Q/I/F per layer.
+
 Override sweep values for MRR-enabled runs:
 
 ```bash
@@ -132,4 +170,3 @@ For hidden affine layer contracts, each output neuron has an independent affine 
 ## Monolithic and Full-Layer Baselines
 
 Full-layer and monolithic C-to-SMT checks are resource-controlled with ESBMC timeout and memory limits. `TIMEOUT`, `MEMOUT`, and `UNKNOWN` are valid scalability evidence and are kept in the aggregate tables instead of being filtered out.
-

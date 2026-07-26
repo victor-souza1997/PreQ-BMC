@@ -75,11 +75,18 @@ output/article_results/table_esbmc_status_counts.csv
 output/article_results/table_mrr.csv
 output/article_results/table_implementation_gap.csv
 output/article_results/table_ablation.csv
+output/article_results/table_region_certification_summary.csv
+output/article_results/table_deployment_quality_summary.csv
+output/article_results/table_runtime_summary.csv
+output/article_results/table_delta_star_summary.csv
+output/article_results/latex/table_main_summary_compact.tex
+output/article_results/latex/table_implementation_gap_compact.tex
+output/article_results/latex/table_scalability_compact.tex
 output/article_results/latex/
 output/article_results/plots/
 ```
 
-Some SMT complexity tables or plots are populated only when SMT formula generation was enabled during the run.
+`all_experiments.csv` keeps the per-run method rows. The `*_summary.csv` files are additional multi-region aggregates used for paper tables. `table_delta_star_summary.csv` is present only when epsilon-sweep data is available. Some SMT complexity tables or plots are populated only when SMT formula generation was enabled during the run.
 
 ## Core Status Fields
 

@@ -93,6 +93,9 @@ Core run keys:
 - `arch`: architecture alias, such as `1blk_10`, `2blk_25_25`, or `2blk_50_50`.
 - `sample_id`: one selected sample.
 - `sample_ids`: list of samples; expands one JSON entry into multiple concrete runs.
+- `sample_selection`: set to `stratified_by_margin` to select low-, median-, and high-margin test samples automatically.
+- `samples_per_stratum` or `sample_selection_per_stratum`: number of samples to pick from each margin stratum, default `1`.
+- `sample_selection_correct_only`: keep only clean samples that the original Keras model classifies correctly, default `true`.
 - `eps`: input perturbation radius.
 - `input_epsilon` or `perturbation_radius`: aliases for `eps` in generated commands and reports.
 
@@ -155,6 +158,7 @@ Command-line overrides on `preqbmc reproduce` can force several settings across 
 - `--no-unsound-contract-tolerance` or `--unsound-contract-tolerance`;
 - `--enforce-contract-chaining` or `--no-enforce-contract-chaining`;
 - `--propagate-contract-tolerance` or `--no-propagate-contract-tolerance`;
+- `--resume` to reuse successful existing runs, or `--force` to overwrite an existing run directory;
 - `--only`, `--skip`, `--max-runs`, and `--include-disabled`.
 
 ## 5. Manual Single Run
@@ -270,8 +274,17 @@ output/article_results/table_scalability.csv
 output/article_results/table_esbmc_status_counts.csv
 output/article_results/table_mrr.csv
 output/article_results/table_implementation_gap.csv
+output/article_results/table_region_certification_summary.csv
+output/article_results/table_deployment_quality_summary.csv
+output/article_results/table_runtime_summary.csv
+output/article_results/table_delta_star_summary.csv
+output/article_results/latex/table_main_summary_compact.tex
+output/article_results/latex/table_implementation_gap_compact.tex
+output/article_results/latex/table_scalability_compact.tex
 output/article_results/article_summary.md
 ```
+
+`all_experiments.csv` preserves one row per method and input region. The summary tables aggregate those rows by benchmark, epsilon, method, and mode. See [result_aggregation.md](result_aggregation.md) for the sampling and aggregation rationale.
 
 ## 9. Reporting Guidance
 

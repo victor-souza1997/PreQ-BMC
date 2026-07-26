@@ -9,6 +9,7 @@ This repository is prepared for the SBSeg Tool Track / Salao de Ferramentas arti
 - [Installation](docs/installation.md): Python dependencies, CBC/Gurobi options, and repo-local ESBMC installation.
 - [Reproducibility](docs/REPRODUCIBILITY.md): smoke test, article runner, JSON configuration reference, strict/diagnostic run modes, and manual commands.
 - [Expected results](docs/expected_results.md): output files, status fields, aggregate tables, and how to interpret failed or unknown runs.
+- [Result aggregation](docs/result_aggregation.md): multi-sample local-region summaries, certified fraction, and compact SBSeg tables.
 
 
 ## Tool Description
@@ -42,12 +43,17 @@ The strongest deployment-oriented claim should be read through `guarantee_level`
 python -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -e '.[full]'
+python -m pip install -r requirements.txt
 preqbmc install-esbmc
 preqbmc verify-environment
 ```
 
-The ESBMC installer downloads the latest matching ESBMC release into `.local/` and exposes `.local/bin/esbmc`. The runner checks `PREQBMC_ESBMC`, then `.local/bin/esbmc`, then the system `PATH`.
+The default requirements install the license-free `paper` dependency group,
+including CBC. Gurobi remains optional through
+`python -m pip install -e '.[gurobi]'`. The ESBMC installer downloads the
+latest matching ESBMC release into `.local/` and exposes
+`.local/bin/esbmc`. The runner checks `PREQBMC_ESBMC`, then
+`.local/bin/esbmc`, then the system `PATH`.
 
 ## Quick Artifact Demo
 
@@ -99,6 +105,7 @@ preqbmc aggregate \
 ```
 
 See [docs/REPRODUCIBILITY.md](docs/REPRODUCIBILITY.md) for strict soundness-oriented flags and diagnostic compatibility modes.
+See [docs/result_aggregation.md](docs/result_aggregation.md) for the multi-sample aggregation used for paper tables.
 
 ## License
 
