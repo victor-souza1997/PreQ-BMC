@@ -5,7 +5,8 @@
     "aggregate_output_root": "output/article_results",
     "notes": [
       "The CLI option --eps is the input perturbation radius. Article outputs report it as input_epsilon.",
-      "Formal no-saturation is recorded as optional evidence by default for article runs unless require_formal_no_saturation is set."
+      "Formal no-saturation is recorded as optional evidence by default for article runs unless require_formal_no_saturation is set.",
+      "Main benchmark entries use multiple sample_ids so paper tables report local-region aggregates rather than one sample per benchmark."
     ]
   },
   "defaults": {
@@ -98,7 +99,7 @@
       "name": "mnist_2blk_50_50",
       "dataset": "mnist",
       "arch": "2blk_50_50",
-      "sample_id": 0,
+      "sample_ids": [0, 1, 2],
       "eps": 1.0,
       "expected_difficulty": "high",
       "notes": "Verified successfully in block-wise mode; included as a main scalability point."
@@ -107,8 +108,9 @@
       "name": "mnist_1blk_100",
       "dataset": "mnist",
       "arch": "1blk_100",
-      "sample_id": 0,
+      "sample_ids": [0, 1, 2],
       "eps": 1.0,
+      "enabled": false,
       "expected_difficulty": "high",
       "notes": "Available MNIST 100 architecture."
     },
