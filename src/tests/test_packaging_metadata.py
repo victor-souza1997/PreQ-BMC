@@ -25,9 +25,9 @@ class PackagingMetadataTests(unittest.TestCase):
 
         self.assertEqual(
             paper,
-            {"tensorflow", "h5py", "scikit-learn", "matplotlib", "mip"},
+            {"tensorflow", "torch", "h5py", "scikit-learn", "matplotlib", "mip"},
         )
-        self.assertTrue({"gurobipy", "torch", "onnx", "pandas"}.isdisjoint(paper))
+        self.assertTrue({"gurobipy", "onnx", "pandas"}.isdisjoint(paper))
 
     def test_console_script_targets_repository_cli(self) -> None:
         scripts = self.pyproject["project"]["scripts"]

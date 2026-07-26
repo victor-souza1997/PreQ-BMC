@@ -40,6 +40,7 @@ dev = [
 ]
 paper = [
   "tensorflow",
+  "torch",
   "h5py",
   "scikit-learn",
   "matplotlib",

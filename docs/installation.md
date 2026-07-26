@@ -49,8 +49,8 @@ python -m pip install -e '.[paper]'
 ```
 
 The article benchmarks use the repository's preconverted HDF5 weights, so the
-`paper` group does not install PyTorch, ONNX conversion tooling, CUDA packages,
-or Gurobi.
+`paper` group installs PyTorch for dataset utilities but does not install ONNX
+conversion tooling, explicit CUDA-toolkit packages, or Gurobi.
 
 Smaller groups are available when a machine only needs part of the artifact:
 
