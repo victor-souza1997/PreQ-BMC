@@ -107,6 +107,14 @@ def _compute_accuracy(logits: np.ndarray, labels: np.ndarray) -> float:
     return float(np.mean(predictions == labels))
 
 
+def _clean_margin(logits: np.ndarray, predicted_class: int) -> float:
+    values = np.asarray(logits, dtype=np.float64).reshape(-1)
+    if values.size <= 1:
+        return float("inf")
+    other_logits = np.delete(values, int(predicted_class))
+    return float(values[int(predicted_class)] - np.max(other_logits))
+
+
 def _normalize_features(features: np.ndarray, input_scale: float) -> np.ndarray:
     if input_scale in (None, 0):
         return np.asarray(features, dtype=np.float64)
@@ -1005,6 +1013,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
     sample_label = int(dataset.y_test[config.sample_id])
     sample_logits = _predict_logits(model, np.expand_dims(sample, axis=0))[0]
     predicted_label = int(np.argmax(sample_logits))
+    clean_margin = _clean_margin(sample_logits, predicted_label)
     if predicted_label != sample_label:
         raise ValueError(
             f"Selected sample {config.sample_id} is misclassified by the reference model "
@@ -1108,6 +1117,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         "chaining_ok": synthesizer.chaining_summary(),
         "sample_label": sample_label,
         "predicted_label": predicted_label,
+        "clean_margin": clean_margin,
         "sample_logits": sample_logits.tolist(),
         "synthesis": synthesis_result.to_dict(),
         "baseline": {

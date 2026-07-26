@@ -434,11 +434,13 @@ def build_experiment_summary(
             "eps": pipeline_summary.get("eps"),
             "compare_split": pipeline_summary.get("compare_split"),
             "samples_evaluated": samples_evaluated,
+            "clean_margin": pipeline_summary.get("clean_margin"),
         },
         "reference": {
             "full_precision_keras_accuracy": pipeline_summary.get("baseline", {}).get("reference_accuracy"),
             "predicted_label": pipeline_summary.get("predicted_label"),
             "sample_label": pipeline_summary.get("sample_label"),
+            "clean_margin": pipeline_summary.get("clean_margin"),
         },
         "formal_only": formal_section,
         "quality_refined": refined_section,
