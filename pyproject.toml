@@ -23,12 +23,28 @@ cbc = [
 gurobi = [
   "gurobipy"
 ]
+benchmarks = [
+  "tensorflow",
+  "h5py",
+  "scikit-learn"
+]
+onnx = [
+  "torch",
+  "onnx"
+]
 plots = [
-  "matplotlib",
-  "pandas"
+  "matplotlib"
 ]
 dev = [
   "pytest"
+]
+paper = [
+  "tensorflow",
+  "torch",
+  "h5py",
+  "scikit-learn",
+  "matplotlib",
+  "mip"
 ]
 full = [
   "tensorflow",
@@ -37,7 +53,6 @@ full = [
   "h5py",
   "scikit-learn",
   "matplotlib",
-  "pandas",
   "mip",
   "gurobipy"
 ]
@@ -45,11 +60,11 @@ full = [
 [project.scripts]
 preqbmc = "cli:main"
 
-[src.setuptools]
+[tool.setuptools]
 package-dir = { "" = "src" }
 py-modules = ["cli"]
 
-[src.setuptools.packages.find]
+[tool.setuptools.packages.find]
 where = ["src"]
 include = [
   "backends*",

@@ -1,0 +1,3 @@
+Loss: 0.3376473297146606
+sparse_categorical_accuracy: 0.8819
+training time: 53.10939002037048
