@@ -1,4 +1,5 @@
 # PreQ-BMC
+📹 **Demonstration video (SBSeg 2026 - Salão de Ferramentas):** [https://studio.youtube.com/channel/UC5zNfy63NZo-l7aSvGlVj8w](https://youtu.be/H2iu2q03Bcw)
 
 PreQ-BMC is a research tool for deployment-aware fixed-point quantization of neural-network classifiers. It synthesizes one fixed-point format `<Q,I,F>` per affine layer and checks whether the generated fixed-point implementation preserves a local robustness contract.
 
