@@ -31,7 +31,19 @@ output/demo_run/layers/
 output/demo_run/c_export/qnn_model.c
 ```
 
-The cached Iris demo is intended as a smoke test. It should be much smaller than the full article run and does not require Gurobi.
+The cached Iris demo is intended as a smoke test. It should be much smaller
+than the full article run and does not require Gurobi. With its default
+`paper-slack` profile, the final CLI lines should identify
+`quality_refined`, `Final status: VERIFIED`, and
+`Guarantee level: harness-verified`. The selected refined format in the
+bundled case is normally `Q=[7, 6, 6]`, `I=[2, 3, 4]`, and `F=[4, 2, 1]`.
+
+`harness-verified` is weaker than `deployed-transfer`: the compatibility
+profile uses the article's contract slack and does not enforce the new strict
+chaining check. Running the same cache with `--contract-profile strict` is
+expected to report a rejected result and return a nonzero status. This
+distinction prevents a successful smoke test from being presented as a
+stronger transfer guarantee.
 
 ## Per-Run Reports
 

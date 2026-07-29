@@ -1,0 +1,107 @@
+{
+  "metadata": {
+    "description": "Paired epsilon and ESBMC decomposition benchmark for the SBSeg article",
+    "output_root": "output/article_runs_block_comparison_v1",
+    "aggregate_output_root": "output/article_results_block_comparison_v1",
+    "notes": [
+      "Every blockwise/full-layer pair uses the same dataset, model, sample, epsilon, solver, and resource limits.",
+      "Iris and Seeds radii are fractions of their approximately [0,1] preprocessed domains.",
+      "MNIST radii are raw grayscale levels; normalized_input_epsilon reports epsilon/255.",
+      "Small 10-neuron layers use block size 5 so blockwise mode creates two actual verification blocks.",
+      "MNIST 25_25 and 50_50 scalability runs use block size 10 and a fixed epsilon of 1.",
+      "Outputs use a versioned root and do not overwrite previous article experiments."
+    ]
+  },
+  "defaults": {
+    "bit_lb": 3,
+    "bit_ub": 40,
+    "preimg_mode": "milp",
+    "verify_mode": "esbmc",
+    "solver": "cbc",
+    "method": "both",
+    "compare_split": "test",
+    "compare_limit": 100,
+    "compile_c_backend": true,
+    "enable_diagnostics": true,
+    "export_paper_tables": true,
+    "unsound_contract_tolerance": true,
+    "propagate_contract_tolerance": true,
+    "enforce_contract_chaining": true,
+    "quality_refinement": true,
+    "formal_no_saturation": true,
+    "require_formal_no_saturation": false,
+    "empirical_saturation_check": true,
+    "accuracy_drop_threshold": 0.05,
+    "saturation_threshold": 0.01,
+    "mismatch_threshold": 0.05,
+    "max_quality_refinement_steps": 10,
+    "esbmc_profile": "paper-fast",
+    "esbmc_timeout_seconds": 900,
+    "esbmc_memlimit": "20g",
+    "esbmc_jobs": 1,
+    "blockwise_fail_fast": true,
+    "blockwise_run_all_blocks_on_failure": false,
+    "no_saturation_continue_on_unknown": false,
+    "gurobi_threads": 4,
+    "enabled": true
+  },
+  "runs": [
+    {
+      "name": "iris_epsilon_decomposition",
+      "dataset": "iris",
+      "arch": "1blk_10",
+      "sample_ids": [0, 1, 2],
+      "eps": 0.01,
+      "eps_sweep": [0.005, 0.01, 0.02, 0.04, 0.08],
+      "mrr_enabled": true,
+      "compare_limit": 0,
+      "esbmc_layer_block_sizes": [5, 0],
+      "expected_difficulty": "low"
+    },
+    {
+      "name": "seeds_epsilon_decomposition",
+      "dataset": "seeds",
+      "arch": "1blk_10",
+      "sample_ids": [0, 1, 2],
+      "eps": 0.01,
+      "eps_sweep": [0.005, 0.01, 0.02, 0.04, 0.08],
+      "mrr_enabled": true,
+      "compare_limit": 0,
+      "esbmc_layer_block_sizes": [5, 0],
+      "expected_difficulty": "low"
+    },
+    {
+      "name": "mnist_onnx_epsilon_decomposition",
+      "dataset": "mnist_onnx",
+      "arch": "1blk_10",
+      "sample_ids": [0, 1, 2],
+      "eps": 1.0,
+      "eps_sweep": [0.5, 1.0, 2.0, 4.0, 8.0],
+      "mrr_enabled": true,
+      "esbmc_layer_block_sizes": [5, 0],
+      "expected_difficulty": "medium"
+    },
+    {
+      "name": "mnist_2blk_25_25_decomposition",
+      "dataset": "mnist",
+      "arch": "2blk_25_25",
+      "sample_ids": [0, 1, 2],
+      "eps": 1.0,
+      "esbmc_layer_block_sizes": [10, 0],
+      "allowed_failure": true,
+      "expected_difficulty": "high",
+      "notes": "Fixed-radius architecture/decomposition comparison."
+    },
+    {
+      "name": "mnist_2blk_50_50_decomposition",
+      "dataset": "mnist",
+      "arch": "2blk_50_50",
+      "sample_ids": [0, 1, 2],
+      "eps": 1.0,
+      "esbmc_layer_block_sizes": [10, 0],
+      "allowed_failure": true,
+      "expected_difficulty": "high",
+      "notes": "Fixed-radius scalability comparison; full-layer outcomes may be TIMEOUT or MEMOUT."
+    }
+  ]
+}
