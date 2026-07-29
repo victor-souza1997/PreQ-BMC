@@ -458,6 +458,7 @@ def build_experiment_summary(
         ),
         "contract_harness_semantics": pipeline_summary.get("contract_harness_semantics", {}),
         "blockwise_verification": pipeline_summary.get("blockwise_verification", {}),
+        "esbmc_memory_metrics": pipeline_summary.get("esbmc_memory_metrics", {}),
         "no_saturation_blocks": pipeline_summary.get("no_saturation_blocks", []),
         **refined_saturation_controls,
         **refined_status_controls,

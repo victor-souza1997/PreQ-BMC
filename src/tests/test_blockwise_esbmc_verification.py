@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import numpy as np
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock
 
+from synthesis.preqbmc import GPEncoding
+from verification.esbmc import ESBMCResult
 from verification.esbmc_install import resolve_esbmc_executable
 
 
@@ -24,6 +29,67 @@ def _has_tensorflow() -> bool:
     except Exception:
         return False
     return True
+
+
+class MonolithicESBMCModeTest(unittest.TestCase):
+    def test_block_size_zero_uses_one_full_layer_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            encoder = GPEncoding.__new__(GPEncoding)
+            encoder.esbmc_layer_block_size = 0
+            encoder.dense_layers = [object()]
+            encoder.output_dir = Path(temp_dir)
+            encoder._stats = {"esbmc_calls": 0.0}
+            encoder.esbmc_call_records = []
+            encoder.esbmc_block_records = []
+            encoder.generate_esbmc_verification_code = Mock(
+                return_value="#define INPUT_SIZE 4\n#define LAYER_SIZE 3\nint main(void) { return 0; }\n"
+            )
+            encoder.esbmc_runner = Mock()
+            encoder.esbmc_runner.run_file.return_value = ESBMCResult(
+                status="VERIFIED",
+                command=("esbmc",),
+                stdout="VERIFICATION SUCCESSFUL",
+                stderr="",
+                return_code=0,
+                elapsed_seconds=0.1,
+            )
+            current_layer = SimpleNamespace(layer_index=1, layer_size=3)
+            input_layer = SimpleNamespace(layer_size=4)
+
+            result = encoder.verify_layer_with_esbmc(
+                cur_layer=current_layer,
+                in_layer=input_layer,
+                qu_w_int=np.zeros((3, 4), dtype=np.int64),
+                qu_b_int=np.zeros(3, dtype=np.int64),
+                frac_bit=4,
+                all_bit=7,
+                layer_index=0,
+            )
+
+            harness = Path(temp_dir) / "layers" / "layer_0_Q7_F4.c"
+            self.assertEqual(result.status, "VERIFIED")
+            self.assertTrue(harness.exists())
+            self.assertFalse((Path(temp_dir) / "layers" / "blocks").exists())
+            self.assertEqual(encoder.esbmc_call_records[0]["mode"], "full_layer")
+            self.assertEqual(encoder.esbmc_block_records, [])
+
+    def test_block_size_zero_summary_is_explicitly_monolithic(self) -> None:
+        encoder = GPEncoding.__new__(GPEncoding)
+        encoder.verify_mode = "esbmc"
+        encoder.esbmc_layer_block_size = 0
+        encoder.blockwise_fail_fast = True
+        encoder.blockwise_run_all_blocks_on_failure = False
+        encoder.esbmc_jobs = 1
+        encoder.esbmc_block_records = []
+        encoder.blockwise_skipped_blocks_due_to_fail_fast = 0
+        encoder.blockwise_first_failed_block = None
+
+        summary = encoder.blockwise_verification_summary()
+
+        self.assertFalse(summary["enabled"])
+        self.assertEqual(summary["mode"], "monolithic_per_layer")
+        self.assertEqual(summary["block_size"], 0)
+        self.assertEqual(summary["total_blocks"], 0)
 
 
 @unittest.skipUnless(resolve_esbmc_executable(), "esbmc binary is not installed")

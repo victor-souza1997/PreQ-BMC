@@ -157,6 +157,23 @@ Block-wise ESBMC keys:
 Experiment-control and reporting keys:
 
 - `mode`: `full_pipeline` by default. `full_layer`, `full_layer_verification`, or `monolithic` force `esbmc_layer_block_size = 0`.
+
+The paired block-size sweep configurations enable
+`blockwise_run_all_blocks_on_failure`. This is intentional: fail-fast is
+appropriate for normal synthesis, but it would undercount queries and block
+statuses in a decomposition comparison. A run with
+this diagnostic override records `effective_fail_fast = false`, even when the
+base `blockwise_fail_fast` option remains enabled. A run with
+`esbmc_layer_block_size = 0` records
+`blockwise_verification.mode = "monolithic_per_layer"` and generates hidden
+harnesses directly under `layers/`, not `layers/blocks/`.
+
+On Linux, each executed ESBMC query records `peak_memory_bytes`,
+`peak_memory_mib`, and `memory_measurement` in `esbmc_call_records` and in its
+`resource_control`. The measurement samples the RSS of the ESBMC process tree
+through `/proc`; `esbmc_memory_metrics` contains run-level maximum and mean
+query peaks. On platforms without `/proc`, these per-query values are reported
+as unavailable.
 - `mrr_enabled`: marks the run for epsilon-sweep/MRR expansion.
 - `eps_sweep`: list of epsilon values tested when MRR expansion is enabled.
 - `expected_difficulty`: reviewer-facing label such as `low`, `medium`, `high`, or `frontier`.

@@ -57,6 +57,12 @@ Important files under each run's `reports/` directory:
 - `quantization_config.json`: selected layer-wise `<Q,I,F>` configuration.
 - `table_formal_vs_refined.csv`, `table_deployment_metrics.csv`, `table_resource_metrics.csv`: per-run CSV tables.
 
+On Linux, `pipeline_summary.json` records the observed process-tree RSS peak
+for each ESBMC query as `peak_memory_bytes` and `peak_memory_mib` under
+`esbmc_call_records`. The aggregate `esbmc_memory_metrics` is also copied into
+`experiment_summary.json`. This is a sampled per-query peak, not the ESBMC
+configured `--memlimit`.
+
 Generated verification and deployment artifacts:
 
 - `layers/*.c`: ESBMC contract and no-saturation harnesses.

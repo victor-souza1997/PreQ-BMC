@@ -4,7 +4,9 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
+import os
 import re
+import signal
 import subprocess
 import time
 
@@ -33,6 +35,7 @@ class ESBMCConfig:
     verbosity: int = 10
     default_profile: ESBMCProfile = "paper-fast"
     tail_lines: int = 100
+    memory_poll_interval_seconds: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -49,6 +52,8 @@ class ESBMCResult:
     memlimit: str = "6g"
     stdout_log_path: str = ""
     stderr_log_path: str = ""
+    peak_memory_bytes: int | None = None
+    memory_measurement: str = "unavailable"
     resource_control: dict[str, Any] | None = None
     blocks: tuple[dict[str, Any], ...] = ()
 
@@ -179,6 +184,8 @@ class ESBMCRunner:
         return_code: int,
         status: str,
         command: tuple[str, ...],
+        peak_memory_bytes: int | None,
+        memory_measurement: str,
     ) -> dict[str, Any]:
         return {
             "command": list(command),
@@ -189,7 +196,101 @@ class ESBMCRunner:
             "status": status,
             "stdout_log_path": str(stdout_log_path),
             "stderr_log_path": str(stderr_log_path),
+            "peak_memory_bytes": peak_memory_bytes,
+            "peak_memory_mib": (
+                float(peak_memory_bytes / (1024 * 1024))
+                if peak_memory_bytes is not None
+                else None
+            ),
+            "memory_measurement": memory_measurement,
         }
+
+    @staticmethod
+    def _process_tree_rss_bytes(root_pid: int) -> tuple[int | None, str]:
+        """Return current Linux RSS for a process and all visible descendants."""
+
+        proc_root = Path("/proc")
+        if not proc_root.is_dir():
+            return None, "unavailable_non_linux"
+
+        total_bytes = 0
+        measured = False
+        pending = [int(root_pid)]
+        visited: set[int] = set()
+        while pending:
+            pid = pending.pop()
+            if pid in visited:
+                continue
+            visited.add(pid)
+
+            status_path = proc_root / str(pid) / "status"
+            try:
+                for line in status_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    if line.startswith("VmRSS:"):
+                        fields = line.split()
+                        if len(fields) >= 2:
+                            total_bytes += int(fields[1]) * 1024
+                            measured = True
+                        break
+            except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError):
+                pass
+
+            children_path = proc_root / str(pid) / "task" / str(pid) / "children"
+            try:
+                pending.extend(int(value) for value in children_path.read_text().split())
+            except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError):
+                pass
+
+        return (total_bytes if measured else None), "linux_procfs_process_tree_rss"
+
+    @staticmethod
+    def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGTERM)
+            else:
+                process.terminate()
+            process.wait(timeout=5)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            try:
+                if os.name == "posix":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+
+    def _wait_with_peak_memory(
+        self,
+        process: subprocess.Popen[Any],
+        timeout_seconds: float,
+    ) -> tuple[int, int | None, str, bool]:
+        deadline = time.monotonic() + float(timeout_seconds)
+        peak_memory_bytes: int | None = None
+        measurement = "unavailable"
+        poll_interval = max(0.01, float(self.config.memory_poll_interval_seconds))
+
+        while True:
+            current_memory, current_measurement = self._process_tree_rss_bytes(process.pid)
+            measurement = current_measurement
+            if current_memory is not None:
+                peak_memory_bytes = max(peak_memory_bytes or 0, current_memory)
+
+            return_code = process.poll()
+            if return_code is not None:
+                return int(return_code), peak_memory_bytes, measurement, False
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._terminate_process_tree(process)
+                return -1, peak_memory_bytes, measurement, True
+            time.sleep(min(poll_interval, remaining))
 
     @staticmethod
     def _classify_status(combined_output: str, return_code: int) -> str:
@@ -242,52 +343,33 @@ class ESBMCRunner:
             unwind,
         )
         start_time = time.monotonic()
+        peak_memory_bytes: int | None = None
+        memory_measurement = "unavailable"
+        process: subprocess.Popen[Any] | None = None
         try:
             with stdout_log_path.open("w", encoding="utf-8", errors="replace") as stdout_log, stderr_log_path.open(
                 "w",
                 encoding="utf-8",
                 errors="replace",
             ) as stderr_log:
-                completed = subprocess.run(
+                process = subprocess.Popen(
                     command,
                     stdout=stdout_log,
                     stderr=stderr_log,
                     text=True,
-                    timeout=self.config.timeout_seconds + 300,
-                    check=False,
+                    start_new_session=os.name == "posix",
                 )
-        except subprocess.TimeoutExpired as exc:
-            del exc
-            elapsed_seconds = time.monotonic() - start_time
-            stdout_tail = self._tail_file(stdout_log_path)
-            stderr_tail = self._tail_file(stderr_log_path)
-            status = "TIMEOUT"
-            resource_control = self._resource_control(
-                stdout_log_path=stdout_log_path,
-                stderr_log_path=stderr_log_path,
-                elapsed_seconds=elapsed_seconds,
-                return_code=-1,
-                status=status,
-                command=command,
-            )
-            return ESBMCResult(
-                status=status,
-                command=command,
-                stdout=stdout_tail,
-                stderr=stderr_tail,
-                return_code=-1,
-                elapsed_seconds=elapsed_seconds,
-                timeout_seconds=int(self.config.timeout_seconds),
-                memlimit=str(self.config.memlimit),
-                stdout_log_path=str(stdout_log_path),
-                stderr_log_path=str(stderr_log_path),
-                resource_control=resource_control,
-            )
+                return_code, peak_memory_bytes, memory_measurement, timed_out = self._wait_with_peak_memory(
+                    process,
+                    self.config.timeout_seconds + 300,
+                )
         except Exception as exc:
+            if process is not None:
+                self._terminate_process_tree(process)
             elapsed_seconds = time.monotonic() - start_time
-            status = "ERROR"
             stdout_tail = self._tail_file(stdout_log_path)
             stderr_tail = f"{self._tail_file(stderr_log_path)}\n{exc}"
+            status = "ERROR"
             resource_control = self._resource_control(
                 stdout_log_path=stdout_log_path,
                 stderr_log_path=stderr_log_path,
@@ -295,6 +377,8 @@ class ESBMCRunner:
                 return_code=-1,
                 status=status,
                 command=command,
+                peak_memory_bytes=peak_memory_bytes,
+                memory_measurement=memory_measurement,
             )
             return ESBMCResult(
                 status=status,
@@ -302,30 +386,66 @@ class ESBMCRunner:
                 stdout=stdout_tail,
                 stderr=stderr_tail,
                 return_code=-1,
-                elapsed_seconds=time.monotonic() - start_time,
+                elapsed_seconds=elapsed_seconds,
                 timeout_seconds=int(self.config.timeout_seconds),
                 memlimit=str(self.config.memlimit),
                 stdout_log_path=str(stdout_log_path),
                 stderr_log_path=str(stderr_log_path),
+                peak_memory_bytes=peak_memory_bytes,
+                memory_measurement=memory_measurement,
                 resource_control=resource_control,
             )
+
+        if timed_out:
+            elapsed_seconds = time.monotonic() - start_time
+            status = "TIMEOUT"
+            stdout_tail = self._tail_file(stdout_log_path)
+            stderr_tail = self._tail_file(stderr_log_path)
+            resource_control = self._resource_control(
+                stdout_log_path=stdout_log_path,
+                stderr_log_path=stderr_log_path,
+                elapsed_seconds=elapsed_seconds,
+                return_code=-1,
+                status=status,
+                command=command,
+                peak_memory_bytes=peak_memory_bytes,
+                memory_measurement=memory_measurement,
+            )
+            return ESBMCResult(
+                status=status,
+                command=command,
+                stdout=stdout_tail,
+                stderr=stderr_tail,
+                return_code=-1,
+                elapsed_seconds=elapsed_seconds,
+                timeout_seconds=int(self.config.timeout_seconds),
+                memlimit=str(self.config.memlimit),
+                stdout_log_path=str(stdout_log_path),
+                stderr_log_path=str(stderr_log_path),
+                peak_memory_bytes=peak_memory_bytes,
+                memory_measurement=memory_measurement,
+                resource_control=resource_control,
+            )
+
         elapsed_seconds = time.monotonic() - start_time
         stdout_tail = self._tail_file(stdout_log_path)
         stderr_tail = self._tail_file(stderr_log_path)
 
-        LOGGER.debug("ESBMC return code: %s", completed.returncode)
+        LOGGER.debug("ESBMC return code: %s", return_code)
         LOGGER.debug("--- STDOUT tail ---\n%s", stdout_tail[-20000:])
         LOGGER.debug("--- STDERR tail ---\n%s", stderr_tail[-20000:])
 
         combined_output = f"{stdout_tail}\n{stderr_tail}"
-        status = self._classify_status(combined_output, int(completed.returncode))
+        status = self._classify_status(combined_output, int(return_code))
         resource_control = self._resource_control(
             stdout_log_path=stdout_log_path,
             stderr_log_path=stderr_log_path,
             elapsed_seconds=elapsed_seconds,
-            return_code=int(completed.returncode),
+            return_code=int(return_code),
             status=status,
             command=command,
+            peak_memory_bytes=peak_memory_bytes,
+            memory_measurement=memory_measurement,
         )
 
         return ESBMCResult(
@@ -333,11 +453,13 @@ class ESBMCRunner:
             command=command,
             stdout=stdout_tail,
             stderr=stderr_tail,
-            return_code=int(completed.returncode),
+            return_code=int(return_code),
             elapsed_seconds=elapsed_seconds,
             timeout_seconds=int(self.config.timeout_seconds),
             memlimit=str(self.config.memlimit),
             stdout_log_path=str(stdout_log_path),
             stderr_log_path=str(stderr_log_path),
+            peak_memory_bytes=peak_memory_bytes,
+            memory_measurement=memory_measurement,
             resource_control=resource_control,
         )

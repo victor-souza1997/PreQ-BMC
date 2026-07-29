@@ -9,6 +9,7 @@
       "MNIST radii are raw grayscale levels; normalized_input_epsilon reports epsilon/255.",
       "Small 10-neuron layers use block size 5 so blockwise mode creates two actual verification blocks.",
       "MNIST 25_25 and 50_50 scalability runs use block size 10 and a fixed epsilon of 1.",
+      "All blocks are executed after candidate failure so per-block call and status counts are comparable with monolithic runs.",
       "Outputs use a versioned root and do not overwrite previous article experiments."
     ]
   },
@@ -40,7 +41,7 @@
     "esbmc_memlimit": "20g",
     "esbmc_jobs": 1,
     "blockwise_fail_fast": true,
-    "blockwise_run_all_blocks_on_failure": false,
+    "blockwise_run_all_blocks_on_failure": true,
     "no_saturation_continue_on_unknown": false,
     "gurobi_threads": 4,
     "enabled": true

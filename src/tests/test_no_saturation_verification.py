@@ -530,6 +530,7 @@ class NoSaturationVerificationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             encoder = object.__new__(GPEncoding)
             encoder.output_dir = Path(temp_dir)
+            encoder.verify_mode = "esbmc"
             encoder.esbmc_layer_block_size = 1
             encoder.blockwise_fail_fast = True
             encoder.blockwise_run_all_blocks_on_failure = False
@@ -560,6 +561,62 @@ class NoSaturationVerificationTest(unittest.TestCase):
         self.assertEqual(result.blocks[0]["status"], "FAILED")
         self.assertEqual(result.blocks[1]["status"], "SKIPPED")
         self.assertEqual(result.blocks[2]["status"], "SKIPPED")
+
+    def test_blockwise_diagnostics_runs_all_blocks_after_failure(self) -> None:
+        class FakeRunner:
+            def __init__(self) -> None:
+                self.calls: list[Path] = []
+
+            def run_file(self, c_file: Path) -> ESBMCResult:
+                self.calls.append(c_file)
+                return ESBMCResult(
+                    status="FAILED",
+                    command=("esbmc", str(c_file), "--memlimit", "6g"),
+                    stdout="VERIFICATION FAILED",
+                    stderr="",
+                    return_code=10,
+                    elapsed_seconds=0.1,
+                    timeout_seconds=900,
+                    memlimit="6g",
+                    stdout_log_path=f"{c_file}.stdout.log",
+                    stderr_log_path=f"{c_file}.stderr.log",
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            encoder = object.__new__(GPEncoding)
+            encoder.output_dir = Path(temp_dir)
+            encoder.verify_mode = "esbmc"
+            encoder.esbmc_layer_block_size = 1
+            encoder.blockwise_fail_fast = True
+            encoder.blockwise_run_all_blocks_on_failure = True
+            encoder.esbmc_jobs = 1
+            encoder.esbmc_call_records = []
+            encoder.esbmc_block_records = []
+            encoder.blockwise_skipped_blocks_due_to_fail_fast = 0
+            encoder.blockwise_first_failed_block = None
+            encoder._stats = {"esbmc_calls": 0.0, "esbmc_block_calls": 0.0}
+            encoder.config = SimpleNamespace(esbmc=ESBMCConfig())
+            encoder.esbmc_runner = FakeRunner()
+            encoder.generate_esbmc_hidden_block_verification_code = lambda **_: "int main(void) { return 0; }"
+
+            result = encoder.verify_hidden_layer_blocks_with_esbmc(
+                cur_layer=SimpleNamespace(layer_size=3, layer_index=1),
+                in_layer=SimpleNamespace(layer_size=2),
+                qu_w_int=np.zeros((3, 2), dtype=np.int64),
+                qu_b_int=np.zeros(3, dtype=np.int64),
+                frac_bit=2,
+                all_bit=4,
+                layer_index=0,
+            )
+
+        self.assertEqual(result.status, "FAILED")
+        self.assertEqual(len(encoder.esbmc_runner.calls), 3)
+        self.assertEqual(encoder.blockwise_skipped_blocks_due_to_fail_fast, 0)
+        self.assertEqual([record["status"] for record in result.blocks], ["FAILED"] * 3)
+        summary = encoder.blockwise_verification_summary()
+        self.assertTrue(summary["fail_fast"])
+        self.assertFalse(summary["effective_fail_fast"])
+        self.assertTrue(summary["run_all_blocks_on_failure"])
 
     def test_no_saturation_block_verification_stops_on_timeout_by_default(self) -> None:
         class FakeRunner:

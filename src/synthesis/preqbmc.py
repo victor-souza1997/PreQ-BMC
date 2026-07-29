@@ -1236,6 +1236,13 @@ class GPEncoding:
             "command": list(result.command),
             "stdout_log_path": result.stdout_log_path,
             "stderr_log_path": result.stderr_log_path,
+            "peak_memory_bytes": result.peak_memory_bytes,
+            "peak_memory_mib": (
+                float(result.peak_memory_bytes / (1024 * 1024))
+                if result.peak_memory_bytes is not None
+                else None
+            ),
+            "memory_measurement": result.memory_measurement,
             "resource_control": result.resource_control,
             "harness": str(harness) if harness is not None else None,
             "property_type": property_type,
@@ -2063,9 +2070,15 @@ class GPEncoding:
 
         return {
             "enabled": bool(self.verify_mode == "esbmc" and self.esbmc_layer_block_size > 0),
+            "mode": (
+                "blockwise_hidden_layers"
+                if self.esbmc_layer_block_size > 0
+                else "monolithic_per_layer"
+            ),
             "block_size": int(self.esbmc_layer_block_size),
             "policy": "shared_layer_qif",
             "fail_fast": bool(self.blockwise_fail_fast),
+            "effective_fail_fast": bool(self._should_fail_fast_blocks()),
             "run_all_blocks_on_failure": bool(self.blockwise_run_all_blocks_on_failure),
             "esbmc_jobs": int(self.esbmc_jobs),
             "total_blocks": int(len(records)),
@@ -2141,6 +2154,12 @@ class GPEncoding:
             for record in records
             if record.get("status") != "SKIPPED"
         ]
+        query_peak_memory_bytes = [
+            int(record["peak_memory_bytes"])
+            for record in records
+            if record.get("status") != "SKIPPED"
+            and record.get("peak_memory_bytes") is not None
+        ]
         total_calls = int(sum(counts.values()))
         total_non_skipped = int(total_calls - counts["skipped"])
         return {
@@ -2159,6 +2178,22 @@ class GPEncoding:
             "total_time_seconds": float(sum(query_times)),
             "max_query_time_seconds": float(max(query_times, default=0.0)),
             "mean_query_time_seconds": float(sum(query_times) / len(query_times)) if query_times else 0.0,
+            "memory_measurement": (
+                "linux_procfs_process_tree_rss"
+                if query_peak_memory_bytes
+                else "unavailable"
+            ),
+            "memory_queries_measured": int(len(query_peak_memory_bytes)),
+            "max_query_peak_memory_bytes": int(max(query_peak_memory_bytes, default=0)),
+            "max_query_peak_memory_mib": float(
+                max(query_peak_memory_bytes, default=0) / (1024 * 1024)
+            ),
+            "mean_query_peak_memory_bytes": float(
+                sum(query_peak_memory_bytes) / len(query_peak_memory_bytes)
+            ) if query_peak_memory_bytes else 0.0,
+            "mean_query_peak_memory_mib": float(
+                (sum(query_peak_memory_bytes) / len(query_peak_memory_bytes)) / (1024 * 1024)
+            ) if query_peak_memory_bytes else 0.0,
             "largest_neurons_per_query": int(
                 max((int(record.get("neurons_per_query", 0) or 0) for record in records), default=0)
             ),

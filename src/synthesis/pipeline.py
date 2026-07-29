@@ -301,6 +301,14 @@ def _refresh_article_metrics(
         "unknown_rate": esbmc_summary.get("unknown_rate", 0.0),
     }
     summary["esbmc_call_records"] = esbmc_summary.get("records", [])
+    summary["esbmc_memory_metrics"] = {
+        "measurement": esbmc_summary.get("memory_measurement", "unavailable"),
+        "queries_measured": int(esbmc_summary.get("memory_queries_measured", 0) or 0),
+        "max_query_peak_memory_bytes": int(esbmc_summary.get("max_query_peak_memory_bytes", 0) or 0),
+        "max_query_peak_memory_mib": _safe_float(esbmc_summary.get("max_query_peak_memory_mib")),
+        "mean_query_peak_memory_bytes": _safe_float(esbmc_summary.get("mean_query_peak_memory_bytes")),
+        "mean_query_peak_memory_mib": _safe_float(esbmc_summary.get("mean_query_peak_memory_mib")),
+    }
     summary["timing_metrics"] = _pipeline_timing_payload(
         pipeline_start_time=pipeline_start_time,
         synthesis_stats=synthesis_stats,
@@ -314,6 +322,8 @@ def _refresh_article_metrics(
         "esbmc_memlimit": str(config.esbmc_memlimit),
         "esbmc_layer_block_size": int(config.esbmc_layer_block_size),
         "esbmc_jobs": int(config.esbmc_jobs),
+        "blockwise_fail_fast": bool(config.blockwise_fail_fast),
+        "blockwise_run_all_blocks_on_failure": bool(config.blockwise_run_all_blocks_on_failure),
         "gurobi_threads": int(config.gurobi_threads),
         "formal_no_saturation": bool(config.formal_saturation_check),
         "require_formal_no_saturation": bool(config.require_formal_no_saturation),

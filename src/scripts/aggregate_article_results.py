@@ -260,6 +260,7 @@ def _method_row(
     stats = section.get("verification_stats", {})
     timing = pipeline.get("timing_metrics", {})
     esbmc = pipeline.get("esbmc_status_counts", {})
+    esbmc_memory = pipeline.get("esbmc_memory_metrics", {})
     blockwise = pipeline.get("blockwise_verification", {})
     resource = section.get("resource_metrics", {})
     dataset = benchmark.get("dataset", pipeline.get("dataset", run_config.get("dataset", run_status.get("dataset"))))
@@ -411,6 +412,11 @@ def _method_row(
         "total_esbmc_time_seconds": timing.get("total_esbmc_time_seconds"),
         "max_esbmc_query_time_seconds": timing.get("max_esbmc_query_time_seconds"),
         "mean_esbmc_query_time_seconds": timing.get("mean_esbmc_query_time_seconds"),
+        "esbmc_memory_measurement": esbmc_memory.get("measurement"),
+        "esbmc_memory_queries_measured": esbmc_memory.get("queries_measured"),
+        "max_esbmc_query_peak_memory_bytes": esbmc_memory.get("max_query_peak_memory_bytes"),
+        "max_esbmc_query_peak_memory_mib": esbmc_memory.get("max_query_peak_memory_mib"),
+        "mean_esbmc_query_peak_memory_mib": esbmc_memory.get("mean_query_peak_memory_mib"),
         "number_of_esbmc_calls": timing.get("number_of_esbmc_calls", stats.get("esbmc_calls")),
         "esbmc_verified_count": esbmc.get("esbmc_verified_count"),
         "esbmc_failed_count": esbmc.get("esbmc_failed_count"),
@@ -464,7 +470,9 @@ ALL_FIELDS = [
     "total_runtime_seconds", "preimage_time_seconds", "bitwidth_search_time_seconds",
     "esbmc_contract_time_seconds", "esbmc_no_saturation_time_seconds", "deployment_eval_time_seconds",
     "refinement_time_seconds", "total_esbmc_time_seconds", "max_esbmc_query_time_seconds",
-    "mean_esbmc_query_time_seconds", "number_of_esbmc_calls", "esbmc_verified_count",
+    "mean_esbmc_query_time_seconds", "esbmc_memory_measurement", "esbmc_memory_queries_measured",
+    "max_esbmc_query_peak_memory_bytes", "max_esbmc_query_peak_memory_mib",
+    "mean_esbmc_query_peak_memory_mib", "number_of_esbmc_calls", "esbmc_verified_count",
     "esbmc_failed_count", "esbmc_timeout_count", "esbmc_memout_count", "esbmc_unknown_count",
     "esbmc_total_count", "timeout_rate", "memout_rate", "unknown_rate", "blockwise_enabled",
     "block_size", "total_blocks", "verified_blocks", "failed_blocks", "timeout_blocks",
@@ -826,6 +834,13 @@ def _runtime_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "number_of_esbmc_calls_sum": _sum_numeric(group, "number_of_esbmc_calls"),
             "max_esbmc_query_time_seconds_max": _max_numeric(group, "max_esbmc_query_time_seconds"),
             "median_esbmc_query_time_seconds": _median(_values(group, "max_esbmc_query_time_seconds")),
+            "max_esbmc_query_peak_memory_mib_max": _max_numeric(
+                group,
+                "max_esbmc_query_peak_memory_mib",
+            ),
+            "max_esbmc_query_peak_memory_mib_median": _median(
+                _values(group, "max_esbmc_query_peak_memory_mib")
+            ),
             "timeout_count": timeout_count,
             "memout_count": memout_count,
             "unknown_count": sum(1 for row in group if _status_present(row, "UNKNOWN")),
@@ -1434,6 +1449,7 @@ RUNTIME_SUMMARY_FIELDS = [
     "total_esbmc_time_seconds_median", "total_esbmc_time_seconds_iqr",
     "number_of_esbmc_calls_median", "number_of_esbmc_calls_iqr", "number_of_esbmc_calls_sum",
     "max_esbmc_query_time_seconds_max", "median_esbmc_query_time_seconds", "timeout_count",
+    "max_esbmc_query_peak_memory_mib_max", "max_esbmc_query_peak_memory_mib_median",
     "memout_count", "unknown_count", "timeout_memout_rate",
 ]
 DELTA_STAR_SUMMARY_FIELDS = [

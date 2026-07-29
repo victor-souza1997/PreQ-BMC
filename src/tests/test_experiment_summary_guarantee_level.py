@@ -70,6 +70,12 @@ def _summary(
         "resource_controls": {
             "no_saturation_continue_on_unknown": no_saturation_continue_on_unknown,
         },
+        "esbmc_memory_metrics": {
+            "measurement": "linux_procfs_process_tree_rss",
+            "queries_measured": 2,
+            "max_query_peak_memory_bytes": 1048576,
+            "max_query_peak_memory_mib": 1.0,
+        },
         "soundness": soundness,
         "chaining_ok": {
             "all_ok": chaining_ok,
@@ -94,6 +100,12 @@ def _summary(
 
 
 class ExperimentSummaryGuaranteeLevelTest(unittest.TestCase):
+    def test_copies_esbmc_memory_metrics(self) -> None:
+        summary = _summary(layers=[_layer()])
+
+        self.assertEqual(summary["esbmc_memory_metrics"]["queries_measured"], 2)
+        self.assertEqual(summary["esbmc_memory_metrics"]["max_query_peak_memory_mib"], 1.0)
+
     def test_clamped_contracts_can_claim_deployed_transfer_without_no_saturation(self) -> None:
         summary = _summary(layers=[_layer()])
 
