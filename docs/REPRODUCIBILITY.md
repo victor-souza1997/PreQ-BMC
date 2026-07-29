@@ -27,6 +27,22 @@ preqbmc demo --no-gurobi --output output/demo_run
 
 This should produce `reports/`, `layers/`, and `c_export/` under `output/demo_run/`. See [expected_results.md](expected_results.md) for the file checklist.
 
+The demo defaults to `--contract-profile paper-slack`, matching the bundled
+cache and the article's compatibility mode. The expected accepted refined
+result is `Final status: VERIFIED` and `Guarantee level: harness-verified`.
+This profile does not establish strict contract chaining and therefore cannot
+yield `deployed-transfer`. To exercise the strict condition explicitly:
+
+```bash
+preqbmc demo \
+  --no-gurobi \
+  --contract-profile strict \
+  --output output/demo_strict
+```
+
+The bundled legacy cache is expected to be rejected in strict mode. That is a
+formal result, not an installation or cache-loading error.
+
 ## 3. Article Runner
 
 Dry run one Iris case:
