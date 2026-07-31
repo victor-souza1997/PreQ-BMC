@@ -39,6 +39,11 @@ def _summary(
     no_saturation_required: bool = False,
     no_saturation_continue_on_unknown: bool = False,
     include_contract_harness_semantics: bool = True,
+    error_budget_mode: str | None = None,
+    derived_margin_ok: bool = True,
+    vacuity_status: str = "SKIPPED",
+    pipeline_final_status: str | None = None,
+    end_to_end_status: str | None = None,
 ) -> dict[str, Any]:
     pipeline_summary = {
         "dataset": "iris",
@@ -82,6 +87,28 @@ def _summary(
             "enforced": chaining_enforced,
         },
     }
+    if pipeline_final_status is not None:
+        pipeline_summary["final_status"] = pipeline_final_status
+        pipeline_summary["synthesis"]["final_status"] = pipeline_final_status
+    if end_to_end_status is not None:
+        pipeline_summary["end_to_end_verification"] = {
+            "enabled": True,
+            "status": end_to_end_status,
+            "invariants_injected": True,
+        }
+    if error_budget_mode is not None:
+        pipeline_summary["contract_tolerance"] = {
+            "error_budget_mode": error_budget_mode,
+        }
+        pipeline_summary["output_margin_check"] = {
+            "all_ok": derived_margin_ok,
+            "status": "VERIFIED" if derived_margin_ok else "MARGIN_TOO_SMALL",
+        }
+    if vacuity_status != "SKIPPED":
+        pipeline_summary["vacuity_check"] = {
+            "enabled": True,
+            "status": vacuity_status,
+        }
     if include_contract_harness_semantics:
         pipeline_summary["contract_harness_semantics"] = {
             "uses_shared_deployed_arithmetic_kernel": True,
@@ -148,6 +175,54 @@ class ExperimentSummaryGuaranteeLevelTest(unittest.TestCase):
         self.assertEqual(summary["guarantee_level"], "harness-verified")
         self.assertTrue(summary["transfer_preconditions"]["no_saturation_continue_on_unknown"])
 
+    def test_derived_budget_transfer_requires_margin_and_nonvacuity(self) -> None:
+        verified = _summary(
+            layers=[_layer()],
+            soundness="derived_budget",
+            error_budget_mode="derived",
+            derived_margin_ok=True,
+            vacuity_status="PASSED",
+        )
+        small_margin = _summary(
+            layers=[_layer()],
+            soundness="derived_budget_incomplete",
+            error_budget_mode="derived",
+            derived_margin_ok=False,
+            vacuity_status="PASSED",
+        )
+        vacuous = _summary(
+            layers=[_layer()],
+            soundness="derived_budget",
+            error_budget_mode="derived",
+            derived_margin_ok=True,
+            vacuity_status="VACUOUS",
+        )
+
+        self.assertEqual(verified["guarantee_level"], "deployed-transfer")
+        self.assertEqual(small_margin["guarantee_level"], "harness-verified")
+        self.assertEqual(vacuous["guarantee_level"], "harness-verified")
+
+    def test_margin_too_small_has_explicit_terminal_reason(self) -> None:
+        summary = _summary(
+            layers=[],
+            quality_accepted=False,
+            soundness="derived_budget_incomplete",
+            error_budget_mode="derived",
+            derived_margin_ok=False,
+            vacuity_status="PASSED",
+            pipeline_final_status="MARGIN_TOO_SMALL",
+        )
+
+        self.assertEqual(summary["formal_only"]["final_status"], "MARGIN_TOO_SMALL")
+        self.assertEqual(
+            summary["formal_only"]["final_reason"],
+            "derived_output_margin_too_small",
+        )
+        self.assertEqual(
+            summary["quality_refined"]["final_reason"],
+            "derived_output_margin_too_small",
+        )
+
     def test_missing_contract_semantics_never_yields_deployed_transfer(self) -> None:
         summary = _summary(
             layers=[_layer()],
@@ -165,6 +240,27 @@ class ExperimentSummaryGuaranteeLevelTest(unittest.TestCase):
     def test_missing_contract_verification_sets_unknown_guarantee_level(self) -> None:
         summary = _summary(layers=[_layer(contract_status="UNKNOWN")])
 
+        self.assertEqual(summary["guarantee_level"], "unknown")
+
+    def test_end_to_end_verdict_does_not_depend_on_layer_contract_records(self) -> None:
+        summary = _summary(
+            layers=[],
+            end_to_end_status="VERIFIED",
+        )
+
+        self.assertEqual(summary["final_status"], "VERIFIED")
+        self.assertEqual(summary["contract_status"], "SKIPPED")
+        self.assertEqual(summary["end_to_end_status"], "VERIFIED")
+        self.assertTrue(summary["python_c_exact_match"])
+        self.assertEqual(summary["guarantee_level"], "deployed-transfer")
+
+    def test_end_to_end_timeout_remains_explicit(self) -> None:
+        summary = _summary(
+            layers=[],
+            end_to_end_status="TIMEOUT",
+        )
+
+        self.assertEqual(summary["final_status"], "TIMEOUT")
         self.assertEqual(summary["guarantee_level"], "unknown")
 
 

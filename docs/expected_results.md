@@ -118,6 +118,8 @@ Use these fields when deciding what claim a run supports:
 - `python_c_exact_match`: whether Python fixed-point outputs and generated-C outputs matched exactly over the evaluated samples.
 - `final_status`: combined status used by article tables.
 - `guarantee_level`: claim-strength field in `experiment_summary.json`.
+- `end_to_end_status`: direct network-harness verdict when
+  `harness_scope=network`; layer `contract_status` is then `SKIPPED`.
 
 `final_status` values:
 
@@ -125,6 +127,9 @@ Use these fields when deciding what claim a run supports:
 - `PARTIAL_VERIFIED`: contract and deployment quality passed, but optional or inconclusive no-saturation evidence did not fully verify.
 - `FAILED`: a definite formal or deployment-quality failure.
 - `UNKNOWN`: insufficient conclusive evidence.
+- `TIMEOUT` or `MEMOUT`: the direct network query exhausted its configured
+  resource limit. These remain explicit rather than being collapsed to
+  `UNKNOWN`.
 
 `guarantee_level` values:
 

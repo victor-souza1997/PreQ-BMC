@@ -46,6 +46,49 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--solver", choices=["cbc", "gurobi"], default="cbc")
     parser.add_argument("--gurobi-threads", type=int, default=4)
     parser.add_argument(
+        "--error-budget",
+        dest="error_budget_mode",
+        choices=["heuristic", "derived", "zero"],
+        default=None,
+        help="Override the hidden-contract error budget mode for all selected runs.",
+    )
+    vacuity_group = parser.add_mutually_exclusive_group()
+    vacuity_group.add_argument(
+        "--vacuity-check",
+        dest="vacuity_check",
+        action="store_true",
+        help="Force assumption-box sentinel checks for all selected runs.",
+    )
+    vacuity_group.add_argument(
+        "--no-vacuity-check",
+        dest="vacuity_check",
+        action="store_false",
+        help="Disable assumption-box sentinel checks for all selected runs.",
+    )
+    parser.set_defaults(vacuity_check=None)
+    parser.add_argument(
+        "--cex-feedback",
+        choices=["off", "filter", "filter+jump"],
+        default=None,
+    )
+    parser.add_argument(
+        "--harness-scope",
+        choices=["layer", "network"],
+        default=None,
+    )
+    invariant_group = parser.add_mutually_exclusive_group()
+    invariant_group.add_argument(
+        "--e2e-invariants",
+        dest="e2e_invariants",
+        action="store_true",
+    )
+    invariant_group.add_argument(
+        "--no-e2e-invariants",
+        dest="e2e_invariants",
+        action="store_false",
+    )
+    parser.set_defaults(e2e_invariants=None)
+    parser.add_argument(
         "--unsound-contract-tolerance",
         "--unsound_contract_tolerance",
         dest="unsound_contract_tolerance",
@@ -304,6 +347,16 @@ def _expand_runs(config: dict[str, Any], args: argparse.Namespace) -> list[dict[
                 base["enforce_contract_chaining"] = True
         if args.enforce_contract_chaining is not None:
             base["enforce_contract_chaining"] = bool(args.enforce_contract_chaining)
+        if getattr(args, "error_budget_mode", None) is not None:
+            base["error_budget_mode"] = str(args.error_budget_mode)
+        if getattr(args, "vacuity_check", None) is not None:
+            base["vacuity_check"] = bool(args.vacuity_check)
+        if getattr(args, "cex_feedback", None) is not None:
+            base["cex_feedback"] = str(args.cex_feedback)
+        if getattr(args, "harness_scope", None) is not None:
+            base["harness_scope"] = str(args.harness_scope)
+        if getattr(args, "e2e_invariants", None) is not None:
+            base["e2e_invariants"] = bool(args.e2e_invariants)
         sample_ids = base.pop("sample_ids", None)
         sample_metadata: dict[int, dict[str, Any]] = {}
         if sample_ids is None:
@@ -412,6 +465,11 @@ def _runtime_metadata(args: argparse.Namespace, run: dict[str, Any], command: li
         "no_saturation_continue_on_unknown": bool(run.get("no_saturation_continue_on_unknown", False)),
         "unsound_contract_tolerance": bool(run.get("unsound_contract_tolerance", False)),
         "propagate_contract_tolerance": bool(run.get("propagate_contract_tolerance", False)),
+        "error_budget_mode": str(run.get("error_budget_mode", "heuristic")),
+        "vacuity_check": run.get("vacuity_check"),
+        "cex_feedback": str(run.get("cex_feedback", "off")),
+        "harness_scope": str(run.get("harness_scope", "layer")),
+        "e2e_invariants": bool(run.get("e2e_invariants", True)),
         "enforce_contract_chaining": bool(run.get("enforce_contract_chaining", True)),
         "dataset": run.get("dataset"),
         "architecture": run.get("arch"),
@@ -584,6 +642,37 @@ def _build_pipeline_command(
         _add_flag(command, supported_flags, "--propagate-contract-tolerance")
     if not bool(run.get("enforce_contract_chaining", True)):
         _add_flag(command, supported_flags, "--no-enforce-contract-chaining")
+    _add_flag(
+        command,
+        supported_flags,
+        "--error-budget",
+        str(run.get("error_budget_mode", "heuristic")),
+    )
+    if run.get("vacuity_check") is True:
+        _add_flag(command, supported_flags, "--vacuity-check")
+    elif run.get("vacuity_check") is False:
+        _add_flag(command, supported_flags, "--no-vacuity-check")
+    _add_flag(
+        command,
+        supported_flags,
+        "--cex-feedback",
+        str(run.get("cex_feedback", "off")),
+    )
+    _add_flag(
+        command,
+        supported_flags,
+        "--harness-scope",
+        str(run.get("harness_scope", "layer")),
+    )
+    _add_flag(
+        command,
+        supported_flags,
+        (
+            "--e2e-invariants"
+            if bool(run.get("e2e_invariants", True))
+            else "--no-e2e-invariants"
+        ),
+    )
 
     formal_no_saturation = bool(run.get("formal_no_saturation", run.get("formal_saturation_check", False)))
     _add_flag(

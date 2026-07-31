@@ -1,0 +1,32 @@
+[Counterexample]
+
+file generated/layer_2_Q12_F8.c line 99 function main
+------------------------
+  input[0] = 4 (00000000 00000100)
+
+file generated/layer_2_Q12_F8.c line 99 function main
+------------------------
+  input[1] = 288 (00000001 00100000)
+
+file generated/layer_2_Q12_F8.c line 99 function main
+------------------------
+  input[2] = 1171 (00000100 10010011)
+
+file generated/layer_2_Q12_F8.c line 99 function main
+------------------------
+  input[3] = 0 (00000000 00000000)
+
+file generated/layer_2_Q12_F8.c line 59 function affine_transform_fixed
+------------------------
+  value = -1498
+
+file generated/layer_2_Q12_F8.c line 59 function affine_transform_fixed
+------------------------
+  value = 957
+
+file generated/layer_2_Q12_F8.c line 106 function main
+------------------------
+Violated property:
+  End-to-end target classification property violated
+
+VERIFICATION FAILED

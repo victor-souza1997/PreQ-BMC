@@ -184,8 +184,51 @@ def _formal_status_controls(
     }
 
 
+def _end_to_end_status_controls(
+    pipeline_summary: dict[str, Any],
+    *,
+    deployment_quality_accepted: bool,
+    python_c_exact_match: bool | None,
+) -> dict[str, Any] | None:
+    end_to_end = pipeline_summary.get("end_to_end_verification", {})
+    if not isinstance(end_to_end, dict) or not bool(end_to_end.get("enabled", False)):
+        return None
+
+    status = str(end_to_end.get("status", "UNKNOWN")).upper()
+    if status in {"TIMEOUT", "MEMOUT", "UNKNOWN"}:
+        final_status = status
+    elif status == "VACUOUS":
+        final_status = "VACUOUS"
+    elif status == "FAILED":
+        final_status = "FAILED"
+    elif status == "VERIFIED" and deployment_quality_accepted:
+        final_status = "VERIFIED"
+    elif status == "VERIFIED":
+        final_status = "FAILED"
+    else:
+        final_status = "UNKNOWN"
+
+    return {
+        # Layer contracts and formal no-saturation are intentionally bypassed
+        # in direct-network scope. Keep those statuses separate from the
+        # end-to-end verdict instead of manufacturing contract records.
+        "contract_verified": False,
+        "contract_status": "SKIPPED",
+        "no_saturation_formally_checked": False,
+        "no_saturation_status": "SKIPPED",
+        "no_saturation_verified": False,
+        "deployment_quality_accepted": bool(deployment_quality_accepted),
+        "python_c_exact_match": python_c_exact_match,
+        "end_to_end_status": status,
+        "final_status": final_status,
+    }
+
+
 def _pipeline_soundness_degraded(pipeline_summary: dict[str, Any]) -> bool:
-    return str(pipeline_summary.get("soundness", "")).lower() == "degraded"
+    return str(pipeline_summary.get("soundness", "")).lower() in {
+        "degraded",
+        "derived_budget_incomplete",
+    }
 
 
 def _chaining_verified_for_transfer(pipeline_summary: dict[str, Any]) -> bool:
@@ -225,6 +268,36 @@ def _fidelity_by_construction(pipeline_summary: dict[str, Any]) -> bool:
     return False
 
 
+def _derived_margin_verified(pipeline_summary: dict[str, Any]) -> bool:
+    tolerance = pipeline_summary.get("contract_tolerance", {})
+    mode = str(tolerance.get("error_budget_mode", "")).lower()
+    if mode != "derived":
+        return True
+    margin = pipeline_summary.get("output_margin_check", {})
+    return bool(margin.get("all_ok", False)) and str(margin.get("status")) == "VERIFIED"
+
+
+def _pipeline_terminal_reason(pipeline_summary: dict[str, Any]) -> str | None:
+    final_status = str(
+        pipeline_summary.get(
+            "final_status",
+            pipeline_summary.get("synthesis", {}).get("final_status", "UNKNOWN"),
+        )
+    )
+    if final_status == "MARGIN_TOO_SMALL":
+        return "derived_output_margin_too_small"
+    if final_status == "VACUOUS":
+        return "vacuous_assumption_box"
+    return None
+
+
+def _vacuity_guard_passed(pipeline_summary: dict[str, Any]) -> bool:
+    vacuity = pipeline_summary.get("vacuity_check", {})
+    if not bool(vacuity.get("enabled", False)):
+        return True
+    return str(vacuity.get("status", "")).upper() == "PASSED"
+
+
 def _guarantee_level(
     *,
     pipeline_summary: dict[str, Any],
@@ -235,8 +308,40 @@ def _guarantee_level(
     deployment_quality_accepted = bool(status_controls.get("deployment_quality_accepted", False))
     contract_verified = bool(status_controls.get("contract_verified", False))
     final_status = str(status_controls.get("final_status", "UNKNOWN"))
+    end_to_end = pipeline_summary.get("end_to_end_verification", {})
+    if isinstance(end_to_end, dict) and bool(end_to_end.get("enabled", False)):
+        e2e_status = str(end_to_end.get("status", "UNKNOWN"))
+        preconditions = {
+            "end_to_end": e2e_status == "VERIFIED",
+            "invariants_injected": bool(
+                end_to_end.get("invariants_injected", False)
+            ),
+        }
+        if e2e_status == "VERIFIED" and deployment_quality_accepted:
+            return {
+                "guarantee_level": "deployed-transfer",
+                "transfer_preconditions": preconditions,
+            }
+        if e2e_status in {"TIMEOUT", "MEMOUT", "UNKNOWN"}:
+            return {
+                "guarantee_level": "unknown",
+                "transfer_preconditions": preconditions,
+            }
+        if e2e_status in {"FAILED", "VACUOUS"} or not deployment_quality_accepted:
+            return {
+                "guarantee_level": "failed",
+                "transfer_preconditions": preconditions,
+            }
+        return {
+            "guarantee_level": "unknown",
+            "transfer_preconditions": preconditions,
+        }
 
-    if final_status == "FAILED" or contract_status == "FAILED" or not deployment_quality_accepted:
+    if (
+        final_status in {"FAILED", "MARGIN_TOO_SMALL", "VACUOUS"}
+        or contract_status == "FAILED"
+        or not deployment_quality_accepted
+    ):
         return {
             "guarantee_level": "failed",
             "transfer_preconditions": {
@@ -277,6 +382,8 @@ def _guarantee_level(
         "no_saturation_required": no_saturation_required,
         "no_saturation_verified_if_required": no_saturation_verified_if_required,
         "no_saturation_continue_on_unknown": _no_saturation_continue_on_unknown(pipeline_summary),
+        "derived_margin_ok": _derived_margin_verified(pipeline_summary),
+        "vacuity_guard_passed": _vacuity_guard_passed(pipeline_summary),
     }
     deployed_transfer = (
         all(
@@ -287,6 +394,8 @@ def _guarantee_level(
                 "chaining_ok",
                 "soundness_not_degraded",
                 "no_saturation_verified_if_required",
+                "derived_margin_ok",
+                "vacuity_guard_passed",
             )
         )
         and not preconditions["no_saturation_continue_on_unknown"]
@@ -363,6 +472,26 @@ def build_experiment_summary(
         deployment_quality_accepted=bool(quality.get("accepted", False)),
         require_formal_no_saturation=bool(refined_saturation_controls.get("require_formal_no_saturation", True)),
     )
+    formal_e2e_controls = _end_to_end_status_controls(
+        pipeline_summary,
+        deployment_quality_accepted=bool(formal_synthesis.get("success", False)),
+        python_c_exact_match=_python_c_exact_match(formal_metrics),
+    )
+    if formal_e2e_controls is not None:
+        formal_status_controls = formal_e2e_controls
+    refined_e2e_controls = _end_to_end_status_controls(
+        pipeline_summary,
+        deployment_quality_accepted=bool(quality.get("accepted", False)),
+        python_c_exact_match=_python_c_exact_match(refined_metrics),
+    )
+    if refined_e2e_controls is not None:
+        refined_status_controls = refined_e2e_controls
+    formal_pipeline_status = str(formal_synthesis.get("final_status", "UNKNOWN"))
+    refined_pipeline_status = str(synthesis.get("final_status", "UNKNOWN"))
+    if formal_pipeline_status in {"MARGIN_TOO_SMALL", "VACUOUS"}:
+        formal_status_controls["final_status"] = formal_pipeline_status
+    if refined_pipeline_status in {"MARGIN_TOO_SMALL", "VACUOUS"}:
+        refined_status_controls["final_status"] = refined_pipeline_status
     formal_guarantee_controls = _guarantee_level(
         pipeline_summary=pipeline_summary,
         status_controls=formal_status_controls,
@@ -371,6 +500,7 @@ def build_experiment_summary(
         pipeline_summary=pipeline_summary,
         status_controls=refined_status_controls,
     )
+    pipeline_terminal_reason = _pipeline_terminal_reason(pipeline_summary)
     blockwise_controls = _blockwise_controls(pipeline_summary)
     semantics_by_method = pipeline_summary.get("fixed_point_semantics_by_method", {})
     accumulator_by_method = pipeline_summary.get("accumulator_range_by_method", {})
@@ -384,6 +514,7 @@ def build_experiment_summary(
 
     formal_section = {
         "success": bool(formal_synthesis.get("success", False)),
+        "final_reason": pipeline_terminal_reason,
         **formal_bits,
         "weighted_avg_bits_per_parameter": _weighted_avg_bits(formal_resource_metrics, formal_synthesis),
         "verification_stats": {
@@ -407,7 +538,7 @@ def build_experiment_summary(
         "accepted": bool(quality.get("accepted", False)),
         **refined_bits,
         "refinement_steps": len(quality.get("steps", [])),
-        "final_reason": quality.get("final_reason"),
+        "final_reason": quality.get("final_reason") or pipeline_terminal_reason,
         "esbmc_status_per_layer": _final_esbmc_layers(quality),
         "verification_stats": {
             "backward_time": refined_stats.get("backward_time"),
@@ -457,6 +588,13 @@ def build_experiment_summary(
             },
         ),
         "contract_harness_semantics": pipeline_summary.get("contract_harness_semantics", {}),
+        "contract_tolerance": pipeline_summary.get("contract_tolerance", {}),
+        "output_margin_check": pipeline_summary.get("output_margin_check", {}),
+        "vacuity_check": pipeline_summary.get("vacuity_check", {}),
+        "counterexamples": pipeline_summary.get("counterexamples", {}),
+        "end_to_end_verification": pipeline_summary.get(
+            "end_to_end_verification", {}
+        ),
         "blockwise_verification": pipeline_summary.get("blockwise_verification", {}),
         "esbmc_memory_metrics": pipeline_summary.get("esbmc_memory_metrics", {}),
         "no_saturation_blocks": pipeline_summary.get("no_saturation_blocks", []),

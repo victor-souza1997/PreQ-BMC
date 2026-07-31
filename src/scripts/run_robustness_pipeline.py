@@ -126,10 +126,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--unsound_contract_tolerance",
         dest="unsound_contract_tolerance",
         action="store_true",
-        default=False,
+        default=None,
         help=(
-            "Debug only: restore legacy hidden-contract tolerance. This weakens "
-            "assume-guarantee composition and marks summaries with soundness=degraded."
+            "Backward-compatible alias for --error-budget heuristic."
         ),
     )
     parser.add_argument(
@@ -137,7 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--no_unsound_contract_tolerance",
         dest="unsound_contract_tolerance",
         action="store_false",
-        help="Use the default strict zero-tolerance hidden contracts.",
+        help="Backward-compatible alias for --error-budget zero.",
     )
     parser.add_argument(
         "--propagate-contract-tolerance",
@@ -175,6 +174,60 @@ def build_parser() -> argparse.ArgumentParser:
             "assume-guarantee chain is unsound. This restores historical acceptance behavior."
         ),
     )
+    parser.add_argument(
+        "--error-budget",
+        "--error_budget",
+        dest="error_budget_mode",
+        choices=["heuristic", "derived", "zero"],
+        default="heuristic",
+        help=(
+            "Hidden-contract error budget policy. Heuristic reproduces the "
+            "legacy unproved slack; derived computes a sound per-neuron budget; "
+            "zero forces strict zero slack."
+        ),
+    )
+    vacuity_group = parser.add_mutually_exclusive_group()
+    vacuity_group.add_argument(
+        "--vacuity-check",
+        "--vacuity_check",
+        dest="vacuity_check",
+        action="store_true",
+        help="Run an ESBMC satisfiability sentinel for each accepted layer assumption box.",
+    )
+    vacuity_group.add_argument(
+        "--no-vacuity-check",
+        "--no_vacuity_check",
+        dest="vacuity_check",
+        action="store_false",
+        help="Disable assumption-box sentinel checks.",
+    )
+    parser.set_defaults(vacuity_check=None)
+    parser.add_argument(
+        "--cex-feedback",
+        choices=["off", "filter", "filter+jump"],
+        default="off",
+        help="Counterexample feedback policy for layer-format search.",
+    )
+    parser.add_argument(
+        "--harness-scope",
+        choices=["layer", "network"],
+        default="layer",
+        help="Verify layer contracts or one end-to-end deployed-network harness.",
+    )
+    invariant_group = parser.add_mutually_exclusive_group()
+    invariant_group.add_argument(
+        "--e2e-invariants",
+        dest="e2e_invariants",
+        action="store_true",
+        help="Inject exact deployed-kernel interval invariants in network scope.",
+    )
+    invariant_group.add_argument(
+        "--no-e2e-invariants",
+        dest="e2e_invariants",
+        action="store_false",
+        help="Disable exact interval invariants for the end-to-end ablation.",
+    )
+    parser.set_defaults(e2e_invariants=True)
     parser.add_argument("--target-label", type=int, default=None)
     parser.add_argument("--valid-labels", default=None, help="Comma-separated valid output labels for the output property.")
     parser.add_argument("--compare-split", default="test", choices=["train", "test"])
@@ -313,6 +366,12 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     configure_logging(Path(args.output_dir) / "logs" / "robustness_pipeline.log", getattr(logging, args.log_level))
+    error_budget_mode = str(args.error_budget_mode)
+    if args.unsound_contract_tolerance is True:
+        error_budget_mode = "heuristic"
+    elif args.unsound_contract_tolerance is False:
+        error_budget_mode = "zero"
+
     config = RobustnessPipelineConfig(
         dataset=args.dataset,
         arch=args.arch,
@@ -355,6 +414,11 @@ def main(argv: list[str] | None = None) -> None:
         unsound_contract_tolerance=bool(args.unsound_contract_tolerance),
         propagate_contract_tolerance=bool(args.propagate_contract_tolerance),
         enforce_contract_chaining=bool(args.enforce_contract_chaining),
+        error_budget_mode=error_budget_mode,
+        vacuity_check=args.vacuity_check,
+        cex_feedback=str(args.cex_feedback),
+        harness_scope=str(args.harness_scope),
+        e2e_invariants=bool(args.e2e_invariants),
         export_paper_tables=args.export_paper_tables,
         baseline_results_json=args.baseline_results_json,
     )

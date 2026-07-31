@@ -2,14 +2,25 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+from fractions import Fraction
 import json
 import math
 from pathlib import Path
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 
+from backends.c_qnn_generator import (
+    compile_c_qnn_shared_library,
+    write_c_qnn_source,
+)
+from backends.fixed_point import (
+    FixedPointNetwork,
+    LayerQuantizationSpec,
+    QuantizedLayer,
+)
 from symbolic_pp.DeepPoly_preqbmc import DP_DNN_network
 from synthesis.preimage_cache import load_preimage_cache, save_preimage_cache
 from synthesis.solver_backend import BackendConstants as GRB
@@ -17,15 +28,19 @@ from synthesis.solver_backend import SolverBackendName, build_model
 from utils.fixed_point import int_get_min_max, quantize_int
 from utils.logging_utils import get_logger
 from verification.c_templates import (
+    render_assumption_sentinel_program,
     render_hidden_affine_bounds_block_program,
     render_hidden_affine_bounds_program,
     render_no_saturation_block_program,
     render_no_saturation_program,
+    render_network_end_to_end_program,
     render_output_target_program,
     render_output_valid_set_program,
 )
 from verification.esbmc import ESBMCConfig, ESBMCRunner, ESBMCResult
+from verification.invariants import propagate_exact_interval_details
 from verification.properties import ClassificationProperty
+from verification.replay import LayerReplayFormat, replay_on_python, replay_on_so
 
 LOGGER = get_logger(__name__)
 
@@ -63,6 +78,11 @@ class QuadapterConfig:
     unsound_contract_tolerance: bool = False
     propagate_contract_tolerance: bool = False
     enforce_contract_chaining: bool = True
+    error_budget_mode: str = "heuristic"
+    vacuity_check: bool | None = None
+    cex_feedback: str = "off"
+    harness_scope: str = "layer"
+    e2e_invariants: bool = True
 
     @classmethod
     def from_namespace(cls, args: Any) -> "QuadapterConfig":
@@ -103,6 +123,11 @@ class QuadapterConfig:
             unsound_contract_tolerance=bool(getattr(args, "unsound_contract_tolerance", False)),
             propagate_contract_tolerance=bool(getattr(args, "propagate_contract_tolerance", False)),
             enforce_contract_chaining=bool(getattr(args, "enforce_contract_chaining", True)),
+            error_budget_mode=str(getattr(args, "error_budget_mode", "heuristic")).lower(),
+            vacuity_check=getattr(args, "vacuity_check", None),
+            cex_feedback=str(getattr(args, "cex_feedback", "off")).lower(),
+            harness_scope=str(getattr(args, "harness_scope", "layer")).lower(),
+            e2e_invariants=bool(getattr(args, "e2e_invariants", True)),
         )
 
 
@@ -115,6 +140,7 @@ class SynthesisResult:
     fractional_bits: list[int]
     integer_bits: list[int]
     stats: dict[str, float]
+    final_status: str = "UNKNOWN"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -123,6 +149,7 @@ class SynthesisResult:
             "fractional_bits": self.fractional_bits,
             "integer_bits": self.integer_bits,
             "stats": self.stats,
+            "final_status": self.final_status,
         }
 
 
@@ -160,6 +187,7 @@ class LayerEncoding:
         self.verified_activation_lb: np.ndarray | None = None
         self.verified_activation_ub: np.ndarray | None = None
         self.verified_activation_source: str = "deeppoly_clipped"
+        self.error_budget_int: np.ndarray | None = None
 
         if layer_index > 0:
             self.max_weight = np.round(max(np.max(layer_paras[0]), np.max(layer_paras[1])))
@@ -235,6 +263,11 @@ class LayerEncoding:
 class GPEncoding:
     """Main Quadapter robustness synthesizer."""
 
+    # Keeps lightweight test doubles and older integrations backward compatible.
+    error_budget_mode = "zero"
+    cex_feedback = "off"
+    harness_scope = "layer"
+
     def __init__(
         self,
         arch: list[int],
@@ -268,10 +301,39 @@ class GPEncoding:
         self.unsound_contract_tolerance = bool(self.config.unsound_contract_tolerance)
         self.propagate_contract_tolerance = bool(self.config.propagate_contract_tolerance)
         self.enforce_contract_chaining = bool(self.config.enforce_contract_chaining)
+        self.error_budget_mode = str(self.config.error_budget_mode).lower()
+        if self.error_budget_mode not in {"heuristic", "derived", "zero"}:
+            raise ValueError(
+                "error_budget_mode must be one of: 'heuristic', 'derived', 'zero'"
+            )
+        self.vacuity_check = (
+            self.error_budget_mode == "derived"
+            if self.config.vacuity_check is None
+            else bool(self.config.vacuity_check)
+        )
+        self.cex_feedback = str(self.config.cex_feedback).lower()
+        if self.cex_feedback not in {"off", "filter", "filter+jump"}:
+            raise ValueError("cex_feedback must be one of: off, filter, filter+jump")
+        self.harness_scope = str(self.config.harness_scope).lower()
+        if self.harness_scope not in {"layer", "network"}:
+            raise ValueError("harness_scope must be one of: layer, network")
+        self.e2e_invariants = bool(self.config.e2e_invariants)
         self.esbmc_call_records: list[dict[str, Any]] = []
         self.esbmc_block_records: list[dict[str, Any]] = []
         self.esbmc_no_saturation_block_records: list[dict[str, Any]] = []
         self.chaining_records: list[dict[str, Any]] = []
+        self.output_margin_records: list[dict[str, Any]] = []
+        self.vacuity_records: list[dict[str, Any]] = []
+        self.synthesis_final_status = "UNKNOWN"
+        self.cex_pool: dict[int, list[dict[str, Any]]] = {}
+        self.counterexample_records: list[dict[str, Any]] = []
+        self.cex_filtered_counts: dict[int, int] = {}
+        self.cex_bit_jumps: dict[int, list[dict[str, int]]] = {}
+        self.end_to_end_record: dict[str, Any] = {
+            "enabled": self.harness_scope == "network",
+            "invariants_injected": self.e2e_invariants,
+            "status": "NOT_RUN",
+        }
         self.blockwise_skipped_blocks_due_to_fail_fast = 0
         self.blockwise_first_failed_block: dict[str, Any] | None = None
 
@@ -473,6 +535,319 @@ class GPEncoding:
             return False, None, None, None
         return True, result.total_bits, result.fractional_bits, result.integer_bits
 
+    def _network_lower_bound_configuration(
+        self,
+    ) -> tuple[list[int], list[int], list[int]]:
+        layers = [*self.dense_layers, self.output_layer]
+        fractional_bits = [int(self.bit_lb) for _ in layers]
+        integer_bits = [
+            _export_integer_bits(int(layer.int_bit))
+            for layer in layers
+        ]
+        total_bits = [
+            int(fractional) + int(integer) + 1
+            for fractional, integer in zip(fractional_bits, integer_bits)
+        ]
+        return total_bits, fractional_bits, integer_bits
+
+    def _fixed_point_network_from_configuration(
+        self,
+        total_bits: list[int],
+        fractional_bits: list[int],
+        integer_bits: list[int],
+    ) -> tuple[FixedPointNetwork, list[LayerQuantizationSpec]]:
+        encoded_layers = [*self.dense_layers, self.output_layer]
+        specs = [
+            LayerQuantizationSpec(
+                total_bits=int(q_bits),
+                integer_bits=int(i_bits),
+                fractional_bits=int(f_bits),
+            )
+            for q_bits, f_bits, i_bits in zip(
+                total_bits,
+                fractional_bits,
+                integer_bits,
+            )
+        ]
+        layers = tuple(
+            QuantizedLayer(
+                weights_int=np.asarray(
+                    quantize_int(
+                        encoded.layer_paras[0],
+                        spec.total_bits,
+                        spec.fractional_bits,
+                    ),
+                    dtype=np.int64,
+                ),
+                biases_int=np.asarray(
+                    quantize_int(
+                        encoded.layer_paras[1],
+                        spec.total_bits,
+                        spec.fractional_bits,
+                    ),
+                    dtype=np.int64,
+                ),
+                spec=spec,
+                is_output_layer=index == len(encoded_layers) - 1,
+            )
+            for index, (encoded, spec) in enumerate(
+                zip(encoded_layers, specs)
+            )
+        )
+        return (
+            FixedPointNetwork(
+                input_fractional_bits=specs[0].fractional_bits,
+                input_total_bits=specs[0].total_bits,
+                layers=layers,
+            ),
+            specs,
+        )
+
+    def _replay_network_integer_input(
+        self,
+        network: FixedPointNetwork,
+        inputs_int: list[int] | np.ndarray,
+    ) -> np.ndarray:
+        values = np.asarray(inputs_int, dtype=np.int64)
+        input_fractional_bits = int(network.input_fractional_bits)
+        for layer in network.layers:
+            values = replay_on_python(
+                values,
+                layer,
+                LayerReplayFormat(
+                    input_fractional_bits=input_fractional_bits,
+                    total_bits=layer.spec.total_bits,
+                    apply_relu=not layer.is_output_layer,
+                ),
+            )
+            input_fractional_bits = int(layer.spec.fractional_bits)
+        return values
+
+    def _network_output_violates(self, outputs: np.ndarray) -> bool:
+        if self.property_spec.valid_labels:
+            valid = set(int(value) for value in self.property_spec.valid_labels)
+            valid_values = [
+                int(outputs[index]) for index in sorted(valid)
+            ]
+            invalid_values = [
+                int(outputs[index])
+                for index in range(outputs.size)
+                if index not in valid
+            ]
+            return bool(invalid_values and max(valid_values) <= max(invalid_values))
+        target = int(
+            self.property_spec.target_label
+            if self.property_spec.target_label is not None
+            else self.targetCls
+        )
+        return any(
+            int(outputs[index]) >= int(outputs[target])
+            for index in range(outputs.size)
+            if index != target
+        )
+
+    def _verify_network_end_to_end(
+        self,
+        total_bits: list[int],
+        fractional_bits: list[int],
+        integer_bits: list[int],
+    ) -> bool:
+        network, specs = self._fixed_point_network_from_configuration(
+            total_bits,
+            fractional_bits,
+            integer_bits,
+        )
+        input_scale = 1 << int(network.input_fractional_bits)
+        input_q_min, input_q_max = specs[0].signed_range
+        x_low = np.maximum(
+            np.floor(np.asarray(self.x_low_real, dtype=np.float64) * input_scale).astype(np.int64),
+            input_q_min,
+        )
+        x_high = np.minimum(
+            np.ceil(np.asarray(self.x_high_real, dtype=np.float64) * input_scale).astype(np.int64),
+            input_q_max,
+        )
+        assumption_box_cardinality, assumption_box_valid = (
+            self._assumption_box_cardinality(x_low, x_high)
+        )
+        if not assumption_box_valid:
+            self.end_to_end_record = {
+                "enabled": True,
+                "scope": "network",
+                "status": "VACUOUS",
+                "invariants_injected": bool(self.e2e_invariants),
+                "selection_policy": "layer_integer_width_with_fractional_lower_bound",
+                "total_bits": [int(value) for value in total_bits],
+                "integer_bits": [int(value) for value in integer_bits],
+                "fractional_bits": [int(value) for value in fractional_bits],
+                "assumption_box_cardinality": assumption_box_cardinality,
+                "esbmc_calls": 0,
+            }
+            return False
+        interval_details = propagate_exact_interval_details(
+            network.layers,
+            specs,
+            x_low,
+            x_high,
+        )
+
+        layer_payloads: list[dict[str, object]] = []
+        current_input_fractional_bits = int(network.input_fractional_bits)
+        for layer, spec, intervals in zip(
+            network.layers,
+            specs,
+            interval_details,
+        ):
+            layer_payloads.append(
+                {
+                    "input_size": int(layer.weights_int.shape[1]),
+                    "output_size": int(layer.weights_int.shape[0]),
+                    "total_bits": int(spec.total_bits),
+                    "fractional_bits": int(spec.fractional_bits),
+                    "input_fractional_bits": current_input_fractional_bits,
+                    "weights_c_int": self.numpy_to_c_int_array(layer.weights_int),
+                    "biases_c_int": self.numpy_to_c_int_array(layer.biases_int),
+                    "invariant_low_c_int": self.numpy_to_c_int_array(intervals.output_low),
+                    "invariant_high_c_int": self.numpy_to_c_int_array(intervals.output_high),
+                    "accumulator_c_type": intervals.accumulator_c_type,
+                }
+            )
+            current_input_fractional_bits = int(spec.fractional_bits)
+
+        source = render_network_end_to_end_program(
+            input_size=int(x_low.size),
+            input_bounds_low_c_int=self.numpy_to_c_int_array(x_low),
+            input_bounds_high_c_int=self.numpy_to_c_int_array(x_high),
+            layers=layer_payloads,
+            target_label=(
+                int(self.property_spec.target_label)
+                if self.property_spec.target_label is not None
+                else int(self.targetCls)
+            ),
+            valid_classes=(
+                tuple(int(value) for value in self.property_spec.valid_labels)
+                if self.property_spec.valid_labels
+                else None
+            ),
+            inject_invariants=bool(self.e2e_invariants),
+        )
+        layers_dir = self.output_dir / "layers"
+        layers_dir.mkdir(parents=True, exist_ok=True)
+        format_name = "_".join(
+            f"Q{q}_F{f}" for q, f in zip(total_bits, fractional_bits)
+        )
+        harness = layers_dir / f"network_e2e_{format_name}.c"
+        harness.write_text(source, encoding="utf-8")
+        result = self._run_esbmc_file(
+            harness,
+            extract_counterexample=True,
+        )
+        self._stats["esbmc_calls"] += 1.0
+        call_record = self._esbmc_call_record(
+            result=result,
+            layer_index=-1,
+            block_index=None,
+            start_neuron=None,
+            end_neuron=None,
+            all_bit=max(total_bits),
+            frac_bit=max(fractional_bits),
+            harness=harness,
+            property_type="network_end_to_end",
+            mode="network",
+            input_dim=int(x_low.size),
+            output_neurons=int(network.layers[-1].biases_int.size),
+        )
+        self.esbmc_call_records.append(call_record)
+
+        replay_record: dict[str, Any] | None = None
+        if result.status == "FAILED" and result.counterexample_inputs is not None:
+            python_outputs = self._replay_network_integer_input(
+                network,
+                result.counterexample_inputs,
+            )
+            python_confirmed = self._network_output_violates(python_outputs)
+            replay_record = {
+                "inputs_int": [
+                    int(value) for value in result.counterexample_inputs
+                ],
+                "python_outputs_int": [
+                    int(value) for value in python_outputs
+                ],
+                "python_replay_confirmed": bool(python_confirmed),
+                "so_replay_confirmed": None,
+                "so_path": None,
+            }
+            try:
+                c_export_dir = self.output_dir / "c_export"
+                source_path = write_c_qnn_source(
+                    network,
+                    c_export_dir / "qnn_model.c",
+                )
+                so_path = compile_c_qnn_shared_library(
+                    source_path,
+                    c_export_dir / "qnn_model.so",
+                )
+                so_outputs = replay_on_so(
+                    result.counterexample_inputs,
+                    so_path,
+                )
+                replay_record.update(
+                    {
+                        "so_outputs_int": [
+                            int(value) for value in so_outputs
+                        ],
+                        "so_replay_confirmed": bool(
+                            self._network_output_violates(so_outputs)
+                        ),
+                        "so_path": str(so_path),
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 - report unavailable C replay.
+                replay_record["so_replay_error"] = str(exc)
+
+        self.end_to_end_record = {
+            "enabled": True,
+            "scope": "network",
+            "status": result.status,
+            "invariants_injected": bool(self.e2e_invariants),
+            "selection_policy": "layer_integer_width_with_fractional_lower_bound",
+            "total_bits": [int(value) for value in total_bits],
+            "integer_bits": [int(value) for value in integer_bits],
+            "fractional_bits": [int(value) for value in fractional_bits],
+            "assumption_box_cardinality": assumption_box_cardinality,
+            "esbmc_calls": 1,
+            "harness": str(harness),
+            "command": list(result.command),
+            "resource_control": result.resource_control,
+            "intervals": [
+                {
+                    "layer_index": int(index),
+                    "low": [int(value) for value in details.output_low],
+                    "high": [int(value) for value in details.output_high],
+                    "accumulator_c_type": details.accumulator_c_type,
+                }
+                for index, details in enumerate(interval_details)
+            ],
+            "counterexample_replay": replay_record,
+        }
+        if replay_record is not None:
+            self.counterexample_records.append(
+                {
+                    "layer_index": -1,
+                    "Q": list(total_bits),
+                    "I": list(integer_bits),
+                    "F": list(fractional_bits),
+                    "inputs_int": replay_record["inputs_int"],
+                    "replay_confirmed": bool(
+                        replay_record["python_replay_confirmed"]
+                    ),
+                    "so_replay_confirmed": replay_record.get(
+                        "so_replay_confirmed"
+                    ),
+                }
+            )
+        return result.status == "VERIFIED"
+
     def run(self, lb: np.ndarray, ub: np.ndarray) -> SynthesisResult:
         self.assert_input_box(lb, ub)
         self.symbolic_propagate()
@@ -488,7 +863,13 @@ class GPEncoding:
             raise ValueError("The property does not hold in the original DNN for the selected input region.")
 
         backward_start_time = time.time()
-        if self.config.no_gurobi:
+        if self.verify_mode == "esbmc" and self.harness_scope == "network":
+            # Direct network verification does not consume layer preimages.
+            # Symbolic propagation above is sufficient to size the candidate
+            # integer formats; the generated harness proves the deployed
+            # integer program itself.
+            pass
+        elif self.config.no_gurobi:
             self.load_cached_preimage()
         else:
             self.backward_preimage_computation()
@@ -497,7 +878,23 @@ class GPEncoding:
         self._widen_internal_integer_bits_for_fixed_point_contracts()
         backward_end_time = time.time()
 
-        if self.verify_mode == "esbmc":
+        if self.verify_mode == "esbmc" and self.harness_scope == "network":
+            total_bits, fractional_bits, integer_bits = (
+                self._network_lower_bound_configuration()
+            )
+            if_success = self._verify_network_end_to_end(
+                total_bits,
+                fractional_bits,
+                integer_bits,
+            )
+            if not if_success:
+                total_bits = None
+                fractional_bits = None
+                integer_bits = None
+                self.synthesis_final_status = str(
+                    self.end_to_end_record.get("status", "UNKNOWN")
+                )
+        elif self.verify_mode == "esbmc":
             if_success, total_bits, fractional_bits, integer_bits = self.forward_quantization_with_esbmc()
         else:
             if_success, total_bits, fractional_bits, integer_bits = self.forward_quantization()
@@ -513,6 +910,7 @@ class GPEncoding:
             fractional_bits=fractional_bits or [],
             integer_bits=integer_bits or [],
             stats={key: float(value) for key, value in self._stats.items()},
+            final_status="VERIFIED" if if_success else self.synthesis_final_status,
         )
 
     def assert_input_box(self, x_lb: np.ndarray, x_ub: np.ndarray) -> None:
@@ -933,74 +1331,197 @@ class GPEncoding:
         return scaleValue
 
     def forward_quantization_with_esbmc(self) -> tuple[bool, Any, Any, Any]:
-        qu_list: list[int] = []
-        qu_frac_list: list[int] = []
-        qu_int_list: list[int] = []
+        non_input_layers = [*self.dense_layers, self.output_layer]
+        selected_q = [0] * len(non_input_layers)
+        selected_f = [0] * len(non_input_layers)
+        selected_i = [0] * len(non_input_layers)
+        terminal_statuses: list[str] = []
 
-        non_input_layers = self.dense_layers.copy()
-        non_input_layers.append(self.output_layer)
-        in_layer_index = -1
+        def search(layer_index: int) -> bool:
+            if layer_index >= len(non_input_layers):
+                return True
 
-        for cur_layer in non_input_layers:
-            in_layer_index += 1
-            in_layer = self.input_layer if cur_layer.layer_index == 1 else self.dense_layers[cur_layer.layer_index - 2]
-            w = cur_layer.layer_paras[0]
-            b = cur_layer.layer_paras[1]
-            if_found = False
+            cur_layer = non_input_layers[layer_index]
+            in_layer = (
+                self.input_layer
+                if cur_layer.layer_index == 1
+                else self.dense_layers[cur_layer.layer_index - 2]
+            )
+            weights = cur_layer.layer_paras[0]
+            biases = cur_layer.layer_paras[1]
+            frac_bit = int(self.bit_lb)
 
-            for frac_bit in range(self.bit_lb, self.bit_ub + 1):
-                if if_found:
-                    break
-
+            while frac_bit <= int(self.bit_ub):
                 int_bit = int(cur_layer.int_bit)
                 all_bit = frac_bit + int_bit
-                qu_w_int = quantize_int(w, all_bit, frac_bit)
-                qu_b_int = quantize_int(b, all_bit, frac_bit)
+                qu_w_int = np.asarray(
+                    quantize_int(weights, all_bit, frac_bit),
+                    dtype=np.int64,
+                )
+                qu_b_int = np.asarray(
+                    quantize_int(biases, all_bit, frac_bit),
+                    dtype=np.int64,
+                )
+
+                is_output_layer = layer_index == len(non_input_layers) - 1
+                if self.error_budget_mode == "derived" and is_output_layer:
+                    margin_record = self._record_output_margin_check(
+                        cur_layer=cur_layer,
+                        in_layer=in_layer,
+                        weights_int=qu_w_int,
+                        layer_index=layer_index,
+                        all_bit=all_bit,
+                        frac_bit=frac_bit,
+                    )
+                    if not margin_record["margin_ok"]:
+                        terminal_statuses.append("MARGIN_TOO_SMALL")
+                        LOGGER.warning(
+                            "Rejecting output bits(Q=%s,F=%s): derived classification margin is too small.",
+                            all_bit,
+                            frac_bit,
+                        )
+                        frac_bit += 1
+                        continue
+
+                filtered = self._candidate_filtered_by_counterexample(
+                    cur_layer=cur_layer,
+                    in_layer=in_layer,
+                    qu_w_int=qu_w_int,
+                    qu_b_int=qu_b_int,
+                    frac_bit=frac_bit,
+                    all_bit=all_bit,
+                    layer_index=layer_index,
+                )
+                if filtered is not None:
+                    terminal_statuses.append("FAILED")
+                    frac_bit += 1
+                    continue
 
                 esbmc_result = self.verify_layer_with_esbmc(
                     cur_layer=cur_layer,
                     in_layer=in_layer,
-                    qu_w_int=np.asarray(qu_w_int),
-                    qu_b_int=np.asarray(qu_b_int),
+                    qu_w_int=qu_w_int,
+                    qu_b_int=qu_b_int,
                     frac_bit=frac_bit,
                     all_bit=all_bit,
-                    layer_index=in_layer_index,
+                    layer_index=layer_index,
+                )
+                if esbmc_result.status != "VERIFIED":
+                    terminal_statuses.append(str(esbmc_result.status))
+                counterexample = self._record_failed_counterexample(
+                    result=esbmc_result,
+                    cur_layer=cur_layer,
+                    in_layer=in_layer,
+                    qu_w_int=qu_w_int,
+                    qu_b_int=qu_b_int,
+                    frac_bit=frac_bit,
+                    all_bit=all_bit,
+                    layer_index=layer_index,
                 )
 
-                if esbmc_result.status == "VERIFIED":
-                    if cur_layer.layer_index < (len(self.dense_layers) + 1):
-                        chaining_record = self._record_hidden_chaining_check(
-                            cur_layer=cur_layer,
-                            layer_index=in_layer_index,
-                            all_bit=all_bit,
-                            frac_bit=frac_bit,
+                if (
+                    self.cex_feedback == "filter+jump"
+                    and counterexample is not None
+                    and counterexample.get("counterexample_preclamp") is not None
+                ):
+                    preclamp = abs(int(counterexample["counterexample_preclamp"]))
+                    real_magnitude = max(
+                        float(preclamp) / float(1 << frac_bit),
+                        1.0 / float(1 << frac_bit),
+                    )
+                    needed_int_bit = max(
+                        int_bit,
+                        int(math.ceil(math.log2(real_magnitude))) + 1,
+                    )
+                    needed_int_bit = min(needed_int_bit, int(self.bit_ub))
+                    if needed_int_bit > int_bit:
+                        jump = {
+                            "from": int(int_bit),
+                            "to": int(needed_int_bit),
+                            "F": int(frac_bit),
+                        }
+                        self.cex_bit_jumps.setdefault(layer_index, []).append(jump)
+                        LOGGER.info(
+                            "CEGIS integer-bit jump layer=%s F=%s I=%s->%s",
+                            layer_index,
+                            frac_bit,
+                            int_bit,
+                            needed_int_bit,
                         )
-                        if not chaining_record["chaining_ok"]:
-                            if self.enforce_contract_chaining:
-                                LOGGER.warning(
-                                    "Rejecting layer=%s bits(Q=%s,F=%s): hidden contract does not compose with downstream input box.",
-                                    cur_layer.layer_index,
-                                    all_bit,
-                                    frac_bit,
-                                )
-                                continue
-                            LOGGER.warning(
-                                "Accepting layer=%s bits(Q=%s,F=%s) despite chaining_ok=false because contract chaining enforcement is disabled.",
-                                cur_layer.layer_index,
-                                all_bit,
-                                frac_bit,
-                            )
-                    cur_layer.frac_bit = frac_bit
-                    qu_frac_list.append(frac_bit)
-                    qu_int_list.append(_export_integer_bits(int_bit))
-                    qu_list.append(all_bit)
-                    if_found = True
-                    self.update_quantized_weights_affine(in_layer, cur_layer, all_bit, frac_bit, frac_bit, in_layer_index)
+                        cur_layer.int_bit = needed_int_bit
+                        continue
 
-            if not if_found:
-                return False, None, None, None
+                if esbmc_result.status != "VERIFIED":
+                    frac_bit += 1
+                    continue
 
-        return True, qu_list, qu_frac_list, qu_int_list
+                if not is_output_layer:
+                    chaining_record = self._record_hidden_chaining_check(
+                        cur_layer=cur_layer,
+                        layer_index=layer_index,
+                        all_bit=all_bit,
+                        frac_bit=frac_bit,
+                        in_layer=in_layer,
+                        weights_int=qu_w_int,
+                    )
+                    if (
+                        not chaining_record["chaining_ok"]
+                        and self.enforce_contract_chaining
+                    ):
+                        terminal_statuses.append("FAILED")
+                        frac_bit += 1
+                        continue
+
+                vacuity_record = self._run_vacuity_sentinel(
+                    cur_layer=cur_layer,
+                    in_layer=in_layer,
+                    layer_index=layer_index,
+                    all_bit=all_bit,
+                    frac_bit=frac_bit,
+                )
+                if vacuity_record["status"] not in {"NONVACUOUS", "SKIPPED"}:
+                    terminal_statuses.append(str(vacuity_record["status"]))
+                    frac_bit += 1
+                    continue
+
+                cur_layer.frac_bit = frac_bit
+                selected_q[layer_index] = all_bit
+                selected_f[layer_index] = frac_bit
+                selected_i[layer_index] = _export_integer_bits(int_bit)
+                self.update_quantized_weights_affine(
+                    in_layer,
+                    cur_layer,
+                    all_bit,
+                    frac_bit,
+                    frac_bit,
+                    layer_index,
+                )
+
+                if search(layer_index + 1):
+                    return True
+
+                # A downstream rejection can be caused by this layer's
+                # inherited real error. Increase this shared layer precision
+                # and re-establish every downstream contract.
+                frac_bit += 1
+
+            return False
+
+        if search(0):
+            self.synthesis_final_status = "VERIFIED"
+            return True, selected_q, selected_f, selected_i
+
+        if terminal_statuses and set(terminal_statuses) <= {"MARGIN_TOO_SMALL"}:
+            self.synthesis_final_status = "MARGIN_TOO_SMALL"
+        elif "TIMEOUT" in terminal_statuses:
+            self.synthesis_final_status = "TIMEOUT"
+        elif "MEMOUT" in terminal_statuses:
+            self.synthesis_final_status = "MEMOUT"
+        elif "UNKNOWN" in terminal_statuses or "ERROR" in terminal_statuses:
+            self.synthesis_final_status = "UNKNOWN"
+        elif terminal_statuses:
+            self.synthesis_final_status = "FAILED"
+        return False, None, None, None
 
     def verify_exported_quantization_with_esbmc(
         self,
@@ -1054,6 +1575,37 @@ class GPEncoding:
 
             qu_w_int = quantize_int(cur_layer.layer_paras[0], q_bits, f_bits)
             qu_b_int = quantize_int(cur_layer.layer_paras[1], q_bits, f_bits)
+            is_output_layer = cur_layer.layer_index == len(self.dense_layers) + 1
+            if self.error_budget_mode == "derived" and is_output_layer:
+                margin_record = self._record_output_margin_check(
+                    cur_layer=cur_layer,
+                    in_layer=in_layer,
+                    weights_int=np.asarray(qu_w_int),
+                    layer_index=layer_index,
+                    all_bit=q_bits,
+                    frac_bit=f_bits,
+                )
+                if not margin_record["margin_ok"]:
+                    records.append(
+                        {
+                            "layer_index": int(layer_index),
+                            "total_bits": q_bits,
+                            "integer_bits": i_bits,
+                            "fractional_bits": f_bits,
+                            "status": "MARGIN_TOO_SMALL",
+                            "contract_status": "SKIPPED",
+                            "contract_verified": False,
+                            "no_saturation_formally_checked": False,
+                            "no_saturation_status": "SKIPPED",
+                            "no_saturation_verified": False,
+                            "deployment_quality_accepted": True,
+                            "final_status": "MARGIN_TOO_SMALL",
+                            "failure_type": "derived_output_margin_too_small",
+                            "output_margin": margin_record,
+                        }
+                    )
+                    return False, records
+
             contract_result = self.verify_layer_with_esbmc(
                 cur_layer=cur_layer,
                 in_layer=in_layer,
@@ -1092,6 +1644,8 @@ class GPEncoding:
                     layer_index=layer_index,
                     all_bit=q_bits,
                     frac_bit=f_bits,
+                    in_layer=in_layer,
+                    weights_int=np.asarray(qu_w_int),
                 )
                 record["chaining_ok"] = bool(chaining_record["chaining_ok"])
                 record["chaining_enforced"] = bool(self.enforce_contract_chaining)
@@ -1103,6 +1657,24 @@ class GPEncoding:
                     record["no_saturation_status"] = "SKIPPED"
                     records.append(record)
                     return False, records
+            vacuity_record = self._run_vacuity_sentinel(
+                cur_layer=cur_layer,
+                in_layer=in_layer,
+                layer_index=layer_index,
+                all_bit=q_bits,
+                frac_bit=f_bits,
+            )
+            record["vacuity_check"] = dict(vacuity_record)
+            record["assumption_box_cardinality"] = vacuity_record.get(
+                "assumption_box_cardinality"
+            )
+            if vacuity_record["status"] not in {"NONVACUOUS", "SKIPPED"}:
+                record["status"] = vacuity_record["status"]
+                record["final_status"] = vacuity_record["status"]
+                record["failure_type"] = "vacuous_or_inconclusive_assumption_box"
+                record["no_saturation_status"] = "SKIPPED"
+                records.append(record)
+                return False, records
 
             if formal_saturation_check:
                 no_saturation_result = self.verify_layer_no_saturation_with_esbmc(
@@ -1133,6 +1705,7 @@ class GPEncoding:
                     records.append(record)
                     if require_formal_saturation_check:
                         return False, records
+                    cur_layer.frac_bit = f_bits
                     self.update_quantized_weights_affine(in_layer, cur_layer, q_bits, f_bits, f_bits, layer_index)
                     continue
 
@@ -1142,6 +1715,7 @@ class GPEncoding:
                 record["final_status"] = "VERIFIED"
             record["status"] = record["final_status"]
             records.append(record)
+            cur_layer.frac_bit = f_bits
             self.update_quantized_weights_affine(in_layer, cur_layer, q_bits, f_bits, f_bits, layer_index)
 
         return True, records
@@ -1247,6 +1821,13 @@ class GPEncoding:
             "harness": str(harness) if harness is not None else None,
             "property_type": property_type,
             "mode": mode,
+            "counterexample_inputs": (
+                [int(value) for value in result.counterexample_inputs]
+                if result.counterexample_inputs is not None
+                else None
+            ),
+            "counterexample_neuron": result.counterexample_neuron,
+            "counterexample_preclamp": result.counterexample_preclamp,
         }
         if input_dim is not None:
             record["input_dim"] = int(input_dim)
@@ -1275,10 +1856,20 @@ class GPEncoding:
         scale: int,
     ) -> tuple[np.ndarray, np.ndarray]:
         if cur_layer.layer_index == 1:
-            x_lo = np.array(self.x_low_real, dtype=np.float64)
-            x_hi = np.array(self.x_high_real, dtype=np.float64)
+            fallback_low = getattr(
+                in_layer,
+                "lb",
+                np.zeros(in_layer.layer_size, dtype=np.float64),
+            )
+            fallback_high = getattr(
+                in_layer,
+                "ub",
+                np.zeros(in_layer.layer_size, dtype=np.float64),
+            )
+            x_lo = np.array(getattr(self, "x_low_real", fallback_low), dtype=np.float64)
+            x_hi = np.array(getattr(self, "x_high_real", fallback_high), dtype=np.float64)
         elif (
-            self.propagate_contract_tolerance
+            (self.error_budget_mode == "derived" or self.propagate_contract_tolerance)
             and getattr(in_layer, "verified_activation_lb", None) is not None
             and getattr(in_layer, "verified_activation_ub", None) is not None
         ):
@@ -1291,6 +1882,56 @@ class GPEncoding:
             np.floor(x_lo * scale).astype(np.int64),
             np.ceil(x_hi * scale).astype(np.int64),
         )
+
+    def _input_fractional_bits(
+        self,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        output_fractional_bits: int,
+    ) -> int:
+        """Return the input scale used by the deployed fixed-point layer."""
+
+        if self.error_budget_mode == "derived" and cur_layer.layer_index > 1:
+            if in_layer.frac_bit is None:
+                raise RuntimeError(
+                    "Derived error budgets require the accepted previous-layer fractional width."
+                )
+            return int(in_layer.frac_bit)
+        return int(output_fractional_bits)
+
+    def _assumption_box_int(
+        self,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        output_fractional_bits: int,
+    ) -> tuple[np.ndarray, np.ndarray, int]:
+        frac_in = self._input_fractional_bits(
+            cur_layer,
+            in_layer,
+            output_fractional_bits,
+        )
+        input_scale = 1 << frac_in
+        assumed_lo, assumed_hi = self._layer_input_bounds_int(
+            cur_layer,
+            in_layer,
+            input_scale,
+        )
+        return assumed_lo, assumed_hi, frac_in
+
+    @staticmethod
+    def _assumption_box_cardinality(
+        assumed_lo_int: np.ndarray,
+        assumed_hi_int: np.ndarray,
+    ) -> tuple[str, bool]:
+        low = np.asarray(assumed_lo_int, dtype=object).reshape(-1)
+        high = np.asarray(assumed_hi_int, dtype=object).reshape(-1)
+        valid = all(int(hi) >= int(lo) for lo, hi in zip(low, high))
+        if not valid:
+            return "0", False
+        cardinality = 1
+        for lo, hi in zip(low, high):
+            cardinality *= int(hi) - int(lo) + 1
+        return str(cardinality), True
 
     def _layer_preimage_bounds_int(
         self,
@@ -1309,12 +1950,44 @@ class GPEncoding:
         pre_lo_int: np.ndarray,
         pre_hi_int: np.ndarray,
         scale: int,
+        *,
+        cur_layer: LayerEncoding | None = None,
+        weights_int: np.ndarray | None = None,
+        assumed_lo_int: np.ndarray | None = None,
+        assumed_hi_int: np.ndarray | None = None,
+        frac_in: int | None = None,
+        delta_in_int: np.ndarray | int = 0,
     ) -> np.ndarray:
         """Return the integer slack emitted in hidden contract harnesses."""
 
         pre_lo = np.asarray(pre_lo_int, dtype=np.int64)
         pre_hi = np.asarray(pre_hi_int, dtype=np.int64)
-        if not self.unsound_contract_tolerance:
+        mode = self.__dict__.get("error_budget_mode")
+        if mode is None:
+            mode = (
+                "heuristic"
+                if bool(getattr(self, "unsound_contract_tolerance", False))
+                else "zero"
+            )
+        if mode == "derived":
+            if (
+                cur_layer is None
+                or weights_int is None
+                or assumed_lo_int is None
+                or assumed_hi_int is None
+                or frac_in is None
+            ):
+                raise ValueError("Derived error budgets require layer, weights, input box, and frac_in.")
+            return self._derived_error_budget_int(
+                cur_layer=cur_layer,
+                weights_int=weights_int,
+                assumed_lo_int=assumed_lo_int,
+                assumed_hi_int=assumed_hi_int,
+                frac_in=frac_in,
+                delta_in_int=delta_in_int,
+                frac_out=int(scale).bit_length() - 1,
+            )
+        if mode == "zero":
             return np.zeros_like(pre_lo, dtype=np.int64)
 
         abs_tol = int(scale) // 1000
@@ -1322,6 +1995,202 @@ class GPEncoding:
         rel_tol_den = 100
         ranges = np.abs(pre_hi - pre_lo)
         return (abs_tol + (rel_tol_num * ranges) // rel_tol_den).astype(np.int64)
+
+    def _derived_error_budget_int(
+        self,
+        cur_layer: LayerEncoding,
+        weights_int: np.ndarray,
+        assumed_lo_int: np.ndarray,
+        assumed_hi_int: np.ndarray,
+        frac_in: int,
+        delta_in_int: np.ndarray | int,
+        frac_out: int | None = None,
+    ) -> np.ndarray:
+        """Bound implementation/real-affine deviation in output-integer ULPs.
+
+        Let ``S_in = 2**frac_in`` and ``S_out`` be the weight/output scale.
+        An input integer ``A_j`` denotes ``A_j / S_in`` real units. Rounding a
+        real weight to ``W_int / S_out`` introduces at most
+        ``0.5 / S_out`` real error. Multiplication by ``|A_j| / S_in`` and
+        conversion back to output ULPs (multiplication by ``S_out``) therefore
+        contributes ``0.5 * |A_j| / S_in`` output ULPs. Summing and taking the
+        ceiling gives ``delta_weights``.
+
+        An inherited input error ``delta_in_j`` is measured in input ULPs.
+        Its contribution is
+        ``S_out * |W_real_ij| * delta_in_j / S_in`` output ULPs. Using
+        ``|W_int|`` alone is not conservative when a weight rounds toward
+        zero. Production calls therefore use the exact stored float weights;
+        callers without them use the safe inequality
+        ``S_out*|W_real| <= |W_int| + 1/2``.
+
+        RHAZ plus quantized-bias error contributes at most one output ULP in
+        total. ReLU is 1-Lipschitz, so no additional activation factor is
+        needed.
+        """
+
+        weights = np.asarray(weights_int, dtype=object)
+        low = np.asarray(assumed_lo_int, dtype=object).reshape(-1)
+        high = np.asarray(assumed_hi_int, dtype=object).reshape(-1)
+        if weights.ndim != 2 or weights.shape[1] != low.size or high.size != low.size:
+            raise ValueError("Derived error-budget dimensions do not match the affine layer.")
+        if int(frac_in) < 0:
+            raise ValueError("frac_in must be non-negative.")
+
+        if np.isscalar(delta_in_int):
+            delta_vec = np.full(low.size, int(delta_in_int), dtype=object)
+        else:
+            delta_vec = np.asarray(delta_in_int, dtype=object).reshape(-1)
+            if delta_vec.size != low.size:
+                raise ValueError("Inherited error budget size does not match the layer input.")
+        if any(int(value) < 0 for value in delta_vec):
+            raise ValueError("Inherited error budgets must be non-negative.")
+
+        scale_in = 1 << int(frac_in)
+        max_abs_input = np.asarray(
+            [max(abs(int(lo)), abs(int(hi))) for lo, hi in zip(low, high)],
+            dtype=object,
+        )
+        max_abs_sum = sum(int(value) for value in max_abs_input)
+        delta_weights_scalar = (max_abs_sum + (2 * scale_in) - 1) // (2 * scale_in)
+
+        real_weights: np.ndarray | None = None
+        layer_parameters = getattr(cur_layer, "layer_paras", None)
+        if (
+            frac_out is not None
+            and layer_parameters is not None
+            and len(layer_parameters) >= 1
+        ):
+            candidate = np.asarray(layer_parameters[0])
+            if candidate.shape == weights.shape:
+                real_weights = candidate
+
+        budget_values: list[int] = []
+        for neuron, row in enumerate(weights):
+            if real_weights is not None:
+                output_scale = 1 << int(frac_out)
+                amplified = sum(
+                    abs(Fraction.from_float(float(weight)))
+                    * output_scale
+                    * int(delta)
+                    for weight, delta in zip(real_weights[neuron], delta_vec)
+                )
+                delta_input = self._ceil_fraction(amplified / scale_in)
+            else:
+                # 2*S_out*|W_real| <= 2*|W_int| + 1.
+                amplified_twice = sum(
+                    (2 * abs(int(weight)) + 1) * int(delta)
+                    for weight, delta in zip(row, delta_vec)
+                )
+                delta_input = (
+                    amplified_twice + (2 * scale_in) - 1
+                ) // (2 * scale_in)
+            budget_values.append(int(delta_weights_scalar + 1 + delta_input))
+
+        max_int64 = int(np.iinfo(np.int64).max)
+        if any(value > max_int64 for value in budget_values):
+            raise OverflowError("Derived error budget exceeds int64 reporting range.")
+        budget = np.asarray(budget_values, dtype=np.int64)
+        assert np.all(budget >= 1)
+        return budget
+
+    @staticmethod
+    def _floor_fraction(value: Fraction) -> int:
+        return value.numerator // value.denominator
+
+    @staticmethod
+    def _ceil_fraction(value: Fraction) -> int:
+        return -((-value.numerator) // value.denominator)
+
+    def _inherited_error_budget_int(
+        self,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+    ) -> np.ndarray:
+        if cur_layer.layer_index == 1:
+            return np.zeros(in_layer.layer_size, dtype=np.int64)
+        inherited = getattr(in_layer, "error_budget_int", None)
+        if inherited is None:
+            if self.error_budget_mode == "derived":
+                raise RuntimeError("Previous layer has no accepted derived error budget.")
+            return np.zeros(in_layer.layer_size, dtype=np.int64)
+        return np.asarray(inherited, dtype=np.int64)
+
+    def _candidate_error_budget_int(
+        self,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        weights_int: np.ndarray,
+        frac_bit: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+        output_scale = 1 << int(frac_bit)
+        pre_lo_int, pre_hi_int = self._layer_preimage_bounds_int(cur_layer, output_scale)
+        assumed_lo, assumed_hi, frac_in = self._assumption_box_int(
+            cur_layer,
+            in_layer,
+            frac_bit,
+        )
+        budget = self._contract_tolerance_int(
+            pre_lo_int,
+            pre_hi_int,
+            output_scale,
+            cur_layer=cur_layer,
+            weights_int=weights_int,
+            assumed_lo_int=assumed_lo,
+            assumed_hi_int=assumed_hi,
+            frac_in=frac_in,
+            delta_in_int=self._inherited_error_budget_int(cur_layer, in_layer),
+        )
+        return budget, assumed_lo, assumed_hi, frac_in
+
+    def _real_affine_bounds_on_integer_box(
+        self,
+        cur_layer: LayerEncoding,
+        assumed_lo_int: np.ndarray,
+        assumed_hi_int: np.ndarray,
+        *,
+        frac_in: int,
+        frac_out: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Compute exact outward real-affine bounds in output integer ULPs.
+
+        The model parameters are stored IEEE floating-point values. Converting
+        each value with ``Fraction.from_float`` makes this computation exact
+        for those model values, avoiding an unsound float-rounding gap in the
+        decision-margin guard.
+        """
+
+        weights = np.asarray(cur_layer.layer_paras[0])
+        biases = np.asarray(cur_layer.layer_paras[1])
+        low = np.asarray(assumed_lo_int, dtype=object).reshape(-1)
+        high = np.asarray(assumed_hi_int, dtype=object).reshape(-1)
+        if weights.ndim != 2 or weights.shape[1] != low.size or high.size != low.size:
+            raise ValueError("Real affine bound dimensions do not match the assumption box.")
+
+        input_scale = 1 << int(frac_in)
+        output_scale = 1 << int(frac_out)
+        lower_values: list[int] = []
+        upper_values: list[int] = []
+        for row, bias in zip(weights, biases):
+            lower = Fraction.from_float(float(bias))
+            upper = Fraction.from_float(float(bias))
+            for weight, lo, hi in zip(row, low, high):
+                coefficient = Fraction.from_float(float(weight))
+                lo_real = Fraction(int(lo), input_scale)
+                hi_real = Fraction(int(hi), input_scale)
+                if coefficient >= 0:
+                    lower += coefficient * lo_real
+                    upper += coefficient * hi_real
+                else:
+                    lower += coefficient * hi_real
+                    upper += coefficient * lo_real
+            lower_values.append(self._floor_fraction(lower * output_scale))
+            upper_values.append(self._ceil_fraction(upper * output_scale))
+
+        return (
+            np.asarray(lower_values, dtype=np.int64),
+            np.asarray(upper_values, dtype=np.int64),
+        )
 
     @staticmethod
     def _containment_margins_int(
@@ -1357,6 +2226,8 @@ class GPEncoding:
         layer_index: int,
         all_bit: int,
         frac_bit: int,
+        in_layer: LayerEncoding | None = None,
+        weights_int: np.ndarray | None = None,
     ) -> dict[str, Any]:
         """Check that a hidden contract guarantee composes with the next input box.
 
@@ -1367,10 +2238,26 @@ class GPEncoding:
 
         scale = 1 << int(frac_bit)
         pre_lo_int, pre_hi_int = self._layer_preimage_bounds_int(cur_layer, scale)
-        tolerance_int = self._contract_tolerance_int(pre_lo_int, pre_hi_int, scale)
+        if self.error_budget_mode == "derived":
+            if in_layer is None or weights_int is None:
+                raise ValueError("Derived chaining requires the input layer and quantized weights.")
+            tolerance_int, _, _, _ = self._candidate_error_budget_int(
+                cur_layer,
+                in_layer,
+                weights_int,
+                frac_bit,
+            )
+        else:
+            tolerance_int = self._contract_tolerance_int(pre_lo_int, pre_hi_int, scale)
 
-        guaranteed_low = np.maximum(pre_lo_int - tolerance_int, 0)
-        guaranteed_high = np.maximum(pre_hi_int + tolerance_int, 0)
+        if self.error_budget_mode == "derived":
+            q_min = -(1 << (int(all_bit) - 1))
+            q_max = (1 << (int(all_bit) - 1)) - 1
+            guaranteed_low = np.maximum(np.clip(pre_lo_int - tolerance_int, q_min, q_max), 0)
+            guaranteed_high = np.maximum(np.clip(pre_hi_int + tolerance_int, q_min, q_max), 0)
+        else:
+            guaranteed_low = np.maximum(pre_lo_int - tolerance_int, 0)
+            guaranteed_high = np.maximum(pre_hi_int + tolerance_int, 0)
 
         legacy_assumed_low = np.floor(np.asarray(cur_layer.clipped_lb, dtype=np.float64) * scale).astype(np.int64)
         legacy_assumed_high = np.ceil(np.asarray(cur_layer.clipped_ub, dtype=np.float64) * scale).astype(np.int64)
@@ -1381,7 +2268,8 @@ class GPEncoding:
             legacy_assumed_high,
         )
 
-        if self.propagate_contract_tolerance:
+        effective_propagation = self.error_budget_mode == "derived" or self.propagate_contract_tolerance
+        if effective_propagation:
             assumed_low = guaranteed_low
             assumed_high = guaranteed_high
             assumption_source = "verified_contract"
@@ -1396,7 +2284,7 @@ class GPEncoding:
             assumed_low,
             assumed_high,
         )
-        if ok and self.propagate_contract_tolerance:
+        if ok and effective_propagation:
             self._store_verified_activation_bounds(
                 cur_layer,
                 guaranteed_low,
@@ -1404,6 +2292,8 @@ class GPEncoding:
                 scale,
                 source=assumption_source,
             )
+        if self.error_budget_mode == "derived":
+            cur_layer.error_budget_int = np.asarray(tolerance_int, dtype=np.int64)
 
         record: dict[str, Any] = {
             "layer_index": int(layer_index),
@@ -1412,24 +2302,44 @@ class GPEncoding:
             "I": int(max(all_bit - frac_bit - 1, 0)),
             "F": int(frac_bit),
             "scale_factor": int(scale),
-            "contract_tolerance_enabled": bool(self.unsound_contract_tolerance),
-            "contract_tolerance_propagated": bool(self.propagate_contract_tolerance),
+            "contract_tolerance_enabled": bool(
+                self.error_budget_mode == "derived"
+                or self.error_budget_mode == "heuristic"
+                or self.unsound_contract_tolerance
+            ),
+            "contract_tolerance_propagated": bool(
+                self.error_budget_mode == "derived"
+                or self.propagate_contract_tolerance
+            ),
+            "error_budget_mode": self.error_budget_mode,
+            "error_budget_int": [int(value) for value in tolerance_int],
             "chaining_enforced": bool(self.enforce_contract_chaining),
             "soundness": (
                 "degraded"
-                if (
-                    not self.enforce_contract_chaining
-                    or (self.unsound_contract_tolerance and not self.propagate_contract_tolerance)
-                )
-                else "tolerance_propagated" if self.unsound_contract_tolerance else "strict"
+                if not self.enforce_contract_chaining
+                else "derived_budget"
+                if self.error_budget_mode == "derived"
+                else "degraded"
+                if self.error_budget_mode == "heuristic"
+                else "strict"
             ),
             "assumption_source": assumption_source,
             "legacy_box_chaining_ok": legacy_ok,
             "legacy_min_lower_margin_int": int(np.min(legacy_lower_margin)) if legacy_lower_margin.size else 0,
             "legacy_min_upper_margin_int": int(np.min(legacy_upper_margin)) if legacy_upper_margin.size else 0,
             "legacy_violating_neuron_count": int(legacy_violations.size),
-            "abs_tol_int": int((scale // 1000) if self.unsound_contract_tolerance else 0),
-            "rel_tol_num": int(1 if self.unsound_contract_tolerance else 0),
+            "abs_tol_int": int(
+                (scale // 1000)
+                if self.error_budget_mode == "heuristic"
+                or self.unsound_contract_tolerance
+                else 0
+            ),
+            "rel_tol_num": int(
+                1
+                if self.error_budget_mode == "heuristic"
+                or self.unsound_contract_tolerance
+                else 0
+            ),
             "rel_tol_den": 100,
             "max_tolerance_int": int(np.max(tolerance_int)) if tolerance_int.size else 0,
             "min_lower_margin_int": int(np.min(lower_margin)) if lower_margin.size else 0,
@@ -1443,6 +2353,450 @@ class GPEncoding:
         self.chaining_records.append(record)
         return record
 
+    def _record_output_margin_check(
+        self,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        weights_int: np.ndarray,
+        layer_index: int,
+        all_bit: int,
+        frac_bit: int,
+    ) -> dict[str, Any]:
+        """Check that the final real-semantics margin exceeds the derived budget."""
+
+        budget, assumed_low, assumed_high, frac_in = self._candidate_error_budget_int(
+            cur_layer,
+            in_layer,
+            weights_int,
+            frac_bit,
+        )
+        guarantee_low, guarantee_high = self._real_affine_bounds_on_integer_box(
+            cur_layer,
+            assumed_low,
+            assumed_high,
+            frac_in=frac_in,
+            frac_out=frac_bit,
+        )
+        q_min = -(1 << (int(all_bit) - 1))
+        q_max = (1 << (int(all_bit) - 1)) - 1
+        target = int(
+            self.property_spec.target_label
+            if self.property_spec.target_label is not None
+            else self.targetCls
+        )
+        margins: list[dict[str, Any]] = []
+        margin_ok = True
+        for other in range(cur_layer.layer_size):
+            if other == target:
+                continue
+            nominal_margin = int(guarantee_low[target]) - int(guarantee_high[other])
+            required_budget = int(budget[target]) + int(budget[other])
+            raw_survives = nominal_margin > required_budget
+            deployed_target_low = min(
+                max(int(guarantee_low[target]) - int(budget[target]), q_min),
+                q_max,
+            )
+            deployed_other_high = min(
+                max(int(guarantee_high[other]) + int(budget[other]), q_min),
+                q_max,
+            )
+            survives = raw_survives and deployed_target_low > deployed_other_high
+            margin_ok = margin_ok and survives
+            margins.append(
+                {
+                    "other_class": int(other),
+                    "nominal_margin_int": int(nominal_margin),
+                    "required_budget_int": int(required_budget),
+                    "residual_margin_int": int(nominal_margin - required_budget),
+                    "raw_margin_ok": bool(raw_survives),
+                    "deployed_target_low_int": int(deployed_target_low),
+                    "deployed_other_high_int": int(deployed_other_high),
+                    "ok": bool(survives),
+                }
+            )
+
+        record = {
+            "layer_index": int(layer_index),
+            "network_layer_index": int(cur_layer.layer_index),
+            "Q": int(all_bit),
+            "I": int(max(all_bit - frac_bit - 1, 0)),
+            "F": int(frac_bit),
+            "input_fractional_bits": int(frac_in),
+            "target_class": target,
+            "error_budget_int": [int(value) for value in budget],
+            "guarantee_source": "exact_real_affine_over_propagated_assumption_box",
+            "guarantee_low_int": [int(value) for value in guarantee_low],
+            "guarantee_high_int": [int(value) for value in guarantee_high],
+            "margin_ok": bool(margin_ok),
+            "status": "VERIFIED" if margin_ok else "MARGIN_TOO_SMALL",
+            "class_margins": margins,
+        }
+        self.output_margin_records.append(record)
+        if not margin_ok:
+            self.synthesis_final_status = "MARGIN_TOO_SMALL"
+        return record
+
+    def _candidate_replay_violates(
+        self,
+        *,
+        inputs_int: np.ndarray | list[int],
+        input_fractional_bits: int,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        qu_w_int: np.ndarray,
+        qu_b_int: np.ndarray,
+        frac_bit: int,
+        all_bit: int,
+    ) -> bool:
+        assumed_low, assumed_high, frac_in = self._assumption_box_int(
+            cur_layer,
+            in_layer,
+            frac_bit,
+        )
+        inputs = self._rescale_integer_vector(
+            inputs_int,
+            from_fractional_bits=int(input_fractional_bits),
+            to_fractional_bits=int(frac_in),
+        )
+        if inputs.size != assumed_low.size:
+            return False
+        if np.any(inputs < assumed_low) or np.any(inputs > assumed_high):
+            return False
+
+        outputs = replay_on_python(
+            inputs,
+            SimpleNamespace(
+                weights_int=np.asarray(qu_w_int, dtype=np.int64),
+                biases_int=np.asarray(qu_b_int, dtype=np.int64),
+            ),
+            LayerReplayFormat(
+                input_fractional_bits=int(frac_in),
+                total_bits=int(all_bit),
+                apply_relu=False,
+            ),
+        )
+        is_output_layer = cur_layer.layer_index == len(self.dense_layers) + 1
+        if is_output_layer:
+            if self.property_spec.valid_labels:
+                valid = tuple(int(value) for value in self.property_spec.valid_labels)
+                max_valid = max(int(outputs[index]) for index in valid)
+                max_invalid = max(
+                    int(outputs[index])
+                    for index in range(outputs.size)
+                    if index not in valid
+                )
+                return max_valid <= max_invalid
+            target = int(
+                self.property_spec.target_label
+                if self.property_spec.target_label is not None
+                else self.targetCls
+            )
+            return any(
+                int(outputs[index]) >= int(outputs[target])
+                for index in range(outputs.size)
+                if index != target
+            )
+
+        scale = 1 << int(frac_bit)
+        pre_low, pre_high = self._layer_preimage_bounds_int(cur_layer, scale)
+        tolerance, _, _, _ = self._candidate_error_budget_int(
+            cur_layer,
+            in_layer,
+            qu_w_int,
+            frac_bit,
+        )
+        return bool(
+            np.any(outputs < (pre_low - tolerance))
+            or np.any(outputs > (pre_high + tolerance))
+        )
+
+    @staticmethod
+    def _rescale_integer_vector(
+        values: np.ndarray | list[int],
+        *,
+        from_fractional_bits: int,
+        to_fractional_bits: int,
+    ) -> np.ndarray:
+        """Re-encode one concrete real vector at a candidate input scale."""
+
+        source = np.asarray(values, dtype=np.int64).reshape(-1)
+        shift = int(to_fractional_bits) - int(from_fractional_bits)
+        if shift >= 0:
+            return np.asarray(
+                [int(value) << shift for value in source],
+                dtype=np.int64,
+            )
+
+        denominator = 1 << (-shift)
+        rescaled: list[int] = []
+        for value in source:
+            magnitude = abs(int(value))
+            rounded = (magnitude + denominator // 2) // denominator
+            rescaled.append(-rounded if int(value) < 0 else rounded)
+        return np.asarray(rescaled, dtype=np.int64)
+
+    def _record_failed_counterexample(
+        self,
+        *,
+        result: ESBMCResult,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        qu_w_int: np.ndarray,
+        qu_b_int: np.ndarray,
+        frac_bit: int,
+        all_bit: int,
+        layer_index: int,
+    ) -> dict[str, Any] | None:
+        if result.status != "FAILED" or result.counterexample_inputs is None:
+            return None
+        _, _, frac_in = self._assumption_box_int(
+            cur_layer,
+            in_layer,
+            frac_bit,
+        )
+        try:
+            confirmed = self._candidate_replay_violates(
+                inputs_int=result.counterexample_inputs,
+                input_fractional_bits=frac_in,
+                cur_layer=cur_layer,
+                in_layer=in_layer,
+                qu_w_int=qu_w_int,
+                qu_b_int=qu_b_int,
+                frac_bit=frac_bit,
+                all_bit=all_bit,
+            )
+        except Exception as exc:  # noqa: BLE001 - replay is diagnostic.
+            LOGGER.warning(
+                "Could not replay ESBMC counterexample for layer %s: %s",
+                layer_index,
+                exc,
+            )
+            confirmed = False
+
+        record = {
+            "layer_index": int(layer_index),
+            "Q": int(all_bit),
+            "I": int(max(all_bit - frac_bit - 1, 0)),
+            "F": int(frac_bit),
+            "input_fractional_bits": int(frac_in),
+            "inputs_int": [int(value) for value in result.counterexample_inputs],
+            "counterexample_neuron": result.counterexample_neuron,
+            "counterexample_preclamp": result.counterexample_preclamp,
+            "replay_confirmed": bool(confirmed),
+        }
+        self.counterexample_records.append(record)
+        if confirmed:
+            self.cex_pool.setdefault(int(layer_index), []).append(record)
+        return record
+
+    def _candidate_filtered_by_counterexample(
+        self,
+        *,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        qu_w_int: np.ndarray,
+        qu_b_int: np.ndarray,
+        frac_bit: int,
+        all_bit: int,
+        layer_index: int,
+    ) -> dict[str, Any] | None:
+        if self.cex_feedback not in {"filter", "filter+jump"}:
+            return None
+        for counterexample in self.cex_pool.get(int(layer_index), []):
+            if self._candidate_replay_violates(
+                inputs_int=counterexample["inputs_int"],
+                input_fractional_bits=int(counterexample["input_fractional_bits"]),
+                cur_layer=cur_layer,
+                in_layer=in_layer,
+                qu_w_int=qu_w_int,
+                qu_b_int=qu_b_int,
+                frac_bit=frac_bit,
+                all_bit=all_bit,
+            ):
+                self.cex_filtered_counts[int(layer_index)] = (
+                    self.cex_filtered_counts.get(int(layer_index), 0) + 1
+                )
+                record = {
+                    "layer_index": int(layer_index),
+                    "Q": int(all_bit),
+                    "I": int(max(all_bit - frac_bit - 1, 0)),
+                    "F": int(frac_bit),
+                    "status": "CEX_FILTERED",
+                    "property_type": (
+                        "output"
+                        if cur_layer.layer_index == len(self.dense_layers) + 1
+                        else "preimage"
+                    ),
+                    "mode": "cex_filter",
+                    "reason": "replayed_counterexample_still_violates_candidate",
+                    "source_counterexample": dict(counterexample),
+                }
+                self.esbmc_call_records.append(record)
+                return record
+        return None
+
+    def _record_invalid_assumption_box(
+        self,
+        *,
+        layer_index: int,
+        all_bit: int,
+        frac_bit: int,
+        cardinality: str,
+    ) -> ESBMCResult:
+        record = {
+            "layer_index": int(layer_index),
+            "Q": int(all_bit),
+            "I": int(max(all_bit - frac_bit - 1, 0)),
+            "F": int(frac_bit),
+            "status": "VACUOUS",
+            "sentinel_status": "SKIPPED",
+            "assumption_box_cardinality": cardinality,
+            "reason": "invalid_integer_assumption_box",
+        }
+        self.vacuity_records.append(record)
+        self.synthesis_final_status = "VACUOUS"
+        return ESBMCResult(
+            status="VACUOUS",
+            command=(),
+            stdout="",
+            stderr="invalid integer assumption box",
+            return_code=1,
+            timeout_seconds=int(self.config.esbmc.timeout_seconds),
+            memlimit=str(self.config.esbmc.memlimit),
+            resource_control={
+                "status": "VACUOUS",
+                "assumption_box_cardinality": cardinality,
+                "reason": "invalid_integer_assumption_box",
+            },
+        )
+
+    def _run_esbmc_file(
+        self,
+        harness: Path,
+        *,
+        extract_counterexample: bool = False,
+    ) -> ESBMCResult:
+        """Preserve the legacy runner call shape unless extraction is needed."""
+
+        if extract_counterexample:
+            return self.esbmc_runner.run_file(
+                harness,
+                extract_counterexample=True,
+            )
+        return self.esbmc_runner.run_file(harness)
+
+    def _run_vacuity_sentinel(
+        self,
+        *,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        layer_index: int,
+        all_bit: int,
+        frac_bit: int,
+    ) -> dict[str, Any]:
+        assumed_lo, assumed_hi, _ = self._assumption_box_int(
+            cur_layer,
+            in_layer,
+            frac_bit,
+        )
+        cardinality, valid = self._assumption_box_cardinality(assumed_lo, assumed_hi)
+        if not valid:
+            self._record_invalid_assumption_box(
+                layer_index=layer_index,
+                all_bit=all_bit,
+                frac_bit=frac_bit,
+                cardinality=cardinality,
+            )
+            return self.vacuity_records[-1]
+
+        if not self.vacuity_check:
+            record = {
+                "layer_index": int(layer_index),
+                "Q": int(all_bit),
+                "I": int(max(all_bit - frac_bit - 1, 0)),
+                "F": int(frac_bit),
+                "status": "SKIPPED",
+                "sentinel_status": "SKIPPED",
+                "assumption_box_cardinality": cardinality,
+            }
+            self.vacuity_records.append(record)
+            return record
+
+        source = render_assumption_sentinel_program(
+            input_size=in_layer.layer_size,
+            input_bounds_low_c_int=self.numpy_to_c_int_array(assumed_lo),
+            input_bounds_high_c_int=self.numpy_to_c_int_array(assumed_hi),
+        )
+        sentinel_dir = self.output_dir / "layers" / "vacuity"
+        sentinel_dir.mkdir(parents=True, exist_ok=True)
+        harness = sentinel_dir / f"layer_{layer_index}_Q{all_bit}_F{frac_bit}_sentinel.c"
+        harness.write_text(source, encoding="utf-8")
+        result = self.esbmc_runner.run_file(harness)
+        self._stats["esbmc_calls"] += 1.0
+
+        status = (
+            "NONVACUOUS"
+            if result.status == "FAILED"
+            else "VACUOUS" if result.status == "VERIFIED" else result.status
+        )
+        call_status = (
+            "SENTINEL_EXPECTED_FAILURE"
+            if status == "NONVACUOUS"
+            else status
+        )
+        call_record = self._esbmc_call_record(
+            result=result,
+            layer_index=layer_index,
+            block_index=None,
+            start_neuron=None,
+            end_neuron=None,
+            all_bit=all_bit,
+            frac_bit=frac_bit,
+            harness=harness,
+            property_type="vacuity_sentinel",
+            mode="sentinel",
+            input_dim=in_layer.layer_size,
+            output_neurons=0,
+            status=call_status,
+        )
+        call_record["assumption_box_cardinality"] = cardinality
+        self.esbmc_call_records.append(call_record)
+        record = {
+            "layer_index": int(layer_index),
+            "Q": int(all_bit),
+            "I": int(max(all_bit - frac_bit - 1, 0)),
+            "F": int(frac_bit),
+            "status": status,
+            "sentinel_status": result.status,
+            "assumption_box_cardinality": cardinality,
+            "harness": str(harness),
+            "elapsed_seconds": float(result.elapsed_seconds),
+            "resource_control": result.resource_control,
+        }
+        self.vacuity_records.append(record)
+        if status not in {"NONVACUOUS", "SKIPPED"}:
+            self.synthesis_final_status = status
+        return record
+
+    def _annotate_assumption_cardinality(
+        self,
+        *,
+        layer_index: int,
+        all_bit: int,
+        frac_bit: int,
+        cardinality: str,
+    ) -> None:
+        for record in reversed(self.esbmc_call_records):
+            if (
+                int(record.get("layer_index", -1)) == int(layer_index)
+                and int(record.get("Q", -1)) == int(all_bit)
+                and int(record.get("F", -1)) == int(frac_bit)
+                and record.get("property_type") in {"preimage", "output"}
+            ):
+                record["assumption_box_cardinality"] = cardinality
+            elif record.get("assumption_box_cardinality") is not None:
+                break
+
     def verify_layer_with_esbmc(
         self,
         cur_layer: LayerEncoding,
@@ -1453,8 +2807,22 @@ class GPEncoding:
         all_bit: int,
         layer_index: int,
     ) -> ESBMCResult:
+        assumed_lo, assumed_hi, _ = self._assumption_box_int(
+            cur_layer,
+            in_layer,
+            frac_bit,
+        )
+        cardinality, valid_box = self._assumption_box_cardinality(assumed_lo, assumed_hi)
+        if not valid_box:
+            return self._record_invalid_assumption_box(
+                layer_index=layer_index,
+                all_bit=all_bit,
+                frac_bit=frac_bit,
+                cardinality=cardinality,
+            )
+
         if self._uses_hidden_block_verification(cur_layer):
-            return self.verify_hidden_layer_blocks_with_esbmc(
+            result = self.verify_hidden_layer_blocks_with_esbmc(
                 cur_layer=cur_layer,
                 in_layer=in_layer,
                 qu_w_int=qu_w_int,
@@ -1463,6 +2831,13 @@ class GPEncoding:
                 all_bit=all_bit,
                 layer_index=layer_index,
             )
+            self._annotate_assumption_cardinality(
+                layer_index=layer_index,
+                all_bit=all_bit,
+                frac_bit=frac_bit,
+                cardinality=cardinality,
+            )
+            return result
 
         c_source = self.generate_esbmc_verification_code(
             cur_layer=cur_layer,
@@ -1478,7 +2853,10 @@ class GPEncoding:
         archived_file = layers_dir / f"layer_{layer_index}_Q{all_bit}_F{frac_bit}.c"
         archived_file.write_text(c_source, encoding="utf-8")
 
-        result = self.esbmc_runner.run_file(archived_file)
+        result = self._run_esbmc_file(
+            archived_file,
+            extract_counterexample=self.cex_feedback != "off",
+        )
         self._stats["esbmc_calls"] += 1.0
         record = self._esbmc_call_record(
             result=result,
@@ -1495,6 +2873,7 @@ class GPEncoding:
             output_neurons=cur_layer.layer_size,
         )
         self.esbmc_call_records.append(record)
+        record["assumption_box_cardinality"] = cardinality
         LOGGER.info("ESBMC layer=%s bits(Q=%s,F=%s) status=%s", cur_layer.layer_index, all_bit, frac_bit, result.status)
         return result
 
@@ -1524,6 +2903,7 @@ class GPEncoding:
         elapsed_total = 0.0
         aggregate_return_code = 0
         first_failure: dict[str, Any] | None = None
+        first_failure_result: ESBMCResult | None = None
 
         for block_index, (start_neuron, end_neuron) in enumerate(block_ranges):
             c_source = self.generate_esbmc_hidden_block_verification_code(
@@ -1543,7 +2923,10 @@ class GPEncoding:
             archived_file = layers_dir / harness_name
             archived_file.write_text(c_source, encoding="utf-8")
 
-            block_result = self.esbmc_runner.run_file(archived_file)
+            block_result = self._run_esbmc_file(
+                archived_file,
+                extract_counterexample=self.cex_feedback != "off",
+            )
 
             self._stats["esbmc_calls"] += 1.0
             self._stats["esbmc_block_calls"] += 1.0
@@ -1591,6 +2974,7 @@ class GPEncoding:
                 )
                 if first_failure is None:
                     first_failure = dict(record)
+                    first_failure_result = block_result
                 if self.blockwise_first_failed_block is None:
                     self.blockwise_first_failed_block = dict(record)
 
@@ -1670,6 +3054,21 @@ class GPEncoding:
             memlimit=str(self.config.esbmc.memlimit),
             resource_control=aggregate_resource_control,
             blocks=tuple(records),
+            counterexample_inputs=(
+                first_failure_result.counterexample_inputs
+                if first_failure_result is not None
+                else None
+            ),
+            counterexample_neuron=(
+                first_failure_result.counterexample_neuron
+                if first_failure_result is not None
+                else None
+            ),
+            counterexample_preclamp=(
+                first_failure_result.counterexample_preclamp
+                if first_failure_result is not None
+                else None
+            ),
         )
 
     def verify_layer_no_saturation_with_esbmc(
@@ -1900,7 +3299,13 @@ class GPEncoding:
         biases_c_int = self.numpy_to_c_int_array(qu_b_int)
 
         pre_lo_int, pre_hi_int = self._layer_preimage_bounds_int(cur_layer, scale)
-        input_lo_int, input_hi_int = self._layer_input_bounds_int(cur_layer, in_layer, scale)
+        tolerance_int, input_lo_int, input_hi_int, frac_in = self._candidate_error_budget_int(
+            cur_layer,
+            in_layer,
+            qu_w_int,
+            frac_bit,
+        )
+        input_scale = 1 << int(frac_in)
 
         is_output_layer = cur_layer.layer_index == len(self.dense_layers) + 1
         if is_output_layer:
@@ -1915,6 +3320,7 @@ class GPEncoding:
                     valid_classes=tuple(self.property_spec.valid_labels),
                     scale_factor=scale,
                     total_bits=all_bit,
+                    input_scale_factor=input_scale,
                 )
             return render_output_target_program(
                 output_size=cur_layer.layer_size,
@@ -1926,6 +3332,7 @@ class GPEncoding:
                 target_label=int(self.property_spec.target_label if self.property_spec.target_label is not None else self.targetCls),
                 scale_factor=scale,
                 total_bits=all_bit,
+                input_scale_factor=input_scale,
             )
 
         return render_hidden_affine_bounds_program(
@@ -1939,7 +3346,13 @@ class GPEncoding:
             input_bounds_high_c_int=self.numpy_to_c_int_array(input_hi_int),
             scale_factor=scale,
             total_bits=all_bit,
-            unsound_contract_tolerance=self.unsound_contract_tolerance,
+            unsound_contract_tolerance=self.error_budget_mode == "heuristic",
+            input_scale_factor=input_scale,
+            contract_tolerance_c_int=(
+                self.numpy_to_c_int_array(tolerance_int)
+                if self.error_budget_mode == "derived"
+                else None
+            ),
         )
 
     def generate_esbmc_hidden_block_verification_code(
@@ -1955,7 +3368,13 @@ class GPEncoding:
     ) -> str:
         scale = 1 << int(frac_bit)
         pre_lo_int, pre_hi_int = self._layer_preimage_bounds_int(cur_layer, scale)
-        input_lo_int, input_hi_int = self._layer_input_bounds_int(cur_layer, in_layer, scale)
+        tolerance_int, input_lo_int, input_hi_int, frac_in = self._candidate_error_budget_int(
+            cur_layer,
+            in_layer,
+            qu_w_int,
+            frac_bit,
+        )
+        input_scale = 1 << int(frac_in)
 
         return render_hidden_affine_bounds_block_program(
             block_size=int(end_neuron - start_neuron),
@@ -1968,7 +3387,13 @@ class GPEncoding:
             input_bounds_high_c_int=self.numpy_to_c_int_array(input_hi_int),
             scale_factor=scale,
             total_bits=all_bit,
-            unsound_contract_tolerance=self.unsound_contract_tolerance,
+            unsound_contract_tolerance=self.error_budget_mode == "heuristic",
+            input_scale_factor=input_scale,
+            contract_tolerance_c_int=(
+                self.numpy_to_c_int_array(tolerance_int[start_neuron:end_neuron])
+                if self.error_budget_mode == "derived"
+                else None
+            ),
         )
 
     def generate_esbmc_no_saturation_code(
@@ -1985,15 +3410,12 @@ class GPEncoding:
         scale = 1 << int(frac_bit)
         weights_c_int = self.numpy_to_c_int_array(qu_w_int)
         biases_c_int = self.numpy_to_c_int_array(qu_b_int)
-
-        if cur_layer.layer_index == 1:
-            x_lo = np.array(self.x_low_real, dtype=np.float64)
-            x_hi = np.array(self.x_high_real, dtype=np.float64)
-        else:
-            x_lo = np.array(in_layer.clipped_lb, dtype=np.float64)
-            x_hi = np.array(in_layer.clipped_ub, dtype=np.float64)
-        input_lo_int = np.floor(x_lo * scale).astype(np.int64)
-        input_hi_int = np.ceil(x_hi * scale).astype(np.int64)
+        input_lo_int, input_hi_int, frac_in = self._assumption_box_int(
+            cur_layer,
+            in_layer,
+            frac_bit,
+        )
+        input_scale = 1 << int(frac_in)
 
         return render_no_saturation_program(
             output_size=cur_layer.layer_size,
@@ -2006,6 +3428,7 @@ class GPEncoding:
             total_bits=all_bit,
             integer_bits=max(int(all_bit) - int(frac_bit) - 1, 0),
             fractional_bits=frac_bit,
+            input_scale_factor=input_scale,
         )
 
     def generate_esbmc_no_saturation_block_code(
@@ -2020,7 +3443,12 @@ class GPEncoding:
         end_neuron: int,
     ) -> str:
         scale = 1 << int(frac_bit)
-        input_lo_int, input_hi_int = self._layer_input_bounds_int(cur_layer, in_layer, scale)
+        input_lo_int, input_hi_int, frac_in = self._assumption_box_int(
+            cur_layer,
+            in_layer,
+            frac_bit,
+        )
+        input_scale = 1 << int(frac_in)
 
         return render_no_saturation_block_program(
             block_size=int(end_neuron - start_neuron),
@@ -2033,6 +3461,7 @@ class GPEncoding:
             total_bits=all_bit,
             integer_bits=max(int(all_bit) - int(frac_bit) - 1, 0),
             fractional_bits=frac_bit,
+            input_scale_factor=input_scale,
         )
 
     def numpy_to_c_int_array(self, np_array: np.ndarray) -> str:
@@ -2069,10 +3498,17 @@ class GPEncoding:
             )
 
         return {
-            "enabled": bool(self.verify_mode == "esbmc" and self.esbmc_layer_block_size > 0),
+            "enabled": bool(
+                self.verify_mode == "esbmc"
+                and self.harness_scope == "layer"
+                and self.esbmc_layer_block_size > 0
+            ),
             "mode": (
                 "blockwise_hidden_layers"
-                if self.esbmc_layer_block_size > 0
+                if self.harness_scope == "layer"
+                and self.esbmc_layer_block_size > 0
+                else "not_applicable_network_scope"
+                if self.harness_scope == "network"
                 else "monolithic_per_layer"
             ),
             "block_size": int(self.esbmc_layer_block_size),
@@ -2097,68 +3533,206 @@ class GPEncoding:
         }
 
     def contract_tolerance_summary(self) -> dict[str, Any]:
-        soundness = (
-            "degraded"
-            if (
-                not self.enforce_contract_chaining
-                or (self.unsound_contract_tolerance and not self.propagate_contract_tolerance)
-            )
-            else "tolerance_propagated" if self.unsound_contract_tolerance else "strict"
-        )
+        soundness = self.soundness_label()
         return {
             "mode": (
-                "legacy_propagated"
-                if self.unsound_contract_tolerance and self.propagate_contract_tolerance
-                else "unsound_debug" if self.unsound_contract_tolerance else "zero"
+                "not_applicable_network_scope"
+                if self.harness_scope == "network"
+                else "derived"
+                if self.error_budget_mode == "derived"
+                else "zero"
+                if self.error_budget_mode == "zero"
+                else "heuristic"
             ),
-            "abs_tol_num": int(1 if self.unsound_contract_tolerance else 0),
+            "abs_tol_num": int(1 if self.error_budget_mode == "heuristic" else 0),
             "abs_tol_den": 1000,
-            "rel_tol_num": int(1 if self.unsound_contract_tolerance else 0),
+            "rel_tol_num": int(1 if self.error_budget_mode == "heuristic" else 0),
             "rel_tol_den": 100,
-            "propagated": bool(self.propagate_contract_tolerance),
+            "propagated": bool(
+                self.harness_scope == "layer"
+                and (
+                    self.error_budget_mode == "derived"
+                    or self.propagate_contract_tolerance
+                )
+            ),
+            "error_budget_mode": self.error_budget_mode,
             "soundness": soundness,
         }
 
     def chaining_summary(self) -> dict[str, Any]:
         records = [dict(record) for record in self.chaining_records]
         failed = [record for record in records if not bool(record.get("chaining_ok", False))]
-        soundness = (
-            "degraded"
-            if (
-                not self.enforce_contract_chaining
-                or (self.unsound_contract_tolerance and not self.propagate_contract_tolerance)
-            )
-            else "tolerance_propagated" if self.unsound_contract_tolerance else "strict"
-        )
+        soundness = self.soundness_label()
         return {
-            "enabled": bool(self.verify_mode == "esbmc"),
+            "enabled": bool(
+                self.verify_mode == "esbmc" and self.harness_scope == "layer"
+            ),
             "enforced": bool(self.enforce_contract_chaining),
-            "contract_tolerance_propagated": bool(self.propagate_contract_tolerance),
+            "contract_tolerance_propagated": bool(
+                self.error_budget_mode == "derived"
+                or self.propagate_contract_tolerance
+            ),
             "policy": "activation_of_hidden_contract_subset_downstream_assumption",
             "soundness": soundness,
             "unsound_contract_tolerance": bool(self.unsound_contract_tolerance),
+            "error_budget_mode": self.error_budget_mode,
             "all_ok": len(failed) == 0,
             "failed_count": int(len(failed)),
             "layers": records,
         }
 
+    def soundness_label(self) -> str:
+        if self.harness_scope == "network":
+            return "end_to_end"
+        if not self.enforce_contract_chaining:
+            return "degraded"
+        if (
+            "error_budget_mode" not in self.__dict__
+            and self.unsound_contract_tolerance
+        ):
+            return (
+                "tolerance_propagated"
+                if self.propagate_contract_tolerance
+                else "degraded"
+            )
+        if self.error_budget_mode == "derived":
+            if self.output_margin_records and bool(
+                self.output_margin_records[-1].get("margin_ok", False)
+            ):
+                return "derived_budget"
+            return "derived_budget_incomplete"
+        if self.error_budget_mode == "heuristic":
+            return "degraded"
+        return "strict"
+
+    def output_margin_summary(self) -> dict[str, Any]:
+        records = [dict(record) for record in self.output_margin_records]
+        final_ok = bool(records and records[-1].get("margin_ok", False))
+        return {
+            "enabled": (
+                self.harness_scope == "layer"
+                and self.error_budget_mode == "derived"
+            ),
+            "all_ok": final_ok,
+            "status": (
+                "VERIFIED"
+                if final_ok
+                else "MARGIN_TOO_SMALL"
+                if records and records[-1].get("status") == "MARGIN_TOO_SMALL"
+                else "SKIPPED"
+            ),
+            "checks": records,
+        }
+
+    def vacuity_summary(self) -> dict[str, Any]:
+        records = [dict(record) for record in self.vacuity_records]
+        latest_by_layer: dict[int, dict[str, Any]] = {}
+        for record in records:
+            latest_by_layer[int(record.get("layer_index", -1))] = record
+        final_records = list(latest_by_layer.values())
+        statuses = {str(record.get("status", "UNKNOWN")) for record in final_records}
+        if "VACUOUS" in statuses:
+            status = "VACUOUS"
+        elif "TIMEOUT" in statuses:
+            status = "TIMEOUT"
+        elif "MEMOUT" in statuses:
+            status = "MEMOUT"
+        elif "UNKNOWN" in statuses:
+            status = "UNKNOWN"
+        elif records and statuses <= {"NONVACUOUS", "SKIPPED"}:
+            status = "PASSED" if "NONVACUOUS" in statuses else "SKIPPED"
+        else:
+            status = "SKIPPED"
+
+        sentinel_statuses = {
+            str(record.get("sentinel_status", "SKIPPED"))
+            for record in final_records
+        }
+        if sentinel_statuses == {"FAILED"}:
+            sentinel_status = "FAILED"
+        elif sentinel_statuses == {"SKIPPED"} or not records:
+            sentinel_status = "SKIPPED"
+        elif "VERIFIED" in sentinel_statuses:
+            sentinel_status = "VERIFIED"
+        else:
+            sentinel_status = "MIXED"
+        return {
+            "enabled": bool(self.vacuity_check),
+            "status": status,
+            "sentinel_status": sentinel_status,
+            "layers": records,
+            "final_layers": final_records,
+        }
+
+    def counterexample_summary(self) -> dict[str, Any]:
+        records = [dict(record) for record in self.counterexample_records]
+        confirmed = sum(
+            1 for record in records if bool(record.get("replay_confirmed", False))
+        )
+        return {
+            "feedback_mode": self.cex_feedback,
+            "records": records,
+            "counterexamples_total": int(len(records)),
+            "counterexamples_confirmed": int(confirmed),
+            "counterexample_confirmation_rate": (
+                float(confirmed / len(records)) if records else None
+            ),
+            "layers": [
+                {
+                    "layer_index": int(layer_index),
+                    "pool_size": int(len(self.cex_pool.get(layer_index, []))),
+                    "esbmc_calls_saved_by_cex_filter": int(
+                        self.cex_filtered_counts.get(layer_index, 0)
+                    ),
+                    "bit_jumps": [
+                        dict(jump)
+                        for jump in self.cex_bit_jumps.get(layer_index, [])
+                    ],
+                }
+                for layer_index in sorted(
+                    set(self.cex_pool)
+                    | set(self.cex_filtered_counts)
+                    | set(self.cex_bit_jumps)
+                )
+            ],
+            "esbmc_calls_saved_by_cex_filter": int(
+                sum(self.cex_filtered_counts.values())
+            ),
+        }
+
+    def end_to_end_summary(self) -> dict[str, Any]:
+        return dict(self.end_to_end_record)
+
     def esbmc_call_summary(self) -> dict[str, Any]:
         records = [dict(record) for record in self.esbmc_call_records]
-        statuses = ["VERIFIED", "FAILED", "TIMEOUT", "MEMOUT", "UNKNOWN", "SKIPPED"]
+        statuses = [
+            "VERIFIED",
+            "FAILED",
+            "TIMEOUT",
+            "MEMOUT",
+            "UNKNOWN",
+            "SKIPPED",
+            "SENTINEL_EXPECTED_FAILURE",
+            "VACUOUS",
+        ]
         counts = {
             status.lower(): int(sum(1 for record in records if record.get("status") == status))
             for status in statuses
         }
+        executed_records = [
+            record
+            for record in records
+            if record.get("status") in statuses
+            and record.get("status") != "SKIPPED"
+        ]
         query_times = [
             float(record.get("elapsed_seconds", record.get("time", 0.0)) or 0.0)
-            for record in records
-            if record.get("status") != "SKIPPED"
+            for record in executed_records
         ]
         query_peak_memory_bytes = [
             int(record["peak_memory_bytes"])
-            for record in records
-            if record.get("status") != "SKIPPED"
-            and record.get("peak_memory_bytes") is not None
+            for record in executed_records
+            if record.get("peak_memory_bytes") is not None
         ]
         total_calls = int(sum(counts.values()))
         total_non_skipped = int(total_calls - counts["skipped"])
@@ -2170,6 +3744,8 @@ class GPEncoding:
             "memout_count": counts["memout"],
             "unknown_count": counts["unknown"],
             "skipped_count": counts["skipped"],
+            "vacuity_sentinel_count": counts["sentinel_expected_failure"],
+            "vacuous_count": counts["vacuous"],
             "total_count": total_calls,
             "executed_count": total_non_skipped,
             "timeout_rate": float(counts["timeout"] / total_calls) if total_calls else 0.0,

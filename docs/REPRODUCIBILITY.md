@@ -144,6 +144,20 @@ Formal no-saturation keys:
 - `empirical_saturation_check`: enables empirical saturation as a deployment-quality gate.
 - `no_saturation_continue_on_unknown`: diagnostic mode; if `true`, no-saturation UNKNOWN/TIMEOUT/MEMOUT does not immediately stop remaining no-saturation blocks. This should not be used to claim `deployed-transfer`.
 
+Sound-mode-v2 keys:
+
+- `error_budget_mode`: `heuristic` preserves the legacy layer-contract slack, `zero` uses no slack, and `derived` computes and propagates per-neuron integer error budgets.
+- `vacuity_check`: runs a sentinel query for accepted layer configurations. It defaults on in `derived` mode.
+- `cex_feedback`: `off`, `filter`, or `filter+jump`. Confirmed ESBMC counterexamples can reject later layer candidates before another ESBMC call; `filter+jump` also raises an insufficient integer width directly.
+- `harness_scope`: `layer` uses the preimage-contract composition; `network` emits one direct deployed-semantics network harness and bypasses layer contracts and formal no-saturation harnesses.
+- `e2e_invariants`: injects exact integer interval invariants in network scope. These are computed from the same fixed-point kernel and do not exclude concrete executions.
+
+The direct network mode verifies one explicit candidate: each layer uses the
+integer width inferred from its parameters and symbolic range, and the
+fractional width supplied by `bit_lb`. Set `bit_lb` deliberately for this mode.
+The selected Q/I/F arrays and the exact input-box cardinality are recorded under
+`end_to_end_verification`.
+
 Block-wise ESBMC keys:
 
 - `esbmc_layer_block_size`: `0` for full-layer hidden verification, `N > 0` for hidden-neuron blocks of size `N`.
@@ -191,6 +205,10 @@ Command-line overrides on `preqbmc reproduce` can force several settings across 
 - `--no-unsound-contract-tolerance` or `--unsound-contract-tolerance`;
 - `--enforce-contract-chaining` or `--no-enforce-contract-chaining`;
 - `--propagate-contract-tolerance` or `--no-propagate-contract-tolerance`;
+- `--error-budget {heuristic,derived,zero}`;
+- `--cex-feedback {off,filter,filter+jump}`;
+- `--harness-scope {layer,network}`;
+- `--e2e-invariants` or `--no-e2e-invariants`;
 - `--resume` to reuse successful existing runs, or `--force` to overwrite an existing run directory;
 - `--only`, `--skip`, `--max-runs`, and `--include-disabled`.
 
@@ -264,6 +282,19 @@ Full-layer verification:
 ```bash
 --esbmc-layer-block-size 0
 ```
+
+Direct end-to-end deployed-network verification:
+
+```bash
+preqbmc reproduce \
+  --config experiments/sound_v2_experiments.json \
+  --only iris_e2e_sample1_eps001 \
+  --force
+```
+
+This run should make one ESBMC query. A `FAILED` result is rerun for a state
+trace; when inputs are extractable, the report records replay on both the Python
+fixed-point interpreter and the compiled shared library.
 
 Formal no-saturation as optional evidence:
 

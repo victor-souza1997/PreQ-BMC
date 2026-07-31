@@ -93,6 +93,11 @@ class RobustnessPipelineConfig:
     unsound_contract_tolerance: bool = False
     propagate_contract_tolerance: bool = False
     enforce_contract_chaining: bool = True
+    error_budget_mode: str = "heuristic"
+    vacuity_check: bool | None = None
+    cex_feedback: str = "off"
+    harness_scope: str = "layer"
+    e2e_invariants: bool = True
     export_paper_tables: bool = True
     baseline_results_json: Path | None = None
 
@@ -178,6 +183,7 @@ def _result_from_specs(
         fractional_bits=[int(spec.fractional_bits) for spec in layer_specs],
         integer_bits=[int(spec.integer_bits) for spec in layer_specs],
         stats=base_result.stats if stats is None else stats,
+        final_status=base_result.final_status if success else "FAILED",
     )
 
 
@@ -195,7 +201,11 @@ def _quality_gate_enabled(config: RobustnessPipelineConfig) -> bool:
         )
     )
     return config.max_quality_refinement_steps > 0 and (
-        (config.formal_saturation_check and config.require_formal_no_saturation)
+        (
+            config.harness_scope == "layer"
+            and config.formal_saturation_check
+            and config.require_formal_no_saturation
+        )
         or threshold_enabled
     )
 
@@ -206,7 +216,9 @@ def _quality_thresholds_payload(config: RobustnessPipelineConfig) -> dict[str, A
         "saturation_threshold": config.saturation_threshold,
         "mismatch_threshold": config.mismatch_threshold,
         "max_quality_refinement_steps": int(config.max_quality_refinement_steps),
-        "formal_saturation_check": bool(config.formal_saturation_check),
+        "formal_saturation_check": bool(
+            config.formal_saturation_check and config.harness_scope == "layer"
+        ),
         "require_formal_no_saturation": bool(config.require_formal_no_saturation),
         "empirical_saturation_check": bool(config.empirical_saturation_check),
         "esbmc_layer_block_size": int(config.esbmc_layer_block_size),
@@ -219,6 +231,11 @@ def _quality_thresholds_payload(config: RobustnessPipelineConfig) -> dict[str, A
         "esbmc_timeout_seconds": int(config.esbmc_timeout_seconds),
         "solver": str(config.solver),
         "gurobi_threads": int(config.gurobi_threads),
+        "error_budget_mode": str(config.error_budget_mode),
+        "vacuity_check": config.vacuity_check,
+        "cex_feedback": str(config.cex_feedback),
+        "harness_scope": str(config.harness_scope),
+        "e2e_invariants": bool(config.e2e_invariants),
     }
 
 
@@ -295,6 +312,8 @@ def _refresh_article_metrics(
         "esbmc_memout_count": esbmc_summary.get("memout_count", 0),
         "esbmc_unknown_count": esbmc_summary.get("unknown_count", 0),
         "esbmc_skipped_count": esbmc_summary.get("skipped_count", 0),
+        "esbmc_vacuity_sentinel_count": esbmc_summary.get("vacuity_sentinel_count", 0),
+        "esbmc_vacuous_count": esbmc_summary.get("vacuous_count", 0),
         "esbmc_total_count": esbmc_summary.get("total_count", 0),
         "timeout_rate": esbmc_summary.get("timeout_rate", 0.0),
         "memout_rate": esbmc_summary.get("memout_rate", 0.0),
@@ -328,6 +347,8 @@ def _refresh_article_metrics(
         "formal_no_saturation": bool(config.formal_saturation_check),
         "require_formal_no_saturation": bool(config.require_formal_no_saturation),
         "no_saturation_continue_on_unknown": bool(config.no_saturation_continue_on_unknown),
+        "error_budget_mode": str(config.error_budget_mode),
+        "vacuity_check": config.vacuity_check,
     }
 
 
@@ -599,11 +620,17 @@ def _formal_saturation_summary(
         for block in layer.get("no_saturation_blocks", [])
     ]
     return {
-        "enabled": bool(config.formal_saturation_check),
-        "required_for_acceptance": bool(config.require_formal_no_saturation),
+        "enabled": bool(
+            config.formal_saturation_check and config.harness_scope == "layer"
+        ),
+        "required_for_acceptance": bool(
+            config.require_formal_no_saturation
+            and config.harness_scope == "layer"
+        ),
         "used_for_acceptance": bool(
             _quality_gate_enabled(config)
             and config.formal_saturation_check
+            and config.harness_scope == "layer"
             and config.require_formal_no_saturation
         ),
         "layers": layers,
@@ -876,7 +903,25 @@ def _run_quality_refinement(
             attempts.append(attempt)
 
             if not failures:
-                if step == 0 and config.verify_mode == "esbmc" and not config.formal_saturation_check:
+                if config.harness_scope == "network":
+                    esbmc_verified = True
+                    esbmc_records = [
+                        {
+                            "layer_index": -1,
+                            "total_bits": [spec.total_bits for spec in current_specs],
+                            "integer_bits": [spec.integer_bits for spec in current_specs],
+                            "fractional_bits": [spec.fractional_bits for spec in current_specs],
+                            "status": "VERIFIED_BY_END_TO_END_SYNTHESIS",
+                            "contract_status": "VERIFIED_BY_SYNTHESIS",
+                            "contract_verified": True,
+                            "no_saturation_formally_checked": False,
+                            "no_saturation_status": "SKIPPED",
+                            "no_saturation_verified": False,
+                            "deployment_quality_accepted": True,
+                            "final_status": "PARTIAL_VERIFIED",
+                        }
+                    ]
+                elif step == 0 and config.verify_mode == "esbmc" and not config.formal_saturation_check:
                     esbmc_verified = True
                     esbmc_records = [
                         {
@@ -944,6 +989,13 @@ def _run_quality_refinement(
 
             if step >= config.max_quality_refinement_steps:
                 final_reason = "quality checks failed and max refinement steps was reached"
+                break
+
+            if config.harness_scope == "network":
+                final_reason = (
+                    "deployment quality failed; network-scope refinement would "
+                    "require another end-to-end ESBMC query"
+                )
                 break
 
             refined_specs, action = _refine_specs_after_failure(current_specs, comparison, failures, config.bit_ub)
@@ -1080,6 +1132,11 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         unsound_contract_tolerance=bool(config.unsound_contract_tolerance),
         propagate_contract_tolerance=bool(config.propagate_contract_tolerance),
         enforce_contract_chaining=bool(config.enforce_contract_chaining),
+        error_budget_mode=str(config.error_budget_mode),
+        vacuity_check=config.vacuity_check,
+        cex_feedback=str(config.cex_feedback),
+        harness_scope=str(config.harness_scope),
+        e2e_invariants=bool(config.e2e_invariants),
         esbmc=ESBMCConfig(
             timeout_seconds=max(1, int(config.esbmc_timeout_seconds)),
             memlimit=str(config.esbmc_memlimit),
@@ -1115,30 +1172,35 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         "compare_split": config.compare_split,
         "solver": str(config.solver),
         "cached_preimage": bool(config.no_gurobi),
-        "soundness": (
-            "degraded"
-            if (
-                not config.enforce_contract_chaining
-                or (config.unsound_contract_tolerance and not config.propagate_contract_tolerance)
-            )
-            else "tolerance_propagated" if config.unsound_contract_tolerance else "strict"
-        ),
+        "soundness": synthesizer.soundness_label(),
         "contract_tolerance": synthesizer.contract_tolerance_summary(),
         "chaining_ok": synthesizer.chaining_summary(),
+        "output_margin_check": synthesizer.output_margin_summary(),
+        "vacuity_check": synthesizer.vacuity_summary(),
+        "counterexamples": synthesizer.counterexample_summary(),
+        "end_to_end_verification": synthesizer.end_to_end_summary(),
         "sample_label": sample_label,
         "predicted_label": predicted_label,
         "clean_margin": clean_margin,
         "sample_logits": sample_logits.tolist(),
         "synthesis": synthesis_result.to_dict(),
+        "final_status": synthesis_result.final_status,
         "baseline": {
             "reference_accuracy": full_precision_accuracy,
         },
-        "formal_saturation_check_enabled": bool(config.formal_saturation_check),
+        "formal_saturation_check_enabled": bool(
+            config.formal_saturation_check and config.harness_scope == "layer"
+        ),
         "require_formal_no_saturation": bool(config.require_formal_no_saturation),
         "empirical_saturation_check_enabled": bool(config.empirical_saturation_check),
         "formal_saturation_verification": {
-            "enabled": bool(config.formal_saturation_check),
-            "required_for_acceptance": bool(config.require_formal_no_saturation),
+            "enabled": bool(
+                config.formal_saturation_check and config.harness_scope == "layer"
+            ),
+            "required_for_acceptance": bool(
+                config.require_formal_no_saturation
+                and config.harness_scope == "layer"
+            ),
             "used_for_acceptance": False,
             "layers": [],
         },
@@ -1174,14 +1236,11 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         summary.update(synthesizer.no_saturation_block_summary())
         summary["contract_tolerance"] = synthesizer.contract_tolerance_summary()
         summary["chaining_ok"] = synthesizer.chaining_summary()
-        summary["soundness"] = (
-            "degraded"
-            if (
-                not config.enforce_contract_chaining
-                or (config.unsound_contract_tolerance and not config.propagate_contract_tolerance)
-            )
-            else "tolerance_propagated" if config.unsound_contract_tolerance else "strict"
-        )
+        summary["soundness"] = synthesizer.soundness_label()
+        summary["output_margin_check"] = synthesizer.output_margin_summary()
+        summary["vacuity_check"] = synthesizer.vacuity_summary()
+        summary["counterexamples"] = synthesizer.counterexample_summary()
+        summary["end_to_end_verification"] = synthesizer.end_to_end_summary()
         _refresh_article_metrics(
             summary,
             pipeline_start_time=pipeline_start_time,
@@ -1239,20 +1298,18 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
     if final_specs != layer_specs or _quality_gate_enabled(config):
         summary["formal_synthesis"] = synthesis_result.to_dict()
     summary["synthesis"] = final_synthesis_result.to_dict()
+    summary["final_status"] = final_synthesis_result.final_status
     summary["quality_refinement"] = quality_summary
     summary["formal_saturation_verification"] = _formal_saturation_summary(config, quality_summary)
     summary["blockwise_verification"] = synthesizer.blockwise_verification_summary()
     summary.update(synthesizer.no_saturation_block_summary())
     summary["contract_tolerance"] = synthesizer.contract_tolerance_summary()
     summary["chaining_ok"] = synthesizer.chaining_summary()
-    summary["soundness"] = (
-        "degraded"
-        if (
-            not config.enforce_contract_chaining
-            or (config.unsound_contract_tolerance and not config.propagate_contract_tolerance)
-        )
-        else "tolerance_propagated" if config.unsound_contract_tolerance else "strict"
-    )
+    summary["soundness"] = synthesizer.soundness_label()
+    summary["output_margin_check"] = synthesizer.output_margin_summary()
+    summary["vacuity_check"] = synthesizer.vacuity_summary()
+    summary["counterexamples"] = synthesizer.counterexample_summary()
+    summary["end_to_end_verification"] = synthesizer.end_to_end_summary()
     summary["comparison"] = comparison
     _refresh_article_metrics(
         summary,

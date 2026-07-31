@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from itertools import chain
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterable, Literal
 import os
 import re
 import signal
@@ -56,6 +57,64 @@ class ESBMCResult:
     memory_measurement: str = "unavailable"
     resource_control: dict[str, Any] | None = None
     blocks: tuple[dict[str, Any], ...] = ()
+    counterexample_inputs: list[int] | None = None
+    counterexample_neuron: int | None = None
+    counterexample_preclamp: int | None = None
+    trace_command: tuple[str, ...] = ()
+    trace_stdout_log_path: str = ""
+    trace_stderr_log_path: str = ""
+
+
+def _parse_counterexample_lines(
+    lines: Iterable[str],
+) -> tuple[list[int] | None, int | None, int | None]:
+    input_values: dict[int, int] = {}
+    neuron: int | None = None
+    preclamp_values: list[int] = []
+
+    input_pattern = re.compile(
+        r"^\s*(?:input|in_|counterexample_input)\[(\d+)\]\s*=\s*(-?\d+)(?:\s|$)"
+    )
+    neuron_pattern = re.compile(
+        r"^\s*(?:counterexample_neuron|violating_neuron|max_other_index)\s*=\s*(-?\d+)(?:\s|$)"
+    )
+    preclamp_pattern = re.compile(
+        r"^\s*(?:counterexample_preclamp|pre_clamp|value)\s*=\s*(-?\d+)(?:\s|$)"
+    )
+
+    for line in lines:
+        input_match = input_pattern.match(line)
+        if input_match:
+            input_values[int(input_match.group(1))] = int(input_match.group(2))
+            continue
+        neuron_match = neuron_pattern.match(line)
+        if neuron_match:
+            neuron = int(neuron_match.group(1))
+            continue
+        preclamp_match = preclamp_pattern.match(line)
+        if preclamp_match:
+            preclamp_values.append(int(preclamp_match.group(1)))
+
+    inputs: list[int] | None = None
+    if input_values:
+        maximum_index = max(input_values)
+        if set(input_values) == set(range(maximum_index + 1)):
+            inputs = [input_values[index] for index in range(maximum_index + 1)]
+
+    preclamp = (
+        max(preclamp_values, key=lambda value: abs(int(value)))
+        if preclamp_values
+        else None
+    )
+    return inputs, neuron, preclamp
+
+
+def parse_counterexample_trace(
+    trace: str,
+) -> tuple[list[int] | None, int | None, int | None]:
+    """Defensively extract generated-harness values from an ESBMC trace."""
+
+    return _parse_counterexample_lines(trace.splitlines())
 
 
 class ESBMCRunner:
@@ -205,6 +264,80 @@ class ESBMCRunner:
             "memory_measurement": memory_measurement,
         }
 
+    def _capture_counterexample(
+        self,
+        *,
+        c_file: Path,
+        base_command: tuple[str, ...],
+    ) -> tuple[
+        list[int] | None,
+        int | None,
+        int | None,
+        tuple[str, ...],
+        Path,
+        Path,
+    ]:
+        """Re-run a failed query with ESBMC's supported state-trace output."""
+
+        trace_command_values = [
+            argument for argument in base_command if argument != "--result-only"
+        ]
+        trace_command = tuple(trace_command_values)
+        stdout_path = self._log_path(c_file, "trace.stdout")
+        stderr_path = self._log_path(c_file, "trace.stderr")
+        process: subprocess.Popen[Any] | None = None
+
+        try:
+            with stdout_path.open(
+                "w", encoding="utf-8", errors="replace"
+            ) as stdout_log, stderr_path.open(
+                "w", encoding="utf-8", errors="replace"
+            ) as stderr_log:
+                process = subprocess.Popen(
+                    trace_command,
+                    stdout=stdout_log,
+                    stderr=stderr_log,
+                    text=True,
+                    start_new_session=os.name == "posix",
+                )
+                self._wait_with_peak_memory(
+                    process,
+                    self.config.timeout_seconds + 300,
+                )
+
+            # ESBMC 7.11 emits the state trace on stderr, while some older
+            # releases use stdout. Parse both streamed files defensively.
+            with stdout_path.open(
+                "r", encoding="utf-8", errors="replace"
+            ) as stdout_trace, stderr_path.open(
+                "r", encoding="utf-8", errors="replace"
+            ) as stderr_trace:
+                inputs, neuron, preclamp = _parse_counterexample_lines(
+                    chain(stdout_trace, stderr_trace)
+                )
+            if inputs is None:
+                LOGGER.warning(
+                    "ESBMC trace for %s did not contain a complete generated input vector.",
+                    c_file,
+                )
+            return (
+                inputs,
+                neuron,
+                preclamp,
+                trace_command,
+                stdout_path,
+                stderr_path,
+            )
+        except Exception as exc:  # noqa: BLE001 - trace extraction is best effort.
+            if process is not None:
+                self._terminate_process_tree(process)
+            LOGGER.warning(
+                "Could not extract ESBMC counterexample from %s: %s",
+                c_file,
+                exc,
+            )
+            return None, None, None, trace_command, stdout_path, stderr_path
+
     @staticmethod
     def _process_tree_rss_bytes(root_pid: int) -> tuple[int | None, str]:
         """Return current Linux RSS for a process and all visible descendants."""
@@ -323,6 +456,8 @@ class ESBMCRunner:
         self,
         c_file: Path,
         profile: ESBMCProfile | None = None,
+        *,
+        extract_counterexample: bool = False,
     ) -> ESBMCResult:
         source = c_file.read_text(encoding="utf-8", errors="replace")
         unwind = self.infer_unwind(source)
@@ -447,6 +582,31 @@ class ESBMCRunner:
             peak_memory_bytes=peak_memory_bytes,
             memory_measurement=memory_measurement,
         )
+        counterexample_inputs: list[int] | None = None
+        counterexample_neuron: int | None = None
+        counterexample_preclamp: int | None = None
+        trace_command: tuple[str, ...] = ()
+        trace_stdout_log_path = ""
+        trace_stderr_log_path = ""
+        if status == "FAILED" and extract_counterexample:
+            (
+                counterexample_inputs,
+                counterexample_neuron,
+                counterexample_preclamp,
+                trace_command,
+                trace_stdout_path,
+                trace_stderr_path,
+            ) = self._capture_counterexample(
+                c_file=c_file,
+                base_command=command,
+            )
+            trace_stdout_log_path = str(trace_stdout_path)
+            trace_stderr_log_path = str(trace_stderr_path)
+            resource_control["counterexample_trace"] = {
+                "command": list(trace_command),
+                "stdout_log_path": trace_stdout_log_path,
+                "stderr_log_path": trace_stderr_log_path,
+            }
 
         return ESBMCResult(
             status=status,
@@ -462,4 +622,10 @@ class ESBMCRunner:
             peak_memory_bytes=peak_memory_bytes,
             memory_measurement=memory_measurement,
             resource_control=resource_control,
+            counterexample_inputs=counterexample_inputs,
+            counterexample_neuron=counterexample_neuron,
+            counterexample_preclamp=counterexample_preclamp,
+            trace_command=trace_command,
+            trace_stdout_log_path=trace_stdout_log_path,
+            trace_stderr_log_path=trace_stderr_log_path,
         )

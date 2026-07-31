@@ -125,6 +125,9 @@ class BlockwiseESBMCSanityTest(unittest.TestCase):
             "0",
             "--no-formal-saturation-check",
             "--no-empirical-saturation-check",
+            # This test isolates monolithic versus block decomposition. The
+            # legacy Iris fixture does not satisfy strict layer chaining.
+            "--no-enforce-contract-chaining",
             "--accuracy-drop-threshold",
             "-1",
             "--saturation-threshold",

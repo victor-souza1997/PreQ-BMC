@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from cli import _demo_result_summary, build_parser
+from cli import _demo_result_summary, build_parser, cmd_reproduce
 
 
 class DemoResultSummaryTests(unittest.TestCase):
@@ -58,6 +60,39 @@ class DemoResultSummaryTests(unittest.TestCase):
     def test_returns_none_when_report_is_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             self.assertIsNone(_demo_result_summary(Path(temp_dir)))
+
+    def test_reproduce_resolves_config_before_changing_subprocess_cwd(self) -> None:
+        args = SimpleNamespace(
+            config=Path("experiments/sound_v2_experiments.json"),
+            solver="cbc",
+            only=None,
+            max_runs=None,
+            output_root=None,
+            dry_run=False,
+            aggregate=False,
+            plots=False,
+            continue_on_error=False,
+            resume=False,
+            force=False,
+            error_budget_mode=None,
+            vacuity_check=None,
+            cex_feedback=None,
+            harness_scope=None,
+            e2e_invariants=None,
+        )
+
+        with patch("cli.subprocess.run") as run:
+            run.return_value.returncode = 0
+            return_code = cmd_reproduce(args, [])
+
+        command = run.call_args.args[0]
+        config_argument = Path(command[command.index("--config") + 1])
+        self.assertEqual(return_code, 0)
+        self.assertTrue(config_argument.is_absolute())
+        self.assertEqual(
+            config_argument,
+            Path("experiments/sound_v2_experiments.json").resolve(),
+        )
 
 
 if __name__ == "__main__":

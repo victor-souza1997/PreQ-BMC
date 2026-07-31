@@ -206,6 +206,10 @@ def cmd_demo(args: argparse.Namespace, extra: list[str]) -> int:
             "Its strongest possible guarantee level is harness-verified, not deployed-transfer.",
             flush=True,
         )
+    print(f"error budget: {args.error_budget_mode}", flush=True)
+    print(f"vacuity check override: {args.vacuity_check}", flush=True)
+    print(f"counterexample feedback: {args.cex_feedback}", flush=True)
+    print(f"harness scope: {args.harness_scope}", flush=True)
 
     if esbmc is None:
         print("Cannot run the ESBMC demo because `esbmc` was not found.")
@@ -248,7 +252,24 @@ def cmd_demo(args: argparse.Namespace, extra: list[str]) -> int:
         str(args.compare_limit),
         "--output-dir",
         str(output_dir),
+        "--error-budget",
+        (
+            "zero"
+            if args.contract_profile == "strict"
+            and args.error_budget_mode == "heuristic"
+            else str(args.error_budget_mode)
+        ),
+        "--cex-feedback",
+        str(args.cex_feedback),
+        "--harness-scope",
+        str(args.harness_scope),
     ]
+    if args.vacuity_check is True:
+        command.append("--vacuity-check")
+    elif args.vacuity_check is False:
+        command.append("--no-vacuity-check")
+    if not args.e2e_invariants:
+        command.append("--no-e2e-invariants")
     if args.no_gurobi:
         command.extend(
             [
@@ -306,11 +327,12 @@ def cmd_demo(args: argparse.Namespace, extra: list[str]) -> int:
 
 
 def cmd_reproduce(args: argparse.Namespace, extra: list[str]) -> int:
+    config_path = args.config.expanduser().resolve()
     command = [
         sys.executable,
         str(_script_path("run_article_experiments.py")),
         "--config",
-        str(args.config),
+        str(config_path),
         "--solver",
         args.solver,
     ]
@@ -332,6 +354,18 @@ def cmd_reproduce(args: argparse.Namespace, extra: list[str]) -> int:
         command.append("--resume")
     if args.force:
         command.append("--force")
+    if args.error_budget_mode is not None:
+        command.extend(["--error-budget", str(args.error_budget_mode)])
+    if args.vacuity_check is True:
+        command.append("--vacuity-check")
+    elif args.vacuity_check is False:
+        command.append("--no-vacuity-check")
+    if args.cex_feedback is not None:
+        command.extend(["--cex-feedback", str(args.cex_feedback)])
+    if args.harness_scope is not None:
+        command.extend(["--harness-scope", str(args.harness_scope)])
+    if args.e2e_invariants is False:
+        command.append("--no-e2e-invariants")
     command.extend(extra)
     print("Running: " + _command_text(command))
     completed = subprocess.run(command, cwd=_repo_root(), check=False)
@@ -385,6 +419,33 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--preimage-mode", default="milp", choices=["milp", "abstr", "comp"])
     demo.add_argument("--compare-limit", type=int, default=10)
     demo.add_argument(
+        "--error-budget",
+        dest="error_budget_mode",
+        choices=["heuristic", "derived", "zero"],
+        default="heuristic",
+    )
+    demo_vacuity = demo.add_mutually_exclusive_group()
+    demo_vacuity.add_argument("--vacuity-check", dest="vacuity_check", action="store_true")
+    demo_vacuity.add_argument("--no-vacuity-check", dest="vacuity_check", action="store_false")
+    demo.set_defaults(vacuity_check=None)
+    demo.add_argument(
+        "--cex-feedback",
+        choices=["off", "filter", "filter+jump"],
+        default="off",
+    )
+    demo.add_argument(
+        "--harness-scope",
+        choices=["layer", "network"],
+        default="layer",
+    )
+    demo.add_argument(
+        "--no-e2e-invariants",
+        dest="e2e_invariants",
+        action="store_false",
+        help="Disable exact interval invariants in network scope.",
+    )
+    demo.set_defaults(e2e_invariants=True)
+    demo.add_argument(
         "--contract-profile",
         choices=["paper-slack", "strict"],
         default="paper-slack",
@@ -412,6 +473,32 @@ def build_parser() -> argparse.ArgumentParser:
     reproduce.add_argument("--continue-on-error", action="store_true")
     reproduce.add_argument("--resume", action="store_true")
     reproduce.add_argument("--force", action="store_true")
+    reproduce.add_argument(
+        "--error-budget",
+        dest="error_budget_mode",
+        choices=["heuristic", "derived", "zero"],
+        default=None,
+    )
+    reproduce_vacuity = reproduce.add_mutually_exclusive_group()
+    reproduce_vacuity.add_argument("--vacuity-check", dest="vacuity_check", action="store_true")
+    reproduce_vacuity.add_argument("--no-vacuity-check", dest="vacuity_check", action="store_false")
+    reproduce.set_defaults(vacuity_check=None)
+    reproduce.add_argument(
+        "--cex-feedback",
+        choices=["off", "filter", "filter+jump"],
+        default=None,
+    )
+    reproduce.add_argument(
+        "--harness-scope",
+        choices=["layer", "network"],
+        default=None,
+    )
+    reproduce.add_argument(
+        "--no-e2e-invariants",
+        dest="e2e_invariants",
+        action="store_false",
+    )
+    reproduce.set_defaults(e2e_invariants=None)
     reproduce.set_defaults(func=cmd_reproduce)
 
     aggregate = subparsers.add_parser("aggregate", help="Aggregate article experiment outputs.")
