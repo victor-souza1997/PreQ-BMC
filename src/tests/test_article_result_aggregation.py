@@ -167,6 +167,138 @@ class ArticleResultAggregationTest(unittest.TestCase):
             self.assertAlmostEqual(float(quality_runtime["total_runtime_seconds_median"]), 15.0)
             self.assertAlmostEqual(float(quality_runtime["total_runtime_seconds_iqr"]), 5.0)
 
+    def test_sound_v2_modes_keep_network_success_separate_from_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_root = root / "runs"
+            output_root = root / "results"
+
+            cases = [
+                (
+                    "iris_derived_sample1_eps001",
+                    "FAILED",
+                    "failed",
+                    {
+                        "mode": "full_pipeline",
+                        "harness_scope": "layer",
+                        "error_budget_mode": "derived",
+                        "e2e_invariants": True,
+                    },
+                ),
+                (
+                    "iris_e2e_sample1_eps001",
+                    "VERIFIED",
+                    "deployed-transfer",
+                    {
+                        "mode": "full_pipeline",
+                        "harness_scope": "network",
+                        "error_budget_mode": "derived",
+                        "e2e_invariants": True,
+                    },
+                ),
+                (
+                    "iris_e2e_no_invariants_sample1_eps001",
+                    "TIMEOUT",
+                    "unknown",
+                    {
+                        "mode": "full_pipeline",
+                        "harness_scope": "network",
+                        "error_budget_mode": "derived",
+                        "e2e_invariants": False,
+                    },
+                ),
+            ]
+
+            for name, final_status, guarantee_level, run_config in cases:
+                experiment, pipeline, status = _experiment_summary(
+                    1,
+                    c_accuracy=0.9,
+                    runtime=10.0,
+                )
+                status["name"] = name
+                experiment["guarantee_level"] = guarantee_level
+                is_verified = final_status == "VERIFIED"
+                for method in ("formal_only", "quality_refined"):
+                    section = experiment[method]
+                    section["success"] = is_verified
+                    section["accepted"] = is_verified
+                    section["contract_verified"] = False
+                    section["contract_status"] = "SKIPPED"
+                    section["deployment_quality_accepted"] = is_verified
+                    section["python_c_exact_match"] = True if is_verified else None
+                    section["final_status"] = final_status
+                    section["guarantee_level"] = guarantee_level
+                pipeline["end_to_end_verification"] = {
+                    "enabled": run_config["harness_scope"] == "network",
+                    "status": final_status if run_config["harness_scope"] == "network" else "NOT_RUN",
+                    "invariants_injected": run_config["e2e_invariants"],
+                }
+                if final_status == "TIMEOUT":
+                    pipeline["esbmc_status_counts"].update(
+                        {
+                            "esbmc_verified_count": 0,
+                            "esbmc_timeout_count": 1,
+                        }
+                    )
+
+                run_dir = input_root / name
+                _write_json(run_dir / "reports" / "experiment_summary.json", experiment)
+                _write_json(run_dir / "reports" / "pipeline_summary.json", pipeline)
+                _write_json(run_dir / "run_status.json", status)
+                _write_json(run_dir / "run_config.json", run_config)
+
+            aggregate_script.aggregate(input_root, output_root)
+
+            with (output_root / "all_experiments.csv").open(newline="", encoding="utf-8") as handle:
+                all_rows = list(csv.DictReader(handle))
+            e2e_row = next(
+                row
+                for row in all_rows
+                if row["run_name"] == "iris_e2e_sample1_eps001"
+                and row["method"] == "quality_refined"
+            )
+            self.assertEqual(e2e_row["mode"], "network_e2e_invariants")
+            self.assertEqual(e2e_row["contract_status"], "SKIPPED")
+            self.assertEqual(e2e_row["formal_success"], "True")
+            self.assertEqual(e2e_row["deployment_success"], "True")
+            self.assertEqual(e2e_row["full_success"], "True")
+            self.assertEqual(e2e_row["final_status"], "VERIFIED")
+            self.assertEqual(e2e_row["guarantee_level"], "deployed-transfer")
+
+            with (output_root / "table_success_failure.csv").open(newline="", encoding="utf-8") as handle:
+                success_rows = list(csv.DictReader(handle))
+            success_row = next(
+                row
+                for row in success_rows
+                if row["run_name"] == "iris_e2e_sample1_eps001"
+                and row["method"] == "quality_refined"
+            )
+            self.assertEqual(success_row["mode"], "network_e2e_invariants")
+            self.assertEqual(success_row["final_status"], "VERIFIED")
+            self.assertEqual(success_row["guarantee_level"], "deployed-transfer")
+
+            with (output_root / "table_region_certification_summary.csv").open(
+                newline="",
+                encoding="utf-8",
+            ) as handle:
+                region_rows = [
+                    row
+                    for row in csv.DictReader(handle)
+                    if row["method"] == "quality_refined"
+                ]
+            by_mode = {row["mode"]: row for row in region_rows}
+            self.assertEqual(set(by_mode), {
+                "derived_layer_contract",
+                "network_e2e_invariants",
+                "network_e2e_no_invariants",
+            })
+            self.assertEqual(by_mode["network_e2e_invariants"]["n_regions"], "1")
+            self.assertEqual(by_mode["network_e2e_invariants"]["certified_count"], "1")
+            self.assertEqual(float(by_mode["network_e2e_invariants"]["certified_fraction"]), 1.0)
+            self.assertEqual(float(by_mode["derived_layer_contract"]["certified_fraction"]), 0.0)
+            self.assertEqual(float(by_mode["network_e2e_no_invariants"]["certified_fraction"]), 0.0)
+            self.assertEqual(by_mode["network_e2e_no_invariants"]["timeout_count"], "1")
+
     def test_aggregate_excludes_intentionally_skipped_placeholders(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

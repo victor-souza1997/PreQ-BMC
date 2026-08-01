@@ -326,8 +326,23 @@ def cmd_demo(args: argparse.Namespace, extra: list[str]) -> int:
     return 0
 
 
+def _resolve_reproduce_config(path: Path) -> Path:
+    expanded = path.expanduser()
+    if expanded.is_absolute():
+        return expanded.resolve()
+
+    caller_relative = expanded.resolve()
+    if caller_relative.exists():
+        return caller_relative
+
+    repository_relative = (_repo_root() / expanded).resolve()
+    if repository_relative.exists():
+        return repository_relative
+    return caller_relative
+
+
 def cmd_reproduce(args: argparse.Namespace, extra: list[str]) -> int:
-    config_path = args.config.expanduser().resolve()
+    config_path = _resolve_reproduce_config(args.config)
     command = [
         sys.executable,
         str(_script_path("run_article_experiments.py")),

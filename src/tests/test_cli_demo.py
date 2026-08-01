@@ -7,7 +7,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from cli import _demo_result_summary, build_parser, cmd_reproduce
+from cli import (
+    _demo_result_summary,
+    _resolve_reproduce_config,
+    build_parser,
+    cmd_reproduce,
+)
 
 
 class DemoResultSummaryTests(unittest.TestCase):
@@ -93,6 +98,20 @@ class DemoResultSummaryTests(unittest.TestCase):
             config_argument,
             Path("experiments/sound_v2_experiments.json").resolve(),
         )
+
+    def test_reproduce_falls_back_to_repository_relative_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repository = Path(temp_dir)
+            config = repository / "experiments" / "nested_config.json"
+            config.parent.mkdir()
+            config.write_text("{}", encoding="utf-8")
+
+            with patch("cli._repo_root", return_value=repository):
+                resolved = _resolve_reproduce_config(
+                    Path("experiments/nested_config.json")
+                )
+
+        self.assertEqual(resolved, config.resolve())
 
 
 if __name__ == "__main__":

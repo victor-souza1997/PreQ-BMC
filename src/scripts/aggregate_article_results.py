@@ -244,6 +244,43 @@ def _layer_records_from_pipeline(pipeline: dict[str, Any], section: dict[str, An
     return _get(pipeline, "formal_saturation_verification", "layers", default=[])
 
 
+def _reporting_mode(run_config: dict[str, Any], pipeline: dict[str, Any]) -> str:
+    """Return a stable mode label, including for older sound-v2 run records."""
+
+    configured_mode = str(
+        run_config.get("mode") or run_config.get("ablation_mode") or "full_pipeline"
+    )
+    if configured_mode != "full_pipeline":
+        return configured_mode
+
+    resource_controls = pipeline.get("resource_controls", {})
+    end_to_end = pipeline.get("end_to_end_verification", {})
+    harness_scope = str(
+        run_config.get("harness_scope")
+        or resource_controls.get("harness_scope")
+        or ("network" if end_to_end.get("enabled") else "layer")
+    )
+    if harness_scope == "network":
+        invariants = run_config.get(
+            "e2e_invariants",
+            end_to_end.get("invariants_injected", True),
+        )
+        return (
+            "network_e2e_invariants"
+            if bool(invariants)
+            else "network_e2e_no_invariants"
+        )
+
+    error_budget_mode = str(
+        run_config.get("error_budget_mode")
+        or resource_controls.get("error_budget_mode")
+        or ""
+    )
+    if error_budget_mode == "derived":
+        return "derived_layer_contract"
+    return configured_mode
+
+
 def _method_row(
     *,
     run_dir: Path,
@@ -360,7 +397,7 @@ def _method_row(
         "input_epsilon": input_epsilon,
         "normalized_input_epsilon": normalized_input_epsilon,
         "method": method,
-        "mode": run_config.get("mode", run_config.get("ablation_mode", "full_pipeline")),
+        "mode": _reporting_mode(run_config, pipeline),
         "status": run_status.get("status", "success" if experiment else "failed"),
         "final_status": final_status,
         "guarantee_level": guarantee_level,
@@ -536,16 +573,19 @@ def _list_get(values: list[Any], index: int) -> Any:
 def _success_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
+            "run_name": row.get("run_name"),
             "dataset": row.get("dataset"),
             "arch": row.get("arch"),
             "sample_id": row.get("sample_id"),
             "method": row.get("method"),
+            "mode": row.get("mode"),
             "input_epsilon": row.get("input_epsilon"),
             "formal_success": row.get("formal_success"),
             "deployment_success": row.get("deployment_success"),
             "full_success": row.get("full_success"),
             "no_saturation_status": row.get("no_saturation_status"),
             "final_status": row.get("final_status"),
+            "guarantee_level": row.get("guarantee_level"),
             "failure_reason": row.get("failure_reason"),
             "failed_layer": row.get("failed_layer"),
             "failed_block": row.get("failed_block"),
@@ -1385,9 +1425,10 @@ BITWIDTH_FIELDS = [
     "method", "layer_index", "Q", "I", "F", "total_bits", "integer_bits", "fractional_bits",
 ]
 SUCCESS_FIELDS = [
-    "dataset", "arch", "sample_id", "method", "input_epsilon", "formal_success",
-    "deployment_success", "full_success", "no_saturation_status", "final_status", "failure_reason",
-    "failed_layer", "failed_block", "failed_property",
+    "run_name", "dataset", "arch", "sample_id", "method", "mode", "input_epsilon",
+    "formal_success", "deployment_success", "full_success", "no_saturation_status",
+    "final_status", "guarantee_level", "failure_reason", "failed_layer", "failed_block",
+    "failed_property",
 ]
 ESBMC_FIELDS = [
     "run_name", "dataset", "arch", "sample_id", "method", "input_epsilon",
