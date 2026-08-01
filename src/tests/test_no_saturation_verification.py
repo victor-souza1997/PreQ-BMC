@@ -492,6 +492,20 @@ class NoSaturationVerificationTest(unittest.TestCase):
         self.assertNotIn("--print-stack-traces", command)
         self.assertNotIn("--loop-invariant", command)
 
+    def test_paper_z3_profile_uses_low_noise_resource_limited_flags(self) -> None:
+        runner = ESBMCRunner(ESBMCConfig())
+        command = runner.build_command(Path("harness.c"), unwind=4, profile="paper-z3")
+
+        self.assertIn("--z3", command)
+        self.assertNotIn("--bitwuzla", command)
+        self.assertIn("--bv", command)
+        self.assertIn("--memlimit", command)
+        self.assertIn("--result-only", command)
+        self.assertIn("--interval-analysis", command)
+        self.assertIn("--interval-analysis-simplify", command)
+        self.assertNotIn("--verbosity", command)
+        self.assertNotIn("--print-stack-traces", command)
+
     def test_debug_profile_keeps_verbose_diagnostics(self) -> None:
         runner = ESBMCRunner(ESBMCConfig())
         command = runner.build_command(Path("harness.c"), unwind=4, profile="debug")

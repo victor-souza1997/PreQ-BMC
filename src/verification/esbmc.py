@@ -19,6 +19,7 @@ LOGGER = get_logger(__name__)
 ESBMCProfile = Literal[
     "fast",
     "paper-fast",
+    "paper-z3",
     "preimage",
     "safety",
     "overflow",
@@ -130,6 +131,8 @@ class ESBMCRunner:
         Enables safety-oriented checks useful for the paper.
       overflow:
         Focuses on arithmetic overflow checks.
+      paper-z3:
+        Low-noise paper profile using Z3 for formulas where Bitwuzla stalls.
     """
 
     def __init__(self, config: ESBMCConfig | None = None) -> None:
@@ -168,6 +171,7 @@ class ESBMCRunner:
         profile: ESBMCProfile,
     ) -> tuple[str, ...]:
         executable = resolve_esbmc_executable(self.config.executable) or self.config.executable
+        solver_flag = "--z3" if profile == "paper-z3" else "--bitwuzla"
         command: list[str] = [
             executable,
             str(c_file),
@@ -175,7 +179,7 @@ class ESBMCRunner:
             "main",
             "--unwind",
             str(unwind),
-            "--bitwuzla",
+            solver_flag,
             "--bv",
             "--timeout",
             str(self.config.timeout_seconds),
@@ -184,7 +188,7 @@ class ESBMCRunner:
         if self.config.memlimit:
             command.extend(["--memlimit", str(self.config.memlimit)])
 
-        if profile == "paper-fast":
+        if profile in ("paper-fast", "paper-z3"):
             command.extend(
                 [
                     "--interval-analysis",

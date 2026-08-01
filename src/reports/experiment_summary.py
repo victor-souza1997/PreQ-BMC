@@ -337,6 +337,23 @@ def _guarantee_level(
             "transfer_preconditions": preconditions,
         }
 
+    if final_status in {"TIMEOUT", "MEMOUT", "UNKNOWN"} or contract_status in {
+        "TIMEOUT",
+        "MEMOUT",
+        "UNKNOWN",
+    }:
+        return {
+            "guarantee_level": "unknown",
+            "transfer_preconditions": {
+                "contracts_verified": contract_verified,
+                "fidelity_by_construction": _fidelity_by_construction(pipeline_summary),
+                "chaining_ok": _chaining_verified_for_transfer(pipeline_summary),
+                "no_saturation_required": _contract_harnesses_require_no_saturation(pipeline_summary),
+                "no_saturation_verified_if_required": False,
+                "no_saturation_continue_on_unknown": _no_saturation_continue_on_unknown(pipeline_summary),
+            },
+        }
+
     if (
         final_status in {"FAILED", "MARGIN_TOO_SMALL", "VACUOUS"}
         or contract_status == "FAILED"
@@ -486,12 +503,40 @@ def build_experiment_summary(
     )
     if refined_e2e_controls is not None:
         refined_status_controls = refined_e2e_controls
-    formal_pipeline_status = str(formal_synthesis.get("final_status", "UNKNOWN"))
-    refined_pipeline_status = str(synthesis.get("final_status", "UNKNOWN"))
-    if formal_pipeline_status in {"MARGIN_TOO_SMALL", "VACUOUS"}:
+    formal_pipeline_status_value = formal_synthesis.get("final_status")
+    refined_pipeline_status_value = synthesis.get("final_status")
+    formal_pipeline_status = (
+        str(formal_pipeline_status_value)
+        if formal_pipeline_status_value is not None
+        else None
+    )
+    refined_pipeline_status = (
+        str(refined_pipeline_status_value)
+        if refined_pipeline_status_value is not None
+        else None
+    )
+    terminal_pipeline_statuses = {
+        "FAILED",
+        "TIMEOUT",
+        "MEMOUT",
+        "UNKNOWN",
+        "MARGIN_TOO_SMALL",
+        "VACUOUS",
+    }
+    if formal_pipeline_status in terminal_pipeline_statuses:
         formal_status_controls["final_status"] = formal_pipeline_status
-    if refined_pipeline_status in {"MARGIN_TOO_SMALL", "VACUOUS"}:
+        if (
+            formal_status_controls.get("contract_status") == "UNKNOWN"
+            and formal_pipeline_status in {"FAILED", "TIMEOUT", "MEMOUT"}
+        ):
+            formal_status_controls["contract_status"] = formal_pipeline_status
+    if refined_pipeline_status in terminal_pipeline_statuses:
         refined_status_controls["final_status"] = refined_pipeline_status
+        if (
+            refined_status_controls.get("contract_status") == "UNKNOWN"
+            and refined_pipeline_status in {"FAILED", "TIMEOUT", "MEMOUT"}
+        ):
+            refined_status_controls["contract_status"] = refined_pipeline_status
     formal_guarantee_controls = _guarantee_level(
         pipeline_summary=pipeline_summary,
         status_controls=formal_status_controls,

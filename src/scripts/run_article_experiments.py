@@ -900,7 +900,13 @@ def main(argv: list[str] | None = None) -> None:
         output_dir = output_root / str(run["name"])
         if run.get("_skip_reason"):
             if not args.dry_run:
-                _write_skipped(run, output_dir, str(run["_skip_reason"]))
+                if _has_existing_output(output_dir):
+                    print(
+                        f"selection-skip-preserve-existing {run['name']} at {output_dir}",
+                        flush=True,
+                    )
+                else:
+                    _write_skipped(run, output_dir, str(run["_skip_reason"]))
             continue
         if args.max_runs is not None and executed >= args.max_runs:
             if not args.dry_run:

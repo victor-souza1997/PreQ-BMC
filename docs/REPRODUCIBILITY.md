@@ -164,7 +164,7 @@ Block-wise ESBMC keys:
 - `blockwise_fail_fast`: reject a shared `<Q,I,F>` candidate after the first non-verified block.
 - `blockwise_run_all_blocks_on_failure`: diagnostic mode that runs all blocks even after a block failure.
 - `esbmc_jobs`: number of ESBMC jobs. Use `1` for reproducible, memory-safe default runs.
-- `esbmc_profile`: `paper-fast`, `debug`, `fast`, `preimage`, `safety`, or `overflow`.
+- `esbmc_profile`: `paper-fast` uses Bitwuzla, while `paper-z3` uses Z3 with the same low-noise interval-analysis and resource-control flags. The diagnostic profiles are `debug`, `fast`, `preimage`, `safety`, and `overflow`. Solver profiles do not change the harness property; record the selected profile when comparing runtimes.
 - `esbmc_timeout_seconds`: per-call ESBMC timeout.
 - `esbmc_memlimit`: ESBMC memory limit, such as `6g` or `20g`.
 

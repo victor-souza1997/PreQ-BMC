@@ -263,6 +263,19 @@ class ExperimentSummaryGuaranteeLevelTest(unittest.TestCase):
         self.assertEqual(summary["final_status"], "TIMEOUT")
         self.assertEqual(summary["guarantee_level"], "unknown")
 
+    def test_layer_contract_timeout_remains_explicit(self) -> None:
+        summary = _summary(
+            layers=[],
+            quality_accepted=False,
+            pipeline_final_status="TIMEOUT",
+        )
+
+        self.assertEqual(summary["formal_only"]["final_status"], "TIMEOUT")
+        self.assertEqual(summary["formal_only"]["contract_status"], "TIMEOUT")
+        self.assertEqual(summary["formal_only"]["guarantee_level"], "unknown")
+        self.assertEqual(summary["quality_refined"]["final_status"], "TIMEOUT")
+        self.assertEqual(summary["quality_refined"]["guarantee_level"], "unknown")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -97,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--esbmc_profile",
         dest="esbmc_profile",
         default="paper-fast",
-        choices=["paper-fast", "debug", "fast", "preimage", "safety", "overflow"],
+        choices=["paper-fast", "paper-z3", "debug", "fast", "preimage", "safety", "overflow"],
     )
     parser.add_argument(
         "--esbmc-timeout",
