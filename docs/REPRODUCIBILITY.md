@@ -209,8 +209,19 @@ Command-line overrides on `preqbmc reproduce` can force several settings across 
 - `--cex-feedback {off,filter,filter+jump}`;
 - `--harness-scope {layer,network}`;
 - `--e2e-invariants` or `--no-e2e-invariants`;
+- `--margin-cuts {off,on}` to control sound MILP directional invariants in the
+  derived output query; the derived mode defaults to `on`;
+- `--e2e-fallback {off,on}` to control the one-shot deployed-network query after
+  an inconclusive derived output query; the derived mode defaults to `on`;
 - `--resume` to reuse successful existing runs, or `--force` to overwrite an existing run directory;
 - `--only`, `--skip`, `--max-runs`, and `--include-disabled`.
+
+An analytical output-margin failure is only an incomplete abstraction result.
+The pipeline now queries the exact deployed output layer over one shared hidden
+vector and reports unresolved solver outcomes as `MARGIN_INCONCLUSIVE`. If the
+optional E2E fallback verifies, the final result is `VERIFIED` and tables record
+`composition_path=e2e_fallback`; direct network runs use `network_e2e`, while
+successful layer paths use `layer_analytic` or `layer_exact_output`.
 
 ## 5. Manual Single Run
 

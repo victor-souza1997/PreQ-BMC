@@ -398,6 +398,12 @@ def _method_row(
         "normalized_input_epsilon": normalized_input_epsilon,
         "method": method,
         "mode": _reporting_mode(run_config, pipeline),
+        "composition_path": _coalesce(
+            section.get("composition_path"),
+            experiment.get("composition_path"),
+            pipeline.get("composition_path"),
+            "layer_contracts",
+        ),
         "status": run_status.get("status", "success" if experiment else "failed"),
         "final_status": final_status,
         "guarantee_level": guarantee_level,
@@ -496,7 +502,7 @@ def _drop(source: Any, target: Any) -> Any:
 
 ALL_FIELDS = [
     "run_name", "dataset", "arch", "sample_id", "input_epsilon", "normalized_input_epsilon",
-    "method", "mode", "status", "final_status", "contract_status", "contract_verified",
+    "method", "mode", "composition_path", "status", "final_status", "contract_status", "contract_verified",
     "no_saturation_status", "no_saturation_verified", "formal_success", "deployment_success",
     "full_success", "python_c_exact_match", "float32_accuracy", "quantized_keras_accuracy",
     "python_fixed_accuracy", "c_fixed_accuracy", "accuracy_drop_float_to_keras_quantized",
@@ -542,6 +548,7 @@ def _bitwidth_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "input_epsilon": row.get("input_epsilon"),
                     "normalized_input_epsilon": row.get("normalized_input_epsilon"),
                     "method": row.get("method"),
+                    "composition_path": row.get("composition_path"),
                     "layer_index": index,
                     "Q": q,
                     "I": i,
@@ -579,6 +586,7 @@ def _success_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "sample_id": row.get("sample_id"),
             "method": row.get("method"),
             "mode": row.get("mode"),
+            "composition_path": row.get("composition_path"),
             "input_epsilon": row.get("input_epsilon"),
             "formal_success": row.get("formal_success"),
             "deployment_success": row.get("deployment_success"),
@@ -596,13 +604,19 @@ def _success_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _mrr_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[tuple[Any, Any, Any, Any], list[dict[str, Any]]] = {}
+    grouped: dict[tuple[Any, Any, Any, Any, Any], list[dict[str, Any]]] = {}
     for row in rows:
-        key = (row.get("dataset"), row.get("arch"), row.get("sample_id"), row.get("method"))
+        key = (
+            row.get("dataset"),
+            row.get("arch"),
+            row.get("sample_id"),
+            row.get("method"),
+            row.get("composition_path"),
+        )
         grouped.setdefault(key, []).append(row)
 
     output: list[dict[str, Any]] = []
-    for (dataset, arch, sample_id, method), group in grouped.items():
+    for (dataset, arch, sample_id, method, composition_path), group in grouped.items():
         eps_values = sorted({_num(row.get("input_epsilon")) for row in group if _num(row.get("input_epsilon")) is not None})
         if len(eps_values) < 2:
             continue
@@ -628,6 +642,7 @@ def _mrr_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "arch": arch,
                 "sample_id": sample_id,
                 "method": method,
+                "composition_path": composition_path,
                 "eps_values_tested": eps_values,
                 "eps_verified": sorted(set(verified)),
                 "eps_failed": sorted(set(failed)),
@@ -642,7 +657,7 @@ def _mrr_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _implementation_gap_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     fields = [
-        "run_name", "dataset", "arch", "sample_id", "method", "input_epsilon",
+        "run_name", "dataset", "arch", "sample_id", "method", "composition_path", "input_epsilon",
         "max_saturation_rate", "mean_saturation_rate", "mismatch_rate_vs_keras",
         "python_c_exact_match", "max_abs_logit_error", "mean_abs_logit_error",
         "no_saturation_status",
@@ -662,6 +677,7 @@ def _ablation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "input_epsilon": row.get("input_epsilon"),
                 "mode": mode,
                 "method": row.get("method"),
+                "composition_path": row.get("composition_path"),
                 "blockwise_enabled": row.get("blockwise_enabled"),
                 "refinement_enabled": row.get("method") == "quality_refined",
                 "formal_verification_enabled": mode != "naive_uniform_8bit_fixed",
@@ -687,7 +703,7 @@ def _summary_key_value(value: Any) -> str:
     return "" if value is None else str(value)
 
 
-def _summary_key(row: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+def _summary_key(row: dict[str, Any]) -> tuple[str, str, str, str, str, str, str]:
     return (
         _summary_key_value(row.get("dataset")),
         _summary_key_value(row.get("arch")),
@@ -695,11 +711,12 @@ def _summary_key(row: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
         _summary_key_value(row.get("normalized_input_epsilon")),
         _summary_key_value(row.get("method")),
         _summary_key_value(row.get("mode") or "full_pipeline"),
+        _summary_key_value(row.get("composition_path") or "layer_contracts"),
     )
 
 
-def _group_for_summary(rows: list[dict[str, Any]]) -> dict[tuple[str, str, str, str, str, str], list[dict[str, Any]]]:
-    grouped: dict[tuple[str, str, str, str, str, str], list[dict[str, Any]]] = {}
+def _group_for_summary(rows: list[dict[str, Any]]) -> dict[tuple[str, str, str, str, str, str, str], list[dict[str, Any]]]:
+    grouped: dict[tuple[str, str, str, str, str, str, str], list[dict[str, Any]]] = {}
     for row in rows:
         grouped.setdefault(_summary_key(row), []).append(row)
     return grouped
@@ -715,6 +732,7 @@ def _summary_base(group: list[dict[str, Any]]) -> dict[str, Any]:
         "normalized_input_epsilon": row.get("normalized_input_epsilon"),
         "method": row.get("method"),
         "mode": row.get("mode") or "full_pipeline",
+        "composition_path": row.get("composition_path") or "layer_contracts",
         "n_regions": len(group),
     }
 
@@ -891,7 +909,7 @@ def _runtime_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _delta_star_summary_rows(mrr_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     for row in mrr_rows:
         if _num(row.get("mrr_discrete")) is None:
             continue
@@ -899,6 +917,7 @@ def _delta_star_summary_rows(mrr_rows: list[dict[str, Any]]) -> list[dict[str, A
             _summary_key_value(row.get("dataset")),
             _summary_key_value(row.get("arch")),
             _summary_key_value(row.get("method")),
+            _summary_key_value(row.get("composition_path") or "layer_contracts"),
         )
         grouped.setdefault(key, []).append(row)
 
@@ -912,6 +931,7 @@ def _delta_star_summary_rows(mrr_rows: list[dict[str, Any]]) -> list[dict[str, A
                 "dataset": row.get("dataset"),
                 "arch": row.get("arch"),
                 "method": row.get("method"),
+                "composition_path": row.get("composition_path") or "layer_contracts",
                 "n_regions": len(group),
                 "delta_star_median": _median(values),
                 "delta_star_iqr": _iqr(values),
@@ -927,16 +947,17 @@ def _preferred_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return quality_rows or rows
 
 
-def _index_by_summary_key(rows: list[dict[str, Any]]) -> dict[tuple[str, str, str, str, str, str], dict[str, Any]]:
+def _index_by_summary_key(rows: list[dict[str, Any]]) -> dict[tuple[str, str, str, str, str, str, str], dict[str, Any]]:
     return {_summary_key(row): row for row in rows}
 
 
-def _index_delta_rows(rows: list[dict[str, Any]]) -> dict[tuple[str, str, str], dict[str, Any]]:
+def _index_delta_rows(rows: list[dict[str, Any]]) -> dict[tuple[str, str, str, str], dict[str, Any]]:
     return {
         (
             _summary_key_value(row.get("dataset")),
             _summary_key_value(row.get("arch")),
             _summary_key_value(row.get("method")),
+            _summary_key_value(row.get("composition_path") or "layer_contracts"),
         ): row
         for row in rows
     }
@@ -957,6 +978,7 @@ def _compact_main_summary_rows(
         output.append(
             {
                 "benchmark": region.get("benchmark"),
+                "composition_path": region.get("composition_path"),
                 "epsilon": region.get("input_epsilon"),
                 "N": region.get("n_regions"),
                 "certified_fraction": _fmt_number(region.get("certified_fraction")),
@@ -974,12 +996,13 @@ def _compact_implementation_gap_rows(
     delta_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     delta_by_key = _index_delta_rows(delta_rows)
-    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     for row in rows:
         key = (
             _summary_key_value(row.get("dataset")),
             _summary_key_value(row.get("arch")),
             _summary_key_value(row.get("method")),
+            _summary_key_value(row.get("composition_path") or "layer_contracts"),
         )
         grouped.setdefault(key, []).append(row)
 
@@ -991,6 +1014,7 @@ def _compact_implementation_gap_rows(
             {
                 "benchmark": f"{row.get('dataset')}/{row.get('arch')}",
                 "method": row.get("method"),
+                "composition_path": row.get("composition_path") or "layer_contracts",
                 "N": len(group),
                 "Keras-Q_acc": _fmt_mean_std(
                     _mean(_values(group, "quantized_keras_accuracy")),
@@ -1012,12 +1036,13 @@ def _compact_implementation_gap_rows(
 
 def _compact_scalability_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     selected_rows = [row for row in rows if row.get("method") == "quality_refined"] or rows
-    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     for row in selected_rows:
         key = (
             _summary_key_value(row.get("dataset")),
             _summary_key_value(row.get("arch")),
             _summary_key_value(row.get("mode") or "full_pipeline"),
+            _summary_key_value(row.get("composition_path") or "layer_contracts"),
         )
         grouped.setdefault(key, []).append(row)
 
@@ -1033,6 +1058,7 @@ def _compact_scalability_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]
             {
                 "arch": f"{row.get('dataset')}/{row.get('arch')}",
                 "mode": row.get("mode") or "full_pipeline",
+                "composition_path": row.get("composition_path") or "layer_contracts",
                 "N": n_regions,
                 "cert_fraction": _fmt_number(certified_count / n_regions if n_regions else ""),
                 "max_neurons_query": _fmt_number(_max_numeric(group, "largest_neurons_per_query"), digits=0),
@@ -1066,6 +1092,7 @@ def _write_compact_latex_tables(output_root: Path, tables: dict[str, list[dict[s
             main_rows,
             [
                 ("Benchmark", "benchmark"),
+                ("Path", "composition_path"),
                 ("epsilon", "epsilon"),
                 ("N", "N"),
                 ("certified", "certified_fraction"),
@@ -1081,6 +1108,7 @@ def _write_compact_latex_tables(output_root: Path, tables: dict[str, list[dict[s
             [
                 ("Benchmark", "benchmark"),
                 ("Method", "method"),
+                ("Path", "composition_path"),
                 ("N", "N"),
                 ("Keras-Q acc.", "Keras-Q_acc"),
                 ("C acc.", "C_acc"),
@@ -1097,6 +1125,7 @@ def _write_compact_latex_tables(output_root: Path, tables: dict[str, list[dict[s
             [
                 ("Arch", "arch"),
                 ("Mode", "mode"),
+                ("Path", "composition_path"),
                 ("N", "N"),
                 ("cert.", "cert_fraction"),
                 ("max neurons/query", "max_neurons_query"),
@@ -1293,6 +1322,7 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
     quality_rows = [
         {field: row.get(field) for field in [
             "run_name", "dataset", "arch", "sample_id", "method", "input_epsilon",
+            "composition_path",
             "float32_accuracy", "quantized_keras_accuracy", "python_fixed_accuracy",
             "c_fixed_accuracy", "accuracy_drop_float_to_keras_quantized",
             "accuracy_drop_keras_quantized_to_python_fixed",
@@ -1308,6 +1338,7 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
     esbmc_rows = [
         {field: row.get(field) for field in [
             "run_name", "dataset", "arch", "sample_id", "method", "input_epsilon",
+            "composition_path",
             "esbmc_verified_count", "esbmc_failed_count", "esbmc_timeout_count",
             "esbmc_memout_count", "esbmc_unknown_count", "esbmc_total_count",
             "timeout_rate", "memout_rate", "unknown_rate",
@@ -1413,7 +1444,7 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
 
 
 QUALITY_FIELDS = [
-    "run_name", "dataset", "arch", "sample_id", "method", "input_epsilon",
+    "run_name", "dataset", "arch", "sample_id", "method", "composition_path", "input_epsilon",
     "float32_accuracy", "quantized_keras_accuracy", "python_fixed_accuracy", "c_fixed_accuracy",
     "accuracy_drop_float_to_keras_quantized", "accuracy_drop_keras_quantized_to_python_fixed",
     "accuracy_drop_keras_quantized_to_c_fixed", "mismatch_rate_vs_keras", "python_c_exact_match",
@@ -1422,16 +1453,16 @@ QUALITY_FIELDS = [
 ]
 BITWIDTH_FIELDS = [
     "run_name", "dataset", "arch", "sample_id", "input_epsilon", "normalized_input_epsilon",
-    "method", "layer_index", "Q", "I", "F", "total_bits", "integer_bits", "fractional_bits",
+    "method", "composition_path", "layer_index", "Q", "I", "F", "total_bits", "integer_bits", "fractional_bits",
 ]
 SUCCESS_FIELDS = [
-    "run_name", "dataset", "arch", "sample_id", "method", "mode", "input_epsilon",
+    "run_name", "dataset", "arch", "sample_id", "method", "mode", "composition_path", "input_epsilon",
     "formal_success", "deployment_success", "full_success", "no_saturation_status",
     "final_status", "guarantee_level", "failure_reason", "failed_layer", "failed_block",
     "failed_property",
 ]
 ESBMC_FIELDS = [
-    "run_name", "dataset", "arch", "sample_id", "method", "input_epsilon",
+    "run_name", "dataset", "arch", "sample_id", "method", "composition_path", "input_epsilon",
     "esbmc_verified_count", "esbmc_failed_count", "esbmc_timeout_count", "esbmc_memout_count",
     "esbmc_unknown_count", "esbmc_total_count", "timeout_rate", "memout_rate", "unknown_rate",
 ]
@@ -1448,16 +1479,16 @@ SMT_SUMMARY_FIELDS = [
     "max_assert_count", "max_parenthesis_depth", "max_query_time_seconds", "status",
 ]
 MRR_FIELDS = [
-    "dataset", "arch", "sample_id", "method", "eps_values_tested", "eps_verified", "eps_failed",
+    "dataset", "arch", "sample_id", "method", "composition_path", "eps_values_tested", "eps_verified", "eps_failed",
     "mrr_discrete", "largest_failed_eps", "status_at_largest_eps", "total_runtime_seconds",
 ]
 IMPLEMENTATION_GAP_FIELDS = [
-    "run_name", "dataset", "arch", "sample_id", "method", "input_epsilon", "max_saturation_rate",
+    "run_name", "dataset", "arch", "sample_id", "method", "composition_path", "input_epsilon", "max_saturation_rate",
     "mean_saturation_rate", "mismatch_rate_vs_keras", "python_c_exact_match", "max_abs_logit_error",
     "mean_abs_logit_error", "no_saturation_status",
 ]
 ABLATION_FIELDS = [
-    "dataset", "arch", "sample_id", "input_epsilon", "mode", "method", "blockwise_enabled",
+    "dataset", "arch", "sample_id", "input_epsilon", "mode", "method", "composition_path", "blockwise_enabled",
     "refinement_enabled", "formal_verification_enabled", "status", "total_runtime_seconds",
     "esbmc_time_seconds", "timeout_rate", "memout_rate", "quantized_keras_accuracy",
     "python_fixed_accuracy", "c_fixed_accuracy", "max_saturation_rate", "mismatch_rate_vs_keras",
@@ -1467,7 +1498,7 @@ FAILED_RUN_FIELDS = [
     "started_at", "finished_at", "elapsed_seconds", "output_dir", "error_message",
 ]
 REGION_CERTIFICATION_FIELDS = [
-    "benchmark", "dataset", "arch", "input_epsilon", "normalized_input_epsilon", "method", "mode",
+    "benchmark", "dataset", "arch", "input_epsilon", "normalized_input_epsilon", "method", "mode", "composition_path",
     "n_regions", "certified_count", "certified_fraction", "L3_count", "L2_count", "L1_count",
     "L0_count", "timeout_count", "memout_count", "unknown_count", "bits_per_param_mean",
     "bits_per_param_std", "size_vs_FP32_mean", "size_vs_FP32_std",
@@ -1475,7 +1506,7 @@ REGION_CERTIFICATION_FIELDS = [
     "max_input_dim_query", "max_estimated_macs_query",
 ]
 DEPLOYMENT_QUALITY_SUMMARY_FIELDS = [
-    "benchmark", "dataset", "arch", "input_epsilon", "normalized_input_epsilon", "method", "mode",
+    "benchmark", "dataset", "arch", "input_epsilon", "normalized_input_epsilon", "method", "mode", "composition_path",
     "n_regions", "quantized_keras_accuracy_mean", "quantized_keras_accuracy_std",
     "python_fixed_accuracy_mean", "python_fixed_accuracy_std", "c_fixed_accuracy_mean",
     "c_fixed_accuracy_std", "mismatch_rate_vs_keras_mean", "mismatch_rate_vs_keras_std",
@@ -1485,7 +1516,7 @@ DEPLOYMENT_QUALITY_SUMMARY_FIELDS = [
     "mean_saturation_rate_std", "python_c_exact_rate",
 ]
 RUNTIME_SUMMARY_FIELDS = [
-    "benchmark", "dataset", "arch", "input_epsilon", "normalized_input_epsilon", "method", "mode",
+    "benchmark", "dataset", "arch", "input_epsilon", "normalized_input_epsilon", "method", "mode", "composition_path",
     "n_regions", "total_runtime_seconds_median", "total_runtime_seconds_iqr",
     "total_esbmc_time_seconds_median", "total_esbmc_time_seconds_iqr",
     "number_of_esbmc_calls_median", "number_of_esbmc_calls_iqr", "number_of_esbmc_calls_sum",
@@ -1494,7 +1525,7 @@ RUNTIME_SUMMARY_FIELDS = [
     "memout_count", "unknown_count", "timeout_memout_rate",
 ]
 DELTA_STAR_SUMMARY_FIELDS = [
-    "benchmark", "dataset", "arch", "method", "n_regions", "delta_star_median", "delta_star_iqr",
+    "benchmark", "dataset", "arch", "method", "composition_path", "n_regions", "delta_star_median", "delta_star_iqr",
     "delta_star_min", "delta_star_max",
 ]
 

@@ -38,6 +38,7 @@ def export_paper_tables(experiment_summary: dict[str, Any], output_dir: Path) ->
             "sample_id",
             "eps",
             "method",
+            "composition_path",
             "Q",
             "I",
             "F",
@@ -88,6 +89,7 @@ def export_paper_tables(experiment_summary: dict[str, Any], output_dir: Path) ->
             "sample_id",
             "eps",
             "method",
+            "composition_path",
             "quantized_keras_accuracy",
             "python_fixed_accuracy",
             "c_fixed_accuracy",
@@ -112,6 +114,7 @@ def export_paper_tables(experiment_summary: dict[str, Any], output_dir: Path) ->
             "sample_id",
             "eps",
             "method",
+            "composition_path",
             "num_layers",
             "num_parameters",
             "float_parameter_memory_bytes",
@@ -124,8 +127,18 @@ def export_paper_tables(experiment_summary: dict[str, Any], output_dir: Path) ->
             "c_shared_library_size_bytes",
         ],
         [
-            _resource_row(benchmark, "formal_only", formal.get("resource_metrics", {})),
-            _resource_row(benchmark, "quality_refined", refined.get("resource_metrics", {})),
+            _resource_row(
+                benchmark,
+                "formal_only",
+                formal.get("resource_metrics", {}),
+                formal.get("composition_path", "layer_contracts"),
+            ),
+            _resource_row(
+                benchmark,
+                "quality_refined",
+                refined.get("resource_metrics", {}),
+                refined.get("composition_path", "layer_contracts"),
+            ),
         ],
     )
 
@@ -137,6 +150,7 @@ def export_paper_tables(experiment_summary: dict[str, Any], output_dir: Path) ->
             "sample_id",
             "eps",
             "step",
+            "composition_path",
             "configuration",
             "accepted",
             "quality_failures",
@@ -147,6 +161,7 @@ def export_paper_tables(experiment_summary: dict[str, Any], output_dir: Path) ->
             {
                 **_benchmark_cells(benchmark),
                 "step": step.get("step"),
+                "composition_path": refined.get("composition_path", "layer_contracts"),
                 "configuration": step.get("configuration"),
                 "accepted": step.get("accepted"),
                 "quality_failures": step.get("quality_failures"),
@@ -163,6 +178,7 @@ def export_paper_tables(experiment_summary: dict[str, Any], output_dir: Path) ->
             "dataset",
             "arch",
             "method",
+            "composition_path",
             "layer_index",
             "Q",
             "I",
@@ -212,6 +228,7 @@ def _formal_refined_row(
     return {
         **_benchmark_cells(benchmark),
         "method": method,
+        "composition_path": section.get("composition_path", "layer_contracts"),
         "Q": section.get("Q"),
         "I": section.get("I"),
         "F": section.get("F"),
@@ -246,11 +263,26 @@ def _formal_refined_row(
 
 def _deployment_row(benchmark: dict[str, Any], method: str, section: dict[str, Any]) -> dict[str, Any]:
     deployment = section.get("deployment_metrics", {})
-    return {**_benchmark_cells(benchmark), "method": method, **deployment}
+    return {
+        **_benchmark_cells(benchmark),
+        "method": method,
+        "composition_path": section.get("composition_path", "layer_contracts"),
+        **deployment,
+    }
 
 
-def _resource_row(benchmark: dict[str, Any], method: str, resource: dict[str, Any]) -> dict[str, Any]:
-    return {**_benchmark_cells(benchmark), "method": method, **resource}
+def _resource_row(
+    benchmark: dict[str, Any],
+    method: str,
+    resource: dict[str, Any],
+    composition_path: str = "layer_contracts",
+) -> dict[str, Any]:
+    return {
+        **_benchmark_cells(benchmark),
+        "method": method,
+        "composition_path": composition_path,
+        **resource,
+    }
 
 
 def _fixed_point_semantics_rows(
@@ -277,6 +309,7 @@ def _fixed_point_semantics_rows(
             {
                 **_benchmark_cells(benchmark),
                 "method": method,
+                "composition_path": section.get("composition_path", "layer_contracts"),
                 "layer_index": layer_index,
                 "Q": layer.get("total_bits"),
                 "I": layer.get("integer_bits"),

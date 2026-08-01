@@ -8,7 +8,7 @@
       "This configuration is intentionally separate from the article experiment outputs.",
       "Derived mode propagates per-neuron integer error budgets through hidden-layer contracts.",
       "A vacuity sentinel is expected to return FAILED; that result demonstrates that the assumed input box has a witness.",
-      "This is a diagnostic sound-mode run, not a pre-certified example: MARGIN_TOO_SMALL is a valid outcome when the propagated error budget exhausts the class margin.",
+      "This is a diagnostic sound-mode run, not a pre-certified example: an analytical margin failure triggers the exact output query and then one E2E fallback; unresolved queries end as MARGIN_INCONCLUSIVE.",
       "The network-scope run verifies the deployed integer program directly and therefore does not use preimage contracts, chaining, or formal no-saturation harnesses.",
       "Formal no-saturation is disabled here to isolate contract chaining and vacuity checks; deployed harness arithmetic still includes clamping."
     ]

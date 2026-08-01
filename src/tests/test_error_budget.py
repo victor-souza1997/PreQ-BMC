@@ -163,7 +163,7 @@ class DerivedErrorBudgetTest(unittest.TestCase):
             source,
         )
 
-    def test_output_margin_reports_margin_too_small(self) -> None:
+    def test_output_margin_failure_requires_exact_query(self) -> None:
         encoder = GPEncoding.__new__(GPEncoding)
         encoder.property_spec = SimpleNamespace(target_label=0)
         encoder.targetCls = 0
@@ -201,8 +201,9 @@ class DerivedErrorBudgetTest(unittest.TestCase):
             )
 
         self.assertFalse(record["margin_ok"])
-        self.assertEqual(record["status"], "MARGIN_TOO_SMALL")
-        self.assertEqual(encoder.synthesis_final_status, "MARGIN_TOO_SMALL")
+        self.assertEqual(record["status"], "PENDING_EXACT_QUERY")
+        self.assertEqual(record["output_margin"], "analytic_fail_pending_exact_query")
+        self.assertEqual(encoder.synthesis_final_status, "UNKNOWN")
 
     def test_sentinel_failure_proves_box_is_nonvacuous(self) -> None:
         encoder = GPEncoding.__new__(GPEncoding)
@@ -243,6 +244,48 @@ class DerivedErrorBudgetTest(unittest.TestCase):
         self.assertEqual(record["status"], "NONVACUOUS")
         self.assertEqual(record["sentinel_status"], "FAILED")
         self.assertEqual(record["assumption_box_cardinality"], "6")
+
+    def test_last_hidden_preimage_deflation_expands_back_inside_preimage(self) -> None:
+        encoder = GPEncoding.__new__(GPEncoding)
+        hidden = SimpleNamespace(
+            layer_index=1,
+            int_bit=4,
+            preimage_source="milp_preimage",
+        )
+        encoder.dense_layers = [hidden]
+        encoder.error_budget_mode = "derived"
+        encoder.preimage_deflation_records = []
+        pre_low = np.asarray([-20, 5], dtype=np.int64)
+        pre_high = np.asarray([30, 25], dtype=np.int64)
+        budget = np.asarray([3, 4], dtype=np.int64)
+        with (
+            patch.object(
+                encoder,
+                "_layer_preimage_bounds_int",
+                return_value=(pre_low, pre_high),
+            ),
+            patch.object(
+                encoder,
+                "_candidate_error_budget_int",
+                return_value=(budget, np.asarray([0]), np.asarray([0]), 3),
+            ),
+        ):
+            low, high, emitted_budget, valid = (
+                encoder._candidate_contract_target_bounds_int(
+                    hidden,
+                    SimpleNamespace(),
+                    np.asarray([[1]], dtype=np.int64),
+                    3,
+                    record=True,
+                )
+            )
+
+        self.assertTrue(valid)
+        np.testing.assert_array_equal(low, pre_low + budget)
+        np.testing.assert_array_equal(high, pre_high - budget)
+        np.testing.assert_array_equal(low - emitted_budget, pre_low)
+        np.testing.assert_array_equal(high + emitted_budget, pre_high)
+        self.assertEqual(encoder.preimage_deflation_records[-1]["status"], "DEFLATED")
 
 
 if __name__ == "__main__":

@@ -286,6 +286,12 @@ def _pipeline_terminal_reason(pipeline_summary: dict[str, Any]) -> str | None:
     )
     if final_status == "MARGIN_TOO_SMALL":
         return "derived_output_margin_too_small"
+    if final_status == "MARGIN_INCONCLUSIVE":
+        return "derived_output_margin_inconclusive"
+    if final_status == "MARGIN_REFUTED":
+        return "reachable_output_margin_counterexample"
+    if final_status == "PREIMAGE_DEFLATION_EMPTY":
+        return "preimage_deflation_empty"
     if final_status == "VACUOUS":
         return "vacuous_assumption_box"
     return None
@@ -327,7 +333,11 @@ def _guarantee_level(
                 "guarantee_level": "unknown",
                 "transfer_preconditions": preconditions,
             }
-        if e2e_status in {"FAILED", "VACUOUS"} or not deployment_quality_accepted:
+        replay = end_to_end.get("counterexample_replay") or {}
+        replay_confirmed = bool(replay.get("python_replay_confirmed")) and bool(
+            replay.get("so_replay_confirmed")
+        )
+        if (e2e_status == "FAILED" and replay_confirmed) or e2e_status == "VACUOUS" or not deployment_quality_accepted:
             return {
                 "guarantee_level": "failed",
                 "transfer_preconditions": preconditions,
@@ -337,10 +347,18 @@ def _guarantee_level(
             "transfer_preconditions": preconditions,
         }
 
-    if final_status in {"TIMEOUT", "MEMOUT", "UNKNOWN"} or contract_status in {
+    if final_status in {
         "TIMEOUT",
         "MEMOUT",
         "UNKNOWN",
+        "MARGIN_INCONCLUSIVE",
+        "PREIMAGE_DEFLATION_EMPTY",
+    } or contract_status in {
+        "TIMEOUT",
+        "MEMOUT",
+        "UNKNOWN",
+        "MARGIN_INCONCLUSIVE",
+        "PREIMAGE_DEFLATION_EMPTY",
     }:
         return {
             "guarantee_level": "unknown",
@@ -355,7 +373,7 @@ def _guarantee_level(
         }
 
     if (
-        final_status in {"FAILED", "MARGIN_TOO_SMALL", "VACUOUS"}
+        final_status in {"FAILED", "MARGIN_TOO_SMALL", "MARGIN_REFUTED", "VACUOUS"}
         or contract_status == "FAILED"
         or not deployment_quality_accepted
     ):
@@ -521,6 +539,9 @@ def build_experiment_summary(
         "MEMOUT",
         "UNKNOWN",
         "MARGIN_TOO_SMALL",
+        "MARGIN_INCONCLUSIVE",
+        "MARGIN_REFUTED",
+        "PREIMAGE_DEFLATION_EMPTY",
         "VACUOUS",
     }
     if formal_pipeline_status in terminal_pipeline_statuses:
@@ -576,6 +597,7 @@ def build_experiment_summary(
         **formal_status_controls,
         **formal_guarantee_controls,
         **blockwise_controls,
+        "composition_path": pipeline_summary.get("composition_path", "layer_contracts"),
     }
 
     refined_section = {
@@ -599,6 +621,7 @@ def build_experiment_summary(
         **refined_status_controls,
         **refined_guarantee_controls,
         **blockwise_controls,
+        "composition_path": pipeline_summary.get("composition_path", "layer_contracts"),
     }
 
     return {
@@ -635,6 +658,9 @@ def build_experiment_summary(
         "contract_harness_semantics": pipeline_summary.get("contract_harness_semantics", {}),
         "contract_tolerance": pipeline_summary.get("contract_tolerance", {}),
         "output_margin_check": pipeline_summary.get("output_margin_check", {}),
+        "margin_cuts": pipeline_summary.get("margin_cuts", {}),
+        "preimage_provenance": pipeline_summary.get("preimage_provenance", {}),
+        "composition_path": pipeline_summary.get("composition_path", "layer_contracts"),
         "vacuity_check": pipeline_summary.get("vacuity_check", {}),
         "counterexamples": pipeline_summary.get("counterexamples", {}),
         "end_to_end_verification": pipeline_summary.get(

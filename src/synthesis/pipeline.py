@@ -98,6 +98,8 @@ class RobustnessPipelineConfig:
     cex_feedback: str = "off"
     harness_scope: str = "layer"
     e2e_invariants: bool = True
+    margin_cuts: bool | None = None
+    e2e_fallback: bool | None = None
     export_paper_tables: bool = True
     baseline_results_json: Path | None = None
 
@@ -1137,6 +1139,8 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         cex_feedback=str(config.cex_feedback),
         harness_scope=str(config.harness_scope),
         e2e_invariants=bool(config.e2e_invariants),
+        margin_cuts=config.margin_cuts,
+        e2e_fallback=config.e2e_fallback,
         esbmc=ESBMCConfig(
             timeout_seconds=max(1, int(config.esbmc_timeout_seconds)),
             memlimit=str(config.esbmc_memlimit),
@@ -1176,9 +1180,15 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         "contract_tolerance": synthesizer.contract_tolerance_summary(),
         "chaining_ok": synthesizer.chaining_summary(),
         "output_margin_check": synthesizer.output_margin_summary(),
+        "margin_cuts": synthesizer.margin_cut_summary(),
+        "preimage_provenance": synthesizer.preimage_provenance_summary(),
         "vacuity_check": synthesizer.vacuity_summary(),
         "counterexamples": synthesizer.counterexample_summary(),
         "end_to_end_verification": synthesizer.end_to_end_summary(),
+        "composition_path": str(synthesizer.composition_path),
+        "transfer_preconditions": {
+            "end_to_end": str(synthesizer.end_to_end_record.get("status", "NOT_RUN")) == "VERIFIED",
+        },
         "sample_label": sample_label,
         "predicted_label": predicted_label,
         "clean_margin": clean_margin,

@@ -83,6 +83,8 @@ class QuadapterConfig:
     cex_feedback: str = "off"
     harness_scope: str = "layer"
     e2e_invariants: bool = True
+    margin_cuts: bool | None = None
+    e2e_fallback: bool | None = None
 
     @classmethod
     def from_namespace(cls, args: Any) -> "QuadapterConfig":
@@ -128,6 +130,16 @@ class QuadapterConfig:
             cex_feedback=str(getattr(args, "cex_feedback", "off")).lower(),
             harness_scope=str(getattr(args, "harness_scope", "layer")).lower(),
             e2e_invariants=bool(getattr(args, "e2e_invariants", True)),
+            margin_cuts=(
+                None
+                if getattr(args, "margin_cuts", None) is None
+                else str(getattr(args, "margin_cuts")).lower() == "on"
+            ),
+            e2e_fallback=(
+                None
+                if getattr(args, "e2e_fallback", None) is None
+                else str(getattr(args, "e2e_fallback")).lower() == "on"
+            ),
         )
 
 
@@ -205,6 +217,7 @@ class LayerEncoding:
         self.relaxed_lb = np.zeros(layer_size, dtype=np.float32)
         self.relaxed_lb_expression = [1 for _ in range(layer_size)]
         self.relaxed_ub = np.zeros(layer_size, dtype=np.float32)
+        self.preimage_source = "deeppoly_forward_FALLBACK"
         self.relaxed_ub_expression = [1 for _ in range(layer_size)]
         self.actMode = np.zeros(layer_size, dtype=np.float32)
         self.bit_vars: list[Any] = []
@@ -318,6 +331,22 @@ class GPEncoding:
         if self.harness_scope not in {"layer", "network"}:
             raise ValueError("harness_scope must be one of: layer, network")
         self.e2e_invariants = bool(self.config.e2e_invariants)
+        self.margin_cuts = (
+            self.error_budget_mode == "derived"
+            if self.config.margin_cuts is None
+            else bool(self.config.margin_cuts)
+        )
+        self.e2e_fallback = (
+            self.error_budget_mode == "derived"
+            if self.config.e2e_fallback is None
+            else bool(self.config.e2e_fallback)
+        )
+        self.e2e_fallback_attempted = False
+        self.composition_path = (
+            "network_e2e" if self.harness_scope == "network" else "layer_contracts"
+        )
+        self.margin_cut_records: list[dict[str, Any]] = []
+        self.preimage_deflation_records: list[dict[str, Any]] = []
         self.esbmc_call_records: list[dict[str, Any]] = []
         self.esbmc_block_records: list[dict[str, Any]] = []
         self.esbmc_no_saturation_block_records: list[dict[str, Any]] = []
@@ -1001,6 +1030,7 @@ class GPEncoding:
                 )
             layer.relaxed_lb = arrays[f"relaxed_lb_{offset}"].astype(np.float32)
             layer.relaxed_ub = arrays[f"relaxed_ub_{offset}"].astype(np.float32)
+            layer.preimage_source = "milp_preimage"
 
         self.scaleValueSet = arrays["scale_values"].astype(np.float64).tolist()
         LOGGER.info("Loaded MILP preimage cache %s (%s)", self._preimage_cache_key(), metadata.get("format"))
@@ -1016,7 +1046,21 @@ class GPEncoding:
             if self.preimg_mode in {"milp", "comp"}:
                 scale_value = self.underPreImageMILP(in_layer_index, in_layer, cur_layer)
             if self.preimg_mode == "abstr" or (self.preimg_mode == "comp" and scale_value <= 0):
+                LOGGER.warning(
+                    "Layer %s is using DeepPoly/abstract preimage fallback instead of a MILP preimage.",
+                    in_layer.layer_index,
+                )
                 scale_value = self.underPreImageAbstr(in_layer_index, in_layer, cur_layer)
+                if scale_value > 0:
+                    in_layer.preimage_source = "deeppoly_forward_FALLBACK"
+            if scale_value <= 0:
+                LOGGER.warning(
+                    "Layer %s has no successful preimage solve; using forward DeepPoly bounds.",
+                    in_layer.layer_index,
+                )
+                in_layer.relaxed_lb = np.asarray(in_layer.lb, dtype=np.float32).copy()
+                in_layer.relaxed_ub = np.asarray(in_layer.ub, dtype=np.float32).copy()
+                in_layer.preimage_source = "deeppoly_forward_FALLBACK"
             self.scaleValueSet[in_layer.layer_index - 1] = scale_value
             cur_layer = in_layer
 
@@ -1166,6 +1210,8 @@ class GPEncoding:
                 )
                 if in_layer.relaxed_ub[in_index] <= 0:
                     in_layer.relaxed_ub_expression[in_index] = 0
+
+            in_layer.preimage_source = "milp_preimage"
 
             self.gp_model.remove(prop_cstr_ll)
             self.gp_model.remove(model_cstr_ll)
@@ -1364,6 +1410,7 @@ class GPEncoding:
                 )
 
                 is_output_layer = layer_index == len(non_input_layers) - 1
+                margin_record: dict[str, Any] | None = None
                 if self.error_budget_mode == "derived" and is_output_layer:
                     margin_record = self._record_output_margin_check(
                         cur_layer=cur_layer,
@@ -1373,15 +1420,6 @@ class GPEncoding:
                         all_bit=all_bit,
                         frac_bit=frac_bit,
                     )
-                    if not margin_record["margin_ok"]:
-                        terminal_statuses.append("MARGIN_TOO_SMALL")
-                        LOGGER.warning(
-                            "Rejecting output bits(Q=%s,F=%s): derived classification margin is too small.",
-                            all_bit,
-                            frac_bit,
-                        )
-                        frac_bit += 1
-                        continue
 
                 filtered = self._candidate_filtered_by_counterexample(
                     cur_layer=cur_layer,
@@ -1397,17 +1435,38 @@ class GPEncoding:
                     frac_bit += 1
                     continue
 
-                esbmc_result = self.verify_layer_with_esbmc(
-                    cur_layer=cur_layer,
-                    in_layer=in_layer,
-                    qu_w_int=qu_w_int,
-                    qu_b_int=qu_b_int,
-                    frac_bit=frac_bit,
-                    all_bit=all_bit,
-                    layer_index=layer_index,
-                )
+                if margin_record is not None and margin_record["analytic_margin_ok"]:
+                    esbmc_result = self._analytic_output_margin_result()
+                else:
+                    esbmc_result = self.verify_layer_with_esbmc(
+                        cur_layer=cur_layer,
+                        in_layer=in_layer,
+                        qu_w_int=qu_w_int,
+                        qu_b_int=qu_b_int,
+                        frac_bit=frac_bit,
+                        all_bit=all_bit,
+                        layer_index=layer_index,
+                    )
+                    if margin_record is not None:
+                        candidate_q = list(selected_q)
+                        candidate_f = list(selected_f)
+                        candidate_i = list(selected_i)
+                        candidate_q[layer_index] = int(all_bit)
+                        candidate_f[layer_index] = int(frac_bit)
+                        candidate_i[layer_index] = _export_integer_bits(int_bit)
+                        esbmc_result = self._resolve_output_margin_result(
+                            margin_record,
+                            esbmc_result,
+                            total_bits=candidate_q,
+                            fractional_bits=candidate_f,
+                            integer_bits=candidate_i,
+                        )
                 if esbmc_result.status != "VERIFIED":
-                    terminal_statuses.append(str(esbmc_result.status))
+                    terminal_statuses.append(
+                        str(margin_record.get("status", "MARGIN_INCONCLUSIVE"))
+                        if margin_record is not None
+                        else str(esbmc_result.status)
+                    )
                 counterexample = self._record_failed_counterexample(
                     result=esbmc_result,
                     cur_layer=cur_layer,
@@ -1511,8 +1570,12 @@ class GPEncoding:
             self.synthesis_final_status = "VERIFIED"
             return True, selected_q, selected_f, selected_i
 
-        if terminal_statuses and set(terminal_statuses) <= {"MARGIN_TOO_SMALL"}:
-            self.synthesis_final_status = "MARGIN_TOO_SMALL"
+        if terminal_statuses and set(terminal_statuses) <= {"MARGIN_INCONCLUSIVE"}:
+            self.synthesis_final_status = "MARGIN_INCONCLUSIVE"
+        elif "MARGIN_REFUTED" in terminal_statuses:
+            self.synthesis_final_status = "MARGIN_REFUTED"
+        elif terminal_statuses and set(terminal_statuses) <= {"PREIMAGE_DEFLATION_EMPTY"}:
+            self.synthesis_final_status = "PREIMAGE_DEFLATION_EMPTY"
         elif "TIMEOUT" in terminal_statuses:
             self.synthesis_final_status = "TIMEOUT"
         elif "MEMOUT" in terminal_statuses:
@@ -1576,6 +1639,7 @@ class GPEncoding:
             qu_w_int = quantize_int(cur_layer.layer_paras[0], q_bits, f_bits)
             qu_b_int = quantize_int(cur_layer.layer_paras[1], q_bits, f_bits)
             is_output_layer = cur_layer.layer_index == len(self.dense_layers) + 1
+            margin_record: dict[str, Any] | None = None
             if self.error_budget_mode == "derived" and is_output_layer:
                 margin_record = self._record_output_margin_check(
                     cur_layer=cur_layer,
@@ -1585,36 +1649,27 @@ class GPEncoding:
                     all_bit=q_bits,
                     frac_bit=f_bits,
                 )
-                if not margin_record["margin_ok"]:
-                    records.append(
-                        {
-                            "layer_index": int(layer_index),
-                            "total_bits": q_bits,
-                            "integer_bits": i_bits,
-                            "fractional_bits": f_bits,
-                            "status": "MARGIN_TOO_SMALL",
-                            "contract_status": "SKIPPED",
-                            "contract_verified": False,
-                            "no_saturation_formally_checked": False,
-                            "no_saturation_status": "SKIPPED",
-                            "no_saturation_verified": False,
-                            "deployment_quality_accepted": True,
-                            "final_status": "MARGIN_TOO_SMALL",
-                            "failure_type": "derived_output_margin_too_small",
-                            "output_margin": margin_record,
-                        }
-                    )
-                    return False, records
 
-            contract_result = self.verify_layer_with_esbmc(
-                cur_layer=cur_layer,
-                in_layer=in_layer,
-                qu_w_int=np.asarray(qu_w_int),
-                qu_b_int=np.asarray(qu_b_int),
-                frac_bit=f_bits,
-                all_bit=q_bits,
-                layer_index=layer_index,
-            )
+            if margin_record is not None and margin_record["analytic_margin_ok"]:
+                contract_result = self._analytic_output_margin_result()
+            else:
+                contract_result = self.verify_layer_with_esbmc(
+                    cur_layer=cur_layer,
+                    in_layer=in_layer,
+                    qu_w_int=np.asarray(qu_w_int),
+                    qu_b_int=np.asarray(qu_b_int),
+                    frac_bit=f_bits,
+                    all_bit=q_bits,
+                    layer_index=layer_index,
+                )
+                if margin_record is not None:
+                    contract_result = self._resolve_output_margin_result(
+                        margin_record,
+                        contract_result,
+                        total_bits=[int(value) for value in total_bits],
+                        fractional_bits=[int(value) for value in fractional_bits],
+                        integer_bits=[int(value) for value in integer_bits],
+                    )
             record: dict[str, Any] = {
                 "layer_index": int(layer_index),
                 "total_bits": q_bits,
@@ -1632,8 +1687,31 @@ class GPEncoding:
                 "resource_control": contract_result.resource_control,
             }
             if contract_result.status != "VERIFIED":
-                record["status"] = contract_result.status
-                record["final_status"] = "FAILED" if contract_result.status == "FAILED" else "UNKNOWN"
+                if margin_record is not None:
+                    margin_status = str(margin_record.get("status", "MARGIN_INCONCLUSIVE"))
+                    record["status"] = margin_status
+                    record["contract_status"] = margin_status
+                    record["failure_type"] = (
+                        "derived_output_margin_refuted"
+                        if margin_status == "MARGIN_REFUTED"
+                        else "derived_output_margin_inconclusive"
+                    )
+                    record["output_margin"] = margin_record
+                else:
+                    record["status"] = contract_result.status
+                    if contract_result.status == "PREIMAGE_DEFLATION_EMPTY":
+                        record["failure_type"] = "preimage_deflation_empty"
+                record["final_status"] = (
+                    "FAILED"
+                    if margin_record is None and contract_result.status == "FAILED"
+                    else "MARGIN_INCONCLUSIVE"
+                    if margin_record is not None and margin_record.get("status") != "MARGIN_REFUTED"
+                    else "MARGIN_REFUTED"
+                    if margin_record is not None
+                    else "PREIMAGE_DEFLATION_EMPTY"
+                    if contract_result.status == "PREIMAGE_DEFLATION_EMPTY"
+                    else "UNKNOWN"
+                )
                 record["no_saturation_status"] = "SKIPPED"
                 records.append(record)
                 return False, records
@@ -1945,6 +2023,71 @@ class GPEncoding:
             np.ceil(pre_hi * scale).astype(np.int64),
         )
 
+    def _candidate_contract_target_bounds_int(
+        self,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        weights_int: np.ndarray,
+        frac_bit: int,
+        *,
+        record: bool = False,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, bool]:
+        """Return the candidate hidden contract target and its emitted budget.
+
+        For the final hidden layer in derived mode, ``P`` is the property preimage
+        produced by the backward method. The hidden harness permits a deviation of
+        ``delta`` around its target interval. Emitting ``P deflated by delta`` makes
+        the proved guarantee ``(P deflated by delta) expanded by delta``, which is a
+        subset of ``P`` in exact integer arithmetic. No tolerance is weakened. If a
+        coordinate collapses, the candidate is rejected as
+        ``PREIMAGE_DEFLATION_EMPTY`` before ESBMC.
+        """
+
+        scale = 1 << int(frac_bit)
+        pre_low, pre_high = self._layer_preimage_bounds_int(cur_layer, scale)
+        budget, _, _, _ = self._candidate_error_budget_int(
+            cur_layer,
+            in_layer,
+            weights_int,
+            frac_bit,
+        )
+        is_last_hidden = (
+            cur_layer.layer_index == len(self.dense_layers)
+            and cur_layer.layer_index < len(self.dense_layers) + 1
+        )
+        if self.error_budget_mode == "derived" and is_last_hidden:
+            target_low = np.asarray(pre_low, dtype=np.int64) + np.asarray(budget, dtype=np.int64)
+            target_high = np.asarray(pre_high, dtype=np.int64) - np.asarray(budget, dtype=np.int64)
+            valid = bool(np.all(target_low <= target_high))
+            status = "DEFLATED" if valid else "PREIMAGE_DEFLATION_EMPTY"
+        else:
+            target_low = np.asarray(pre_low, dtype=np.int64)
+            target_high = np.asarray(pre_high, dtype=np.int64)
+            valid = True
+            status = "NOT_REQUIRED"
+
+        if record:
+            collapsed = np.flatnonzero(target_low > target_high)
+            self.preimage_deflation_records.append(
+                {
+                    "layer_index": int(cur_layer.layer_index - 1),
+                    "network_layer_index": int(cur_layer.layer_index),
+                    "preimage_source": str(
+                        getattr(cur_layer, "preimage_source", "deeppoly_forward_FALLBACK")
+                    ),
+                    "Q": int(frac_bit + int(cur_layer.int_bit)),
+                    "F": int(frac_bit),
+                    "status": status,
+                    "preimage_low_int": [int(value) for value in pre_low],
+                    "preimage_high_int": [int(value) for value in pre_high],
+                    "error_budget_int": [int(value) for value in budget],
+                    "target_low_int": [int(value) for value in target_low],
+                    "target_high_int": [int(value) for value in target_high],
+                    "collapsed_neurons": [int(value) for value in collapsed],
+                }
+            )
+        return target_low, target_high, np.asarray(budget, dtype=np.int64), valid
+
     def _contract_tolerance_int(
         self,
         pre_lo_int: np.ndarray,
@@ -2237,17 +2380,21 @@ class GPEncoding:
         """
 
         scale = 1 << int(frac_bit)
-        pre_lo_int, pre_hi_int = self._layer_preimage_bounds_int(cur_layer, scale)
         if self.error_budget_mode == "derived":
             if in_layer is None or weights_int is None:
                 raise ValueError("Derived chaining requires the input layer and quantized weights.")
-            tolerance_int, _, _, _ = self._candidate_error_budget_int(
-                cur_layer,
-                in_layer,
-                weights_int,
-                frac_bit,
+            pre_lo_int, pre_hi_int, tolerance_int, target_valid = (
+                self._candidate_contract_target_bounds_int(
+                    cur_layer,
+                    in_layer,
+                    weights_int,
+                    frac_bit,
+                )
             )
+            if not target_valid:
+                raise RuntimeError("Cannot chain an empty deflated preimage target.")
         else:
+            pre_lo_int, pre_hi_int = self._layer_preimage_bounds_int(cur_layer, scale)
             tolerance_int = self._contract_tolerance_int(pre_lo_int, pre_hi_int, scale)
 
         if self.error_budget_mode == "derived":
@@ -2362,7 +2509,14 @@ class GPEncoding:
         all_bit: int,
         frac_bit: int,
     ) -> dict[str, Any]:
-        """Check that the final real-semantics margin exceeds the derived budget."""
+        """Run the sufficient analytical output-margin pre-pass.
+
+        This check bounds each logit independently, so a pass is a sound proof but a
+        failure is only an abstraction artifact candidate. In particular, extrema for
+        the target and a competitor may come from different hidden vectors. Callers
+        must therefore send analytical failures to the exact deployed output harness
+        instead of rejecting the format.
+        """
 
         budget, assumed_low, assumed_high, frac_in = self._candidate_error_budget_int(
             cur_layer,
@@ -2427,14 +2581,395 @@ class GPEncoding:
             "guarantee_source": "exact_real_affine_over_propagated_assumption_box",
             "guarantee_low_int": [int(value) for value in guarantee_low],
             "guarantee_high_int": [int(value) for value in guarantee_high],
+            "analytic_margin_ok": bool(margin_ok),
             "margin_ok": bool(margin_ok),
-            "status": "VERIFIED" if margin_ok else "MARGIN_TOO_SMALL",
+            "output_margin": "analytic_pass" if margin_ok else "analytic_fail_pending_exact_query",
+            "composition_path": "layer_analytic" if margin_ok else None,
+            "status": "VERIFIED" if margin_ok else "PENDING_EXACT_QUERY",
             "class_margins": margins,
         }
         self.output_margin_records.append(record)
-        if not margin_ok:
-            self.synthesis_final_status = "MARGIN_TOO_SMALL"
+        if margin_ok:
+            self.composition_path = "layer_analytic"
         return record
+
+    @staticmethod
+    def _round_fraction_half_away_from_zero(value: Fraction) -> int:
+        if value >= 0:
+            return (2 * value.numerator + value.denominator) // (2 * value.denominator)
+        positive = -value
+        return -(
+            (2 * positive.numerator + positive.denominator)
+            // (2 * positive.denominator)
+        )
+
+    def _solve_margin_direction_milp(
+        self,
+        direction: np.ndarray,
+    ) -> tuple[float, float, float]:
+        """Bound one real output direction over the exact one-hidden-layer graph.
+
+        The MILP variables encode the original real input box, affine hidden
+        pre-activations, and exact ReLUs. DeepPoly pre-activation bounds provide the
+        finite big-M constants. The returned endpoints use each backend's global
+        objective bound and are rounded outward with ``nextafter``.
+        """
+
+        if len(self.dense_layers) != 1:
+            raise NotImplementedError("Margin-cut MILP currently supports one hidden layer.")
+        hidden = self.dense_layers[0]
+        weights = np.asarray(hidden.layer_paras[0], dtype=np.float64)
+        biases = np.asarray(hidden.layer_paras[1], dtype=np.float64)
+        low = np.asarray(self.x_low_real, dtype=np.float64).reshape(-1)
+        high = np.asarray(self.x_high_real, dtype=np.float64).reshape(-1)
+        pre_low = np.asarray(hidden.lb, dtype=np.float64).reshape(-1)
+        pre_high = np.asarray(hidden.ub, dtype=np.float64).reshape(-1)
+        if weights.shape != (hidden.layer_size, low.size):
+            raise ValueError("Hidden weights are not row-per-neuron for margin-cut MILP.")
+        if direction.shape != (hidden.layer_size,):
+            raise ValueError("Output direction does not match the last hidden layer.")
+        if not (
+            np.all(np.isfinite(low))
+            and np.all(np.isfinite(high))
+            and np.all(np.isfinite(pre_low))
+            and np.all(np.isfinite(pre_high))
+        ):
+            raise ValueError("Margin-cut MILP requires finite input and DeepPoly bounds.")
+
+        model = build_model(
+            self.solver,
+            "output_margin_direction",
+            threads=max(1, int(getattr(self.config, "gurobi_threads", 4))),
+            output_flag=0,
+        )
+        inputs = [
+            model.add_var(lb=float(lo), ub=float(hi), name=f"margin_x_{index}")
+            for index, (lo, hi) in enumerate(zip(low, high))
+        ]
+        hidden_values: list[Any] = []
+        hidden_bounds: list[tuple[float, float]] = []
+        for neuron, (row, bias, lo, hi) in enumerate(
+            zip(weights, biases, pre_low, pre_high)
+        ):
+            if float(lo) > float(hi):
+                raise ValueError("DeepPoly produced an invalid hidden pre-activation interval.")
+            pre = model.add_var(lb=float(lo), ub=float(hi), name=f"margin_pre_{neuron}")
+            model.add_constr(
+                pre == self._linear_combination(row, inputs, float(bias)),
+                name=f"margin_affine_{neuron}",
+            )
+            relu_low = max(0.0, float(lo))
+            relu_high = max(0.0, float(hi))
+            value = model.add_var(
+                lb=relu_low,
+                ub=relu_high,
+                name=f"margin_hidden_{neuron}",
+            )
+            if float(hi) <= 0.0:
+                model.add_constr(value == 0.0, name=f"margin_relu_zero_{neuron}")
+            elif float(lo) >= 0.0:
+                model.add_constr(value == pre, name=f"margin_relu_linear_{neuron}")
+            else:
+                active = model.add_var(
+                    lb=0.0,
+                    ub=1.0,
+                    vtype=GRB.BINARY,
+                    name=f"margin_relu_active_{neuron}",
+                )
+                model.add_constr(value >= pre, name=f"margin_relu_lower_pre_{neuron}")
+                model.add_constr(value >= 0.0, name=f"margin_relu_lower_zero_{neuron}")
+                model.add_constr(
+                    value <= pre - float(lo) * (1 - active),
+                    name=f"margin_relu_upper_pre_{neuron}",
+                )
+                model.add_constr(
+                    value <= float(hi) * active,
+                    name=f"margin_relu_upper_zero_{neuron}",
+                )
+            hidden_values.append(value)
+            hidden_bounds.append((relu_low, relu_high))
+
+        direction_low, direction_high = self._interval_linear_combination(
+            direction,
+            hidden_bounds,
+            0.0,
+        )
+        objective = model.add_var(
+            lb=float(direction_low),
+            ub=float(direction_high),
+            name="margin_direction_value",
+        )
+        model.add_constr(
+            objective == self._linear_combination(direction, hidden_values, 0.0),
+            name="margin_direction_definition",
+        )
+        started = time.monotonic()
+        model.set_objective(objective, GRB.MINIMIZE)
+        if model.optimize() != GRB.OPTIMAL:
+            raise RuntimeError("Margin-cut MILP minimization did not reach OPTIMAL.")
+        lower = math.nextafter(float(model.objective_bound()), -math.inf)
+        model.set_objective(objective, GRB.MAXIMIZE)
+        if model.optimize() != GRB.OPTIMAL:
+            raise RuntimeError("Margin-cut MILP maximization did not reach OPTIMAL.")
+        upper = math.nextafter(float(model.objective_bound()), math.inf)
+        return lower, upper, float(time.monotonic() - started)
+
+    def _margin_cut_bounds(
+        self,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        frac_bit: int,
+    ) -> list[dict[str, Any]]:
+        """Build sound integer cuts for decisive output directions.
+
+        For competitor ``k``, the real MILP bounds ``d_k*h_real`` where
+        ``d_k = V_real[k]-V_real[target]``. The output harness instead contains the
+        deployed hidden integer vector ``h_int`` and a quantized direction ``D_int``.
+        At product scale ``S_d*S_h`` the inherited hidden error contributes
+        ``S_d * sum_j |d_j|*delta_j``. Direction quantization contributes
+        ``sum_j |D_j-S_d*d_j|*max(|h_j|)``. Both exact rational sums are rounded
+        upward, while MILP endpoints are converted outward. Thus every reachable
+        deployed hidden vector satisfies each emitted cut; no robustness behavior is
+        assumed away.
+        """
+
+        if not self.margin_cuts or self.error_budget_mode != "derived":
+            return []
+        if self.property_spec.valid_labels or len(self.dense_layers) != 1:
+            self.margin_cut_records.append(
+                {
+                    "enabled": True,
+                    "status": "SKIPPED_UNSUPPORTED_PROPERTY_OR_DEPTH",
+                    "hidden_layers": int(len(self.dense_layers)),
+                }
+            )
+            return []
+
+        real_weights = np.asarray(cur_layer.layer_paras[0], dtype=np.float64)
+        real_biases = np.asarray(cur_layer.layer_paras[1], dtype=np.float64)
+        target = int(
+            self.property_spec.target_label
+            if self.property_spec.target_label is not None
+            else self.targetCls
+        )
+        if real_weights.shape != (cur_layer.layer_size, in_layer.layer_size):
+            raise ValueError("Output weights must use row-per-class orientation.")
+        center_hidden = np.asarray(in_layer.realVal, dtype=np.float64).reshape(-1)
+        if center_hidden.size != in_layer.layer_size:
+            raise ValueError("Center hidden activation is unavailable for orientation check.")
+        center_logits = real_weights @ center_hidden + real_biases
+        if int(np.argmax(center_logits)) != target:
+            raise ValueError("Output row orientation check disagrees with the target class.")
+
+        assumed_low, assumed_high, frac_in = self._assumption_box_int(
+            cur_layer,
+            in_layer,
+            frac_bit,
+        )
+        delta = np.asarray(in_layer.error_budget_int, dtype=object).reshape(-1)
+        if delta.size != in_layer.layer_size:
+            raise ValueError("Last hidden layer has no compatible derived error budget.")
+        direction_scale = 1 << int(frac_bit)
+        hidden_scale = 1 << int(frac_in)
+        max_abs_hidden = [
+            max(abs(int(lo)), abs(int(hi)))
+            for lo, hi in zip(assumed_low, assumed_high)
+        ]
+
+        records: list[dict[str, Any]] = []
+        for competitor in range(cur_layer.layer_size):
+            if competitor == target:
+                continue
+            direction = real_weights[competitor] - real_weights[target]
+            lower_real, upper_real, elapsed = self._solve_margin_direction_milp(direction)
+            direction_fraction = [Fraction.from_float(float(value)) for value in direction]
+            direction_int = np.asarray(
+                [
+                    self._round_fraction_half_away_from_zero(value * direction_scale)
+                    for value in direction_fraction
+                ],
+                dtype=np.int64,
+            )
+            inherited_widening = sum(
+                Fraction(direction_scale) * abs(value) * int(error)
+                for value, error in zip(direction_fraction, delta)
+            )
+            coefficient_widening = sum(
+                abs(Fraction(int(integer)) - value * direction_scale) * int(maximum)
+                for integer, value, maximum in zip(
+                    direction_int,
+                    direction_fraction,
+                    max_abs_hidden,
+                )
+            )
+            widening = self._ceil_fraction(inherited_widening + coefficient_widening)
+            product_scale = direction_scale * hidden_scale
+            cut_low = self._floor_fraction(
+                Fraction.from_float(float(lower_real)) * product_scale
+            ) - widening
+            cut_high = self._ceil_fraction(
+                Fraction.from_float(float(upper_real)) * product_scale
+            ) + widening
+            record = {
+                "enabled": True,
+                "status": "OPTIMAL",
+                "target_class": int(target),
+                "competitor_class": int(competitor),
+                "direction_scale": int(direction_scale),
+                "hidden_scale": int(hidden_scale),
+                "product_scale": int(product_scale),
+                "direction_int": [int(value) for value in direction_int],
+                "milp_low_real": float(lower_real),
+                "milp_high_real": float(upper_real),
+                "inherited_widening_product_units": int(
+                    self._ceil_fraction(inherited_widening)
+                ),
+                "coefficient_widening_product_units": int(
+                    self._ceil_fraction(coefficient_widening)
+                ),
+                "total_widening_product_units": int(widening),
+                "cut_low_int": int(cut_low),
+                "cut_high_int": int(cut_high),
+                "milp_wall_time_seconds": float(elapsed),
+                "soundness": "outward_milp_bound_plus_exact_hidden_and_direction_widening",
+            }
+            records.append(record)
+            self.margin_cut_records.append(record)
+        return records
+
+    @staticmethod
+    def _analytic_output_margin_result() -> ESBMCResult:
+        """Represent the sound analytical fast path without an ESBMC process."""
+
+        return ESBMCResult(
+            status="VERIFIED",
+            command=(),
+            stdout="",
+            stderr="",
+            return_code=0,
+            elapsed_seconds=0.0,
+            resource_control={
+                "status": "VERIFIED",
+                "mode": "analytic_output_margin_fast_path",
+                "elapsed_seconds": 0.0,
+            },
+        )
+
+    def _record_exact_output_margin_result(
+        self,
+        record: dict[str, Any],
+        result: ESBMCResult,
+    ) -> None:
+        """Finalize an analytical failure using the exact deployed output harness.
+
+        The harness quantizes and clamps the output layer with the shared deployment
+        kernel. Its nondeterministic input is constrained to the last hidden layer's
+        verified activation box, which already contains the inherited derived budget;
+        adding that budget again would be unsoundly pessimistic. A VERIFIED result is
+        therefore a sound box-level certificate. A failing hidden-box point is not
+        necessarily reachable from a common network input, so every non-VERIFIED
+        solver outcome remains MARGIN_INCONCLUSIVE rather than a refutation.
+        """
+
+        record["solver_status"] = str(result.status)
+        record["resource_control"] = result.resource_control
+        record["exact_query_elapsed_seconds"] = float(result.elapsed_seconds)
+        record["hidden_box_counterexample"] = (
+            [int(value) for value in result.counterexample_inputs]
+            if result.counterexample_inputs is not None
+            else None
+        )
+        if result.status == "VERIFIED":
+            record["margin_ok"] = True
+            record["output_margin"] = "exact_harness_pass"
+            record["status"] = "VERIFIED"
+            record["composition_path"] = "layer_exact_output"
+            self.composition_path = "layer_exact_output"
+            return
+
+        record["margin_ok"] = False
+        record["output_margin"] = "MARGIN_INCONCLUSIVE"
+        record["status"] = "MARGIN_INCONCLUSIVE"
+        self.synthesis_final_status = "MARGIN_INCONCLUSIVE"
+
+    @staticmethod
+    def _terminal_margin_result(status: str) -> ESBMCResult:
+        return ESBMCResult(
+            status=status,
+            command=(),
+            stdout="",
+            stderr="",
+            return_code=0 if status == "VERIFIED" else 1,
+            elapsed_seconds=0.0,
+            resource_control={"status": status, "mode": "margin_resolution"},
+        )
+
+    def _resolve_output_margin_result(
+        self,
+        record: dict[str, Any],
+        result: ESBMCResult,
+        *,
+        total_bits: list[int],
+        fractional_bits: list[int],
+        integer_bits: list[int],
+    ) -> ESBMCResult:
+        """Resolve the output box query, with at most one sound E2E fallback.
+
+        The E2E harness executes the same deployed integer program from the original
+        input box. Therefore VERIFIED establishes the transfer claim directly, without
+        relying on the inconclusive Cartesian hidden abstraction. FAILED is considered
+        a refutation only when both Python and compiled-C replay confirm the witness.
+        """
+
+        self._record_exact_output_margin_result(record, result)
+        if result.status == "VERIFIED" or not self.e2e_fallback:
+            return result
+        if self.e2e_fallback_attempted:
+            record["e2e_fallback"] = {
+                "attempted": False,
+                "reason": "single fallback attempt already consumed",
+            }
+            return result
+
+        self.e2e_fallback_attempted = True
+        verified = self._verify_network_end_to_end(
+            total_bits,
+            fractional_bits,
+            integer_bits,
+        )
+        fallback_status = str(self.end_to_end_record.get("status", "UNKNOWN"))
+        record["e2e_fallback"] = {
+            "attempted": True,
+            "status": fallback_status,
+            "harness": self.end_to_end_record.get("harness"),
+            "resource_control": self.end_to_end_record.get("resource_control"),
+        }
+        if verified:
+            record["margin_ok"] = True
+            record["output_margin"] = "e2e_fallback_pass"
+            record["status"] = "VERIFIED"
+            record["composition_path"] = "e2e_fallback"
+            self.composition_path = "e2e_fallback"
+            self.synthesis_final_status = "VERIFIED"
+            return self._terminal_margin_result("VERIFIED")
+
+        replay = self.end_to_end_record.get("counterexample_replay") or {}
+        replay_confirmed = bool(replay.get("python_replay_confirmed")) and bool(
+            replay.get("so_replay_confirmed")
+        )
+        if fallback_status == "FAILED" and replay_confirmed:
+            record["margin_ok"] = False
+            record["output_margin"] = "MARGIN_REFUTED"
+            record["status"] = "MARGIN_REFUTED"
+            record["reachable_counterexample"] = dict(replay)
+            self.synthesis_final_status = "MARGIN_REFUTED"
+            return self._terminal_margin_result("MARGIN_REFUTED")
+
+        record["margin_ok"] = False
+        record["output_margin"] = "MARGIN_INCONCLUSIVE"
+        record["status"] = "MARGIN_INCONCLUSIVE"
+        self.synthesis_final_status = "MARGIN_INCONCLUSIVE"
+        return result
 
     def _candidate_replay_violates(
         self,
@@ -2820,6 +3355,36 @@ class GPEncoding:
                 frac_bit=frac_bit,
                 cardinality=cardinality,
             )
+
+        is_last_hidden = (
+            cur_layer.layer_index == len(self.dense_layers)
+            and cur_layer.layer_index < len(self.dense_layers) + 1
+        )
+        if self.error_budget_mode == "derived" and is_last_hidden:
+            _, _, _, target_valid = self._candidate_contract_target_bounds_int(
+                cur_layer,
+                in_layer,
+                qu_w_int,
+                frac_bit,
+                record=True,
+            )
+            if not target_valid:
+                self.synthesis_final_status = "PREIMAGE_DEFLATION_EMPTY"
+                return ESBMCResult(
+                    status="PREIMAGE_DEFLATION_EMPTY",
+                    command=(),
+                    stdout="",
+                    stderr="",
+                    return_code=1,
+                    elapsed_seconds=0.0,
+                    timeout_seconds=int(self.config.esbmc.timeout_seconds),
+                    memlimit=str(self.config.esbmc.memlimit),
+                    resource_control={
+                        "status": "PREIMAGE_DEFLATION_EMPTY",
+                        "elapsed_seconds": 0.0,
+                        "reason": "derived budget collapses the property preimage",
+                    },
+                )
 
         if self._uses_hidden_block_verification(cur_layer):
             result = self.verify_hidden_layer_blocks_with_esbmc(
@@ -3298,13 +3863,25 @@ class GPEncoding:
         weights_c_int = self.numpy_to_c_int_array(qu_w_int)
         biases_c_int = self.numpy_to_c_int_array(qu_b_int)
 
-        pre_lo_int, pre_hi_int = self._layer_preimage_bounds_int(cur_layer, scale)
         tolerance_int, input_lo_int, input_hi_int, frac_in = self._candidate_error_budget_int(
             cur_layer,
             in_layer,
             qu_w_int,
             frac_bit,
         )
+        if self.error_budget_mode == "derived" and cur_layer.layer_index <= len(self.dense_layers):
+            pre_lo_int, pre_hi_int, tolerance_int, target_valid = (
+                self._candidate_contract_target_bounds_int(
+                    cur_layer,
+                    in_layer,
+                    qu_w_int,
+                    frac_bit,
+                )
+            )
+            if not target_valid:
+                raise RuntimeError("Cannot generate a harness for an empty deflated preimage.")
+        else:
+            pre_lo_int, pre_hi_int = self._layer_preimage_bounds_int(cur_layer, scale)
         input_scale = 1 << int(frac_in)
 
         is_output_layer = cur_layer.layer_index == len(self.dense_layers) + 1
@@ -3322,6 +3899,15 @@ class GPEncoding:
                     total_bits=all_bit,
                     input_scale_factor=input_scale,
                 )
+            margin_cuts = self._margin_cut_bounds(
+                cur_layer,
+                in_layer,
+                frac_bit,
+            )
+            if self.output_margin_records:
+                self.output_margin_records[-1]["margin_cuts"] = [
+                    dict(cut) for cut in margin_cuts
+                ]
             return render_output_target_program(
                 output_size=cur_layer.layer_size,
                 input_size=in_layer.layer_size,
@@ -3333,6 +3919,42 @@ class GPEncoding:
                 scale_factor=scale,
                 total_bits=all_bit,
                 input_scale_factor=input_scale,
+                margin_cut_directions_c_int=(
+                    self.numpy_to_c_int_array(
+                        np.asarray(
+                            [cut["direction_int"] for cut in margin_cuts],
+                            dtype=object,
+                        )
+                    )
+                    if margin_cuts
+                    else None
+                ),
+                margin_cut_low_c_int=(
+                    self.numpy_to_c_int_array(
+                        np.asarray(
+                            [cut["cut_low_int"] for cut in margin_cuts],
+                            dtype=object,
+                        )
+                    )
+                    if margin_cuts
+                    else None
+                ),
+                margin_cut_high_c_int=(
+                    self.numpy_to_c_int_array(
+                        np.asarray(
+                            [cut["cut_high_int"] for cut in margin_cuts],
+                            dtype=object,
+                        )
+                    )
+                    if margin_cuts
+                    else None
+                ),
+                margin_cut_scale=(
+                    int(margin_cuts[0]["direction_scale"])
+                    if margin_cuts
+                    else None
+                ),
+                margin_cut_count=len(margin_cuts),
             )
 
         return render_hidden_affine_bounds_program(
@@ -3367,13 +3989,25 @@ class GPEncoding:
         end_neuron: int,
     ) -> str:
         scale = 1 << int(frac_bit)
-        pre_lo_int, pre_hi_int = self._layer_preimage_bounds_int(cur_layer, scale)
         tolerance_int, input_lo_int, input_hi_int, frac_in = self._candidate_error_budget_int(
             cur_layer,
             in_layer,
             qu_w_int,
             frac_bit,
         )
+        if self.error_budget_mode == "derived":
+            pre_lo_int, pre_hi_int, tolerance_int, target_valid = (
+                self._candidate_contract_target_bounds_int(
+                    cur_layer,
+                    in_layer,
+                    qu_w_int,
+                    frac_bit,
+                )
+            )
+            if not target_valid:
+                raise RuntimeError("Cannot generate a block for an empty deflated preimage.")
+        else:
+            pre_lo_int, pre_hi_int = self._layer_preimage_bounds_int(cur_layer, scale)
         input_scale = 1 << int(frac_in)
 
         return render_hidden_affine_bounds_block_program(
@@ -3608,6 +4242,41 @@ class GPEncoding:
     def output_margin_summary(self) -> dict[str, Any]:
         records = [dict(record) for record in self.output_margin_records]
         final_ok = bool(records and records[-1].get("margin_ok", False))
+        latest_status = str(records[-1].get("status", "SKIPPED")) if records else "SKIPPED"
+        recovery: dict[str, Any] = {
+            "analytic_worst_residual_margin_int": None,
+            "step_a_alone_status": "NOT_RUN",
+            "step_a_residual_recovery_int": None,
+            "step_b_status": "NOT_RUN",
+            "step_b_additional_recovery_int": None,
+            "combined_recovery_lower_bound_int": None,
+            "note": "A scalar recovery is reported only when the corresponding exact query proves a strict integer margin.",
+        }
+        if records:
+            latest = records[-1]
+            residuals = [
+                int(item["residual_margin_int"])
+                for item in latest.get("class_margins", [])
+                if item.get("residual_margin_int") is not None
+            ]
+            worst = min(residuals) if residuals else None
+            recovery["analytic_worst_residual_margin_int"] = worst
+            cuts = latest.get("margin_cuts") or []
+            solver_status = str(latest.get("solver_status", "NOT_RUN"))
+            if cuts:
+                recovery["step_a_alone_status"] = "NOT_RUN_WITHOUT_CUTS"
+                recovery["step_b_status"] = solver_status
+            else:
+                recovery["step_a_alone_status"] = solver_status
+                if solver_status == "VERIFIED" and worst is not None:
+                    recovery["step_a_residual_recovery_int"] = 1 - worst
+            if solver_status == "VERIFIED" and worst is not None:
+                recovery["combined_recovery_lower_bound_int"] = 1 - worst
+            fallback = latest.get("e2e_fallback") or {}
+            if fallback:
+                recovery["e2e_fallback_status"] = fallback.get("status", "UNKNOWN")
+                if fallback.get("status") == "VERIFIED" and worst is not None:
+                    recovery["reachable_recovery_lower_bound_int"] = 1 - worst
         return {
             "enabled": (
                 self.harness_scope == "layer"
@@ -3617,11 +4286,51 @@ class GPEncoding:
             "status": (
                 "VERIFIED"
                 if final_ok
-                else "MARGIN_TOO_SMALL"
-                if records and records[-1].get("status") == "MARGIN_TOO_SMALL"
+                else "MARGIN_INCONCLUSIVE"
+                if latest_status == "MARGIN_INCONCLUSIVE"
+                else "PENDING_EXACT_QUERY"
+                if latest_status == "PENDING_EXACT_QUERY"
                 else "SKIPPED"
             ),
             "checks": records,
+            "recovery_diagnostics": recovery,
+        }
+
+    def margin_cut_summary(self) -> dict[str, Any]:
+        records = [dict(record) for record in self.margin_cut_records]
+        return {
+            "enabled": bool(self.margin_cuts and self.error_budget_mode == "derived"),
+            "status": (
+                "GENERATED"
+                if any(record.get("status") == "OPTIMAL" for record in records)
+                else str(records[-1].get("status"))
+                if records
+                else "NOT_RUN"
+            ),
+            "cuts_total": int(
+                sum(1 for record in records if record.get("status") == "OPTIMAL")
+            ),
+            "cuts": records,
+        }
+
+    def preimage_provenance_summary(self) -> dict[str, Any]:
+        layers = [
+            {
+                "layer_index": int(layer.layer_index - 1),
+                "network_layer_index": int(layer.layer_index),
+                "preimage_source": str(
+                    getattr(layer, "preimage_source", "deeppoly_forward_FALLBACK")
+                ),
+            }
+            for layer in self.dense_layers
+        ]
+        return {
+            "layers": layers,
+            "deflation": [dict(record) for record in self.preimage_deflation_records],
+            "all_milp_preimage": bool(
+                layers
+                and all(layer["preimage_source"] == "milp_preimage" for layer in layers)
+            ),
         }
 
     def vacuity_summary(self) -> dict[str, Any]:

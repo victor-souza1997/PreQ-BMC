@@ -228,6 +228,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable exact interval invariants for the end-to-end ablation.",
     )
     parser.set_defaults(e2e_invariants=True)
+    parser.add_argument(
+        "--margin-cuts",
+        choices=["off", "on"],
+        default=None,
+        help="Inject sound MILP-derived output directions; defaults to on in derived mode.",
+    )
+    parser.add_argument(
+        "--e2e-fallback",
+        choices=["off", "on"],
+        default=None,
+        help="Run one network E2E query after an inconclusive derived output query; defaults to on in derived mode.",
+    )
     parser.add_argument("--target-label", type=int, default=None)
     parser.add_argument("--valid-labels", default=None, help="Comma-separated valid output labels for the output property.")
     parser.add_argument("--compare-split", default="test", choices=["train", "test"])
@@ -419,6 +431,8 @@ def main(argv: list[str] | None = None) -> None:
         cex_feedback=str(args.cex_feedback),
         harness_scope=str(args.harness_scope),
         e2e_invariants=bool(args.e2e_invariants),
+        margin_cuts=(None if args.margin_cuts is None else args.margin_cuts == "on"),
+        e2e_fallback=(None if args.e2e_fallback is None else args.e2e_fallback == "on"),
         export_paper_tables=args.export_paper_tables,
         baseline_results_json=args.baseline_results_json,
     )

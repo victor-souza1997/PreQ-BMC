@@ -270,6 +270,10 @@ def cmd_demo(args: argparse.Namespace, extra: list[str]) -> int:
         command.append("--no-vacuity-check")
     if not args.e2e_invariants:
         command.append("--no-e2e-invariants")
+    if getattr(args, "margin_cuts", None) is not None:
+        command.extend(["--margin-cuts", str(args.margin_cuts)])
+    if getattr(args, "e2e_fallback", None) is not None:
+        command.extend(["--e2e-fallback", str(args.e2e_fallback)])
     if args.no_gurobi:
         command.extend(
             [
@@ -381,6 +385,10 @@ def cmd_reproduce(args: argparse.Namespace, extra: list[str]) -> int:
         command.extend(["--harness-scope", str(args.harness_scope)])
     if args.e2e_invariants is False:
         command.append("--no-e2e-invariants")
+    if getattr(args, "margin_cuts", None) is not None:
+        command.extend(["--margin-cuts", str(args.margin_cuts)])
+    if getattr(args, "e2e_fallback", None) is not None:
+        command.extend(["--e2e-fallback", str(args.e2e_fallback)])
     command.extend(extra)
     print("Running: " + _command_text(command))
     completed = subprocess.run(command, cwd=_repo_root(), check=False)
@@ -460,6 +468,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable exact interval invariants in network scope.",
     )
     demo.set_defaults(e2e_invariants=True)
+    demo.add_argument("--margin-cuts", choices=["off", "on"], default=None)
+    demo.add_argument("--e2e-fallback", choices=["off", "on"], default=None)
     demo.add_argument(
         "--contract-profile",
         choices=["paper-slack", "strict"],
@@ -514,6 +524,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
     )
     reproduce.set_defaults(e2e_invariants=None)
+    reproduce.add_argument("--margin-cuts", choices=["off", "on"], default=None)
+    reproduce.add_argument("--e2e-fallback", choices=["off", "on"], default=None)
     reproduce.set_defaults(func=cmd_reproduce)
 
     aggregate = subparsers.add_parser("aggregate", help="Aggregate article experiment outputs.")

@@ -76,6 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["layer", "network"],
         default=None,
     )
+    parser.add_argument("--margin-cuts", choices=["off", "on"], default=None)
+    parser.add_argument("--e2e-fallback", choices=["off", "on"], default=None)
     invariant_group = parser.add_mutually_exclusive_group()
     invariant_group.add_argument(
         "--e2e-invariants",
@@ -357,6 +359,10 @@ def _expand_runs(config: dict[str, Any], args: argparse.Namespace) -> list[dict[
             base["harness_scope"] = str(args.harness_scope)
         if getattr(args, "e2e_invariants", None) is not None:
             base["e2e_invariants"] = bool(args.e2e_invariants)
+        if getattr(args, "margin_cuts", None) is not None:
+            base["margin_cuts"] = str(args.margin_cuts)
+        if getattr(args, "e2e_fallback", None) is not None:
+            base["e2e_fallback"] = str(args.e2e_fallback)
         sample_ids = base.pop("sample_ids", None)
         sample_metadata: dict[int, dict[str, Any]] = {}
         if sample_ids is None:
@@ -470,6 +476,8 @@ def _runtime_metadata(args: argparse.Namespace, run: dict[str, Any], command: li
         "cex_feedback": str(run.get("cex_feedback", "off")),
         "harness_scope": str(run.get("harness_scope", "layer")),
         "e2e_invariants": bool(run.get("e2e_invariants", True)),
+        "margin_cuts": str(run.get("margin_cuts", "on" if str(run.get("error_budget_mode", "heuristic")) == "derived" else "off")),
+        "e2e_fallback": str(run.get("e2e_fallback", "on" if str(run.get("error_budget_mode", "heuristic")) == "derived" else "off")),
         "enforce_contract_chaining": bool(run.get("enforce_contract_chaining", True)),
         "dataset": run.get("dataset"),
         "architecture": run.get("arch"),
@@ -647,6 +655,28 @@ def _build_pipeline_command(
         supported_flags,
         "--error-budget",
         str(run.get("error_budget_mode", "heuristic")),
+    )
+    _add_flag(
+        command,
+        supported_flags,
+        "--margin-cuts",
+        str(
+            run.get(
+                "margin_cuts",
+                "on" if str(run.get("error_budget_mode", "heuristic")) == "derived" else "off",
+            )
+        ),
+    )
+    _add_flag(
+        command,
+        supported_flags,
+        "--e2e-fallback",
+        str(
+            run.get(
+                "e2e_fallback",
+                "on" if str(run.get("error_budget_mode", "heuristic")) == "derived" else "off",
+            )
+        ),
     )
     if run.get("vacuity_check") is True:
         _add_flag(command, supported_flags, "--vacuity-check")

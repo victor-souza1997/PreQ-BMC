@@ -122,6 +122,46 @@ def _experiment_summary(sample_id: int, *, c_accuracy: float, runtime: float) ->
 
 
 class ArticleResultAggregationTest(unittest.TestCase):
+    def test_composition_paths_are_not_merged(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_root = root / "runs"
+            output_root = root / "results"
+            for composition_path in ("layer_exact_output", "e2e_fallback"):
+                experiment, pipeline, status = _experiment_summary(
+                    0,
+                    c_accuracy=0.9,
+                    runtime=10.0,
+                )
+                pipeline["composition_path"] = composition_path
+                experiment["composition_path"] = composition_path
+                for method in ("formal_only", "quality_refined"):
+                    experiment[method]["composition_path"] = composition_path
+                status["name"] = f"iris_{composition_path}"
+                run_dir = input_root / status["name"]
+                _write_json(run_dir / "reports" / "experiment_summary.json", experiment)
+                _write_json(run_dir / "reports" / "pipeline_summary.json", pipeline)
+                _write_json(run_dir / "run_status.json", status)
+                _write_json(run_dir / "run_config.json", {"mode": "derived_layer_contract"})
+
+            aggregate_script.aggregate(input_root, output_root)
+
+            with (output_root / "table_region_certification_summary.csv").open(
+                newline="",
+                encoding="utf-8",
+            ) as handle:
+                rows = [
+                    row
+                    for row in csv.DictReader(handle)
+                    if row["method"] == "quality_refined"
+                ]
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(
+                {row["composition_path"] for row in rows},
+                {"layer_exact_output", "e2e_fallback"},
+            )
+            self.assertTrue(all(row["n_regions"] == "1" for row in rows))
+
     def test_aggregate_writes_multisample_summary_tables(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

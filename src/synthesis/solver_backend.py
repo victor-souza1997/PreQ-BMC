@@ -73,6 +73,8 @@ class MilpModel(Protocol):
 
     def value(self, var: Any) -> float: ...
 
+    def objective_bound(self) -> float: ...
+
     def remove(self, objects: Any) -> None: ...
 
     def update(self) -> None: ...
@@ -259,6 +261,11 @@ class GurobiBackend:
 
     def value(self, var: Any) -> float:
         return float(var.X)
+
+    def objective_bound(self) -> float:
+        """Return Gurobi's certified global bound for the current objective."""
+
+        return float(self._model.ObjBound)
 
     def remove(self, objects: Any) -> None:
         constraints, variables = _flatten_generated(objects)
@@ -455,6 +462,11 @@ class CbcBackend:
 
     def value(self, var: Any) -> float:
         return float(var.x)
+
+    def objective_bound(self) -> float:
+        """Return CBC's best global bound for the current objective."""
+
+        return float(self._model.objective_bound)
 
     def remove(self, objects: Any) -> None:
         raw_constraints, generated_variables = _flatten_generated(objects)

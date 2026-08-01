@@ -14,8 +14,52 @@ def outerlayer_fixed_int(
     scale_factor: int,
     total_bits: int,
     input_scale_factor: int | None = None,
+    margin_cut_directions_c_int: str | None = None,
+    margin_cut_low_c_int: str | None = None,
+    margin_cut_high_c_int: str | None = None,
+    margin_cut_scale: int | None = None,
+    margin_cut_count: int = 0,
 ) -> str:
     input_scale = scale_factor if input_scale_factor is None else int(input_scale_factor)
+    cuts_enabled = int(margin_cut_count) > 0
+    cut_declarations = ""
+    cut_application = ""
+    if cuts_enabled:
+        if (
+            margin_cut_directions_c_int is None
+            or margin_cut_low_c_int is None
+            or margin_cut_high_c_int is None
+            or margin_cut_scale is None
+        ):
+            raise ValueError("Enabled output margin cuts require directions, bounds, and scale.")
+        cut_declarations = f"""
+#define MARGIN_CUT_COUNT {int(margin_cut_count)}
+#define MARGIN_CUT_DIRECTION_SCALE {int(margin_cut_scale)}LL
+long long margin_cut_directions[MARGIN_CUT_COUNT][INPUT_SIZE] = {margin_cut_directions_c_int};
+long long margin_cut_low[MARGIN_CUT_COUNT] = {margin_cut_low_c_int};
+long long margin_cut_high[MARGIN_CUT_COUNT] = {margin_cut_high_c_int};
+
+static void assume_sound_margin_cuts(const long long input[INPUT_SIZE])
+{{
+    for (int cut = 0; cut < MARGIN_CUT_COUNT; ++cut)
+    {{
+        __int128 directional_value = 0;
+        for (int j = 0; j < INPUT_SIZE; ++j)
+        {{
+            directional_value = mac_i128(
+                directional_value,
+                margin_cut_directions[cut][j],
+                input[j]
+            );
+        }}
+        __ESBMC_assume(
+            directional_value >= (__int128)margin_cut_low[cut] &&
+            directional_value <= (__int128)margin_cut_high[cut]
+        );
+    }}
+}}
+"""
+        cut_application = "    assume_sound_margin_cuts(input);\n"
     return f"""\
 #include <stdint.h>
 #include <limits.h>
@@ -29,6 +73,7 @@ def outerlayer_fixed_int(
 #define TOTAL_BITS   {total_bits}
 
 extern long long nondet_longlong(void);
+void __ESBMC_assume(_Bool);
 
 long long weights[LAYER_SIZE][INPUT_SIZE] = {weights_c_int};
 long long biases[LAYER_SIZE]              = {biases_c_int};
@@ -40,6 +85,7 @@ void __ESBMC_assert(_Bool, const char *);
 #define QNN_ASSERT(cond, msg) __ESBMC_assert((cond), (msg))
 
 {render_arith_kernel()}
+{cut_declarations}
 
 /* Transformacao afim em ponto fixo com escala de entrada explicita. */
 static void affine_transform_fixed(const long long in_[INPUT_SIZE], long long out_[LAYER_SIZE])
@@ -97,6 +143,7 @@ int main(void)
                        input[k] <= input_bounds_high[k]);
     }}
 
+{cut_application}\
     affine_transform_fixed(input, output);
 
     __ESBMC_assert(verify_classification(output),
@@ -803,7 +850,26 @@ def render_output_target_program(
     scale_factor: int,
     total_bits: int,
     input_scale_factor: int | None = None,
+    margin_cut_directions_c_int: str | None = None,
+    margin_cut_low_c_int: str | None = None,
+    margin_cut_high_c_int: str | None = None,
+    margin_cut_scale: int | None = None,
+    margin_cut_count: int = 0,
 ) -> str:
+    """Render the exact deployed output property over a verified hidden box.
+
+    Optional directional cuts are sound invariants of the deployed hidden vector.
+    Their producer bounds each real direction over the original input region, then
+    widens it by the inherited per-coordinate hidden error and by coefficient
+    quantization error before converting outward to the integer product scale
+    ``margin_cut_scale * input_scale_factor``. Consequently each emitted
+    ``__ESBMC_assume`` contains every reachable deployed hidden vector; it removes
+    only Cartesian-box combinations that cannot come from the input region.
+
+    Output weights and biases are already quantized, and the body uses the shared
+    deployed arithmetic kernel exactly. No output-layer error budget is needed.
+    """
+
     return outerlayer_fixed_int(
         in_layer_layer_size=input_size,
         cur_layer_layer_size=output_size,
@@ -815,6 +881,11 @@ def render_output_target_program(
         scale_factor=scale_factor,
         total_bits=total_bits,
         input_scale_factor=input_scale_factor,
+        margin_cut_directions_c_int=margin_cut_directions_c_int,
+        margin_cut_low_c_int=margin_cut_low_c_int,
+        margin_cut_high_c_int=margin_cut_high_c_int,
+        margin_cut_scale=margin_cut_scale,
+        margin_cut_count=margin_cut_count,
     )
 
 

@@ -30,6 +30,8 @@
     "cex_feedback": "filter+jump",
     "harness_scope": "network",
     "e2e_invariants": true,
+    "margin_cuts": "on",
+    "e2e_fallback": "on",
     "vacuity_check": true,
     "unsound_contract_tolerance": false,
     "propagate_contract_tolerance": false,
@@ -137,12 +139,12 @@
       "sample_id": 3,
       "eps": 1.0,
       "harness_scope": "layer",
-      "esbmc_layer_block_size": 10,
-      "esbmc_profile": "paper-fast",
-      "enabled": false,
+      "esbmc_layer_block_size": 2,
+      "esbmc_profile": "paper-z3",
+      "enabled": true,
       "allowed_failure": true,
       "expected_difficulty": "high",
-      "notes": "Compositional ablation at the same fixed F=8. Bitwuzla is retained for the layer-block formula shape; shared-QIF neuron blocks are sound, but box abstraction may prevent certification."
+      "notes": "Compositional ablation at the same fixed F=8. Five two-neuron hidden blocks use Z3 with one shared layer QIF; box abstraction may still prevent certification without weakening soundness."
     }
   ]
 }
