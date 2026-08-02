@@ -63,6 +63,10 @@ for each ESBMC query as `peak_memory_bytes` and `peak_memory_mib` under
 `experiment_summary.json`. This is a sampled per-query peak, not the ESBMC
 configured `--memlimit`.
 
+The same Linux sampler records ESBMC process-tree CPU time and average CPU
+utilization under `esbmc_cpu_metrics`. Utilization is one-core normalized:
+100% means one fully occupied CPU core, so a parallel solver can exceed 100%.
+
 Generated verification and deployment artifacts:
 
 - `layers/*.c`: ESBMC contract and no-saturation harnesses.
@@ -94,8 +98,11 @@ output/article_results/table_mrr.csv
 output/article_results/table_implementation_gap.csv
 output/article_results/table_ablation.csv
 output/article_results/table_region_certification_summary.csv
+output/article_results/table_source_aware_certification_summary.csv
 output/article_results/table_deployment_quality_summary.csv
 output/article_results/table_runtime_summary.csv
+output/article_results/table_harness_performance.csv
+output/article_results/table_harness_performance_summary.csv
 output/article_results/table_delta_star_summary.csv
 output/article_results/latex/table_main_summary_compact.tex
 output/article_results/latex/table_implementation_gap_compact.tex
@@ -105,6 +112,13 @@ output/article_results/plots/
 ```
 
 `all_experiments.csv` keeps the per-run method rows. The `*_summary.csv` files are additional multi-region aggregates used for paper tables. `table_delta_star_summary.csv` is present only when epsilon-sweep data is available. Some SMT complexity tables or plots are populated only when SMT formula generation was enabled during the run.
+
+`table_harness_performance.csv` reports per-region harness verification rate,
+total execution time, maximum sampled ESBMC-query memory in decimal MB,
+one-core-normalized ESBMC CPU utilization, and deployment accuracy in percent.
+The corresponding summary table reports verification rate from aggregate call
+counts, runtime median/IQR, maximum and median peak memory, and mean/std for CPU
+utilization and accuracy.
 
 ## Core Status Fields
 
@@ -120,6 +134,9 @@ Use these fields when deciding what claim a run supports:
 - `guarantee_level`: claim-strength field in `experiment_summary.json`.
 - `end_to_end_status`: direct network-harness verdict when
   `harness_scope=network`; layer `contract_status` is then `SKIPPED`.
+- `source_region.status`: DeepPoly prerequisite status for the original
+  floating-point model over the same input box. `INCONCLUSIVE` means the
+  abstraction did not establish local robustness; it is not a counterexample.
 
 `final_status` values:
 
@@ -130,6 +147,9 @@ Use these fields when deciding what claim a run supports:
 - `TIMEOUT` or `MEMOUT`: the direct network query exhausted its configured
   resource limit. These remain explicit rather than being collapsed to
   `UNKNOWN`.
+- `SOURCE_PROPERTY_INCONCLUSIVE`: the original float-model property was not
+  established by DeepPoly, so preimage synthesis and ESBMC were intentionally
+  skipped for that region.
 
 `guarantee_level` values:
 
@@ -168,6 +188,15 @@ Important fields:
 - `no_saturation_blocks_*` counters.
 
 A layer is accepted only when all required blocks pass with the same layer `<Q,I,F>`.
+
+## Source-Aware Certification Rates
+
+`table_source_aware_certification_summary.csv` keeps all preselected regions in
+the denominator. `certified_fraction_all_regions` is the primary unconditional
+rate. `certified_fraction_given_source_verified` measures fixed-point transfer
+only among regions where DeepPoly established the source-model prerequisite.
+The table groups by benchmark, epsilon, method, and verification mode without
+splitting rows by the outcome-dependent composition path.
 
 ## Interpreting Failures And Unknowns
 

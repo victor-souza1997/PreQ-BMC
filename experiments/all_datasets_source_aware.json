@@ -1,0 +1,112 @@
+{
+  "metadata": {
+    "description": "Source-aware sound verification across all active robustness datasets",
+    "output_root": "output/all_datasets_source_aware_runs",
+    "input_root": "output/all_datasets_source_aware_runs",
+    "aggregate_output_root": "output/all_datasets_source_aware_results",
+    "notes": [
+      "Each benchmark uses three low-, three median-, and three high-clean-margin correctly classified test samples.",
+      "The selected sample IDs are fixed before source-property checking and reused at every epsilon.",
+      "DeepPoly-inconclusive source regions remain in the unconditional denominator and skip quantized verification.",
+      "Image epsilons are raw pixel units; 1.0 corresponds to 1/255 after normalization.",
+      "Conditional transfer rates use only regions where DeepPoly established the original float-model property.",
+      "All hidden blocks are run after a candidate failure so per-harness verification rates have a complete denominator."
+    ]
+  },
+  "defaults": {
+    "bit_lb": 8,
+    "bit_ub": 8,
+    "preimg_mode": "milp",
+    "verify_mode": "esbmc",
+    "solver": "cbc",
+    "method": "both",
+    "mode": "derived_layer_contract",
+    "sample_selection": "stratified_by_margin",
+    "samples_per_stratum": 3,
+    "sample_selection_correct_only": true,
+    "compare_split": "test",
+    "compare_limit": 0,
+    "compile_c_backend": true,
+    "enable_diagnostics": true,
+    "export_paper_tables": true,
+    "error_budget_mode": "derived",
+    "margin_cuts": "on",
+    "e2e_fallback": "on",
+    "cex_feedback": "filter+jump",
+    "harness_scope": "layer",
+    "e2e_invariants": true,
+    "vacuity_check": true,
+    "unsound_contract_tolerance": false,
+    "propagate_contract_tolerance": false,
+    "enforce_contract_chaining": true,
+    "quality_refinement": false,
+    "max_quality_refinement_steps": 0,
+    "formal_no_saturation": false,
+    "require_formal_no_saturation": false,
+    "empirical_saturation_check": false,
+    "accuracy_drop_threshold": 0.05,
+    "saturation_threshold": 0.01,
+    "mismatch_threshold": 0.05,
+    "esbmc_profile": "paper-z3",
+    "esbmc_timeout_seconds": 300,
+    "esbmc_memlimit": "6g",
+    "esbmc_jobs": 1,
+    "blockwise_fail_fast": true,
+    "blockwise_run_all_blocks_on_failure": true,
+    "no_saturation_continue_on_unknown": false,
+    "gurobi_threads": 4,
+    "allowed_failure": true,
+    "enabled": true
+  },
+  "runs": [
+    {
+      "name": "iris_source_aware",
+      "dataset": "iris",
+      "arch": "1blk_10",
+      "eps_sweep": [0.001, 0.005, 0.01],
+      "esbmc_layer_block_size": 10,
+      "expected_difficulty": "low"
+    },
+    {
+      "name": "seeds_source_aware",
+      "dataset": "seeds",
+      "arch": "1blk_10",
+      "eps_sweep": [0.001, 0.005, 0.01],
+      "esbmc_layer_block_size": 10,
+      "expected_difficulty": "low"
+    },
+    {
+      "name": "mnist_source_aware",
+      "dataset": "mnist",
+      "arch": "1blk_10",
+      "eps_sweep": [0.25, 0.5, 1.0],
+      "esbmc_layer_block_size": 2,
+      "expected_difficulty": "high"
+    },
+    {
+      "name": "fashion_mnist_source_aware",
+      "dataset": "fashion-mnist",
+      "arch": "1blk_100",
+      "enable": "false",
+      "eps_sweep": [0.25, 0.5, 1.0],
+      "esbmc_layer_block_size": 2,
+      "expected_difficulty": "frontier"
+    },
+    {
+      "name": "mnist64_source_aware",
+      "dataset": "mnist64",
+      "arch": "1blk_10",
+      "eps_sweep": [0.25, 0.5, 1.0],
+      "esbmc_layer_block_size": 2,
+      "expected_difficulty": "high"
+    },
+    {
+      "name": "mnist_onnx_source_aware",
+      "dataset": "mnist_onnx",
+      "arch": "1blk_10",
+      "eps_sweep": [0.25, 0.5, 1.0],
+      "esbmc_layer_block_size": 2,
+      "expected_difficulty": "high"
+    }
+  ]
+}

@@ -242,7 +242,7 @@ def _margin_records_for_benchmark(dataset_name: str, arch: str) -> list[dict[str
 
     selection = normalize_dataset_selection(dataset_name)
     dataset = load_dataset(selection.base_name)
-    weights_path = resolve_weight_path(_repo_root(), dataset_name, arch)
+    weights_path = resolve_weight_path(_tool_root(), dataset_name, arch)
     inferred_arch = infer_dense_architecture_from_h5(weights_path)
     input_dim = dataset.input_dim
     num_classes = dataset.num_classes

@@ -353,6 +353,15 @@ class GPEncoding:
         self.chaining_records: list[dict[str, Any]] = []
         self.output_margin_records: list[dict[str, Any]] = []
         self.vacuity_records: list[dict[str, Any]] = []
+        self.source_region_record: dict[str, Any] = {
+            "method": "deeppoly",
+            "status": "NOT_RUN",
+            "eligible_for_transfer": False,
+            "quantized_pipeline_started": False,
+            "esbmc_attempted": False,
+            "target_class": int(original_prediction),
+            "input_epsilon": float(self.eps),
+        }
         self.synthesis_final_status = "UNKNOWN"
         self.cex_pool: dict[int, list[dict[str, Any]]] = {}
         self.counterexample_records: list[dict[str, Any]] = []
@@ -878,6 +887,7 @@ class GPEncoding:
         return result.status == "VERIFIED"
 
     def run(self, lb: np.ndarray, ub: np.ndarray) -> SynthesisResult:
+        source_check_start = time.monotonic()
         self.assert_input_box(lb, ub)
         self.symbolic_propagate()
 
@@ -888,8 +898,41 @@ class GPEncoding:
                 continue
             other_max = max(other_max, value)
 
-        if out_bounds_lb[self.targetCls] < other_max:
-            raise ValueError("The property does not hold in the original DNN for the selected input region.")
+        target_lower = float(out_bounds_lb[self.targetCls])
+        certified_margin_lower = float(target_lower - other_max)
+        source_verified = target_lower >= other_max
+        self.source_region_record = {
+            "method": "deeppoly",
+            "status": "VERIFIED" if source_verified else "INCONCLUSIVE",
+            "eligible_for_transfer": bool(source_verified),
+            "quantized_pipeline_started": bool(source_verified),
+            "esbmc_attempted": False,
+            "target_class": int(self.targetCls),
+            "input_epsilon": float(self.eps),
+            "target_lower_bound": target_lower,
+            "maximum_competitor_upper_bound": float(other_max),
+            "certified_margin_lower_bound": certified_margin_lower,
+            "elapsed_seconds": float(time.monotonic() - source_check_start),
+            "interpretation": (
+                "The original floating-point robustness property is certified over the input region."
+                if source_verified
+                else "DeepPoly did not establish the original floating-point robustness property; this is not a counterexample."
+            ),
+        }
+        self._stats["source_property_time"] = float(
+            self.source_region_record["elapsed_seconds"]
+        )
+        if not source_verified:
+            self.synthesis_final_status = "SOURCE_PROPERTY_INCONCLUSIVE"
+            self._stats["total_time"] = float(time.monotonic() - source_check_start)
+            return SynthesisResult(
+                success=False,
+                total_bits=[],
+                fractional_bits=[],
+                integer_bits=[],
+                stats={key: float(value) for key, value in self._stats.items()},
+                final_status=self.synthesis_final_status,
+            )
 
         backward_start_time = time.time()
         if self.verify_mode == "esbmc" and self.harness_scope == "network":
@@ -928,6 +971,9 @@ class GPEncoding:
         else:
             if_success, total_bits, fractional_bits, integer_bits = self.forward_quantization()
         forward_end_time = time.time()
+        self.source_region_record["esbmc_attempted"] = bool(
+            self.esbmc_call_records
+        )
 
         self._stats["backward_time"] = backward_end_time - backward_start_time
         self._stats["forward_time"] = forward_end_time - backward_end_time
@@ -1895,6 +1941,9 @@ class GPEncoding:
                 else None
             ),
             "memory_measurement": result.memory_measurement,
+            "cpu_time_seconds": result.cpu_time_seconds,
+            "average_cpu_utilization_percent": result.average_cpu_utilization_percent,
+            "cpu_measurement": result.cpu_measurement,
             "resource_control": result.resource_control,
             "harness": str(harness) if harness is not None else None,
             "property_type": property_type,
@@ -4106,6 +4155,11 @@ class GPEncoding:
             rows.append("{" + ", ".join(str(int(x)) for x in row) + "}")
         return "{" + ", ".join(rows) + "}"
 
+    def source_region_summary(self) -> dict[str, Any]:
+        record = dict(self.source_region_record)
+        record["esbmc_attempted"] = bool(self.esbmc_call_records)
+        return record
+
     def blockwise_verification_summary(self) -> dict[str, Any]:
         records = [dict(record) for record in self.esbmc_block_records]
         verified_blocks = sum(1 for record in records if record.get("status") == "VERIFIED")
@@ -4443,8 +4497,26 @@ class GPEncoding:
             for record in executed_records
             if record.get("peak_memory_bytes") is not None
         ]
+        query_cpu_seconds = [
+            float(record["cpu_time_seconds"])
+            for record in executed_records
+            if record.get("cpu_time_seconds") is not None
+        ]
+        query_cpu_utilization = [
+            float(record["average_cpu_utilization_percent"])
+            for record in executed_records
+            if record.get("average_cpu_utilization_percent") is not None
+        ]
         total_calls = int(sum(counts.values()))
         total_non_skipped = int(total_calls - counts["skipped"])
+        verification_denominator = int(
+            counts["verified"]
+            + counts["failed"]
+            + counts["timeout"]
+            + counts["memout"]
+            + counts["unknown"]
+            + counts["vacuous"]
+        )
         return {
             "records": records,
             "verified_count": counts["verified"],
@@ -4460,6 +4532,10 @@ class GPEncoding:
             "timeout_rate": float(counts["timeout"] / total_calls) if total_calls else 0.0,
             "memout_rate": float(counts["memout"] / total_calls) if total_calls else 0.0,
             "unknown_rate": float(counts["unknown"] / total_calls) if total_calls else 0.0,
+            "verification_rate_percent": float(
+                100.0 * counts["verified"] / verification_denominator
+            ) if verification_denominator else 0.0,
+            "verification_denominator": verification_denominator,
             "total_time_seconds": float(sum(query_times)),
             "max_query_time_seconds": float(max(query_times, default=0.0)),
             "mean_query_time_seconds": float(sum(query_times) / len(query_times)) if query_times else 0.0,
@@ -4479,6 +4555,22 @@ class GPEncoding:
             "mean_query_peak_memory_mib": float(
                 (sum(query_peak_memory_bytes) / len(query_peak_memory_bytes)) / (1024 * 1024)
             ) if query_peak_memory_bytes else 0.0,
+            "cpu_measurement": (
+                "linux_procfs_process_tree_cpu_time"
+                if query_cpu_seconds
+                else "unavailable"
+            ),
+            "cpu_queries_measured": int(len(query_cpu_seconds)),
+            "total_cpu_time_seconds": float(sum(query_cpu_seconds)),
+            "average_cpu_utilization_percent": float(
+                100.0 * sum(query_cpu_seconds) / sum(query_times)
+            ) if query_cpu_seconds and sum(query_times) > 0 else 0.0,
+            "mean_query_cpu_utilization_percent": float(
+                sum(query_cpu_utilization) / len(query_cpu_utilization)
+            ) if query_cpu_utilization else 0.0,
+            "max_query_cpu_utilization_percent": float(
+                max(query_cpu_utilization, default=0.0)
+            ),
             "largest_neurons_per_query": int(
                 max((int(record.get("neurons_per_query", 0) or 0) for record in records), default=0)
             ),

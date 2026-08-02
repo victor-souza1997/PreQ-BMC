@@ -94,6 +94,16 @@ def _experiment_summary(sample_id: int, *, c_accuracy: float, runtime: float) ->
             "esbmc_memout_count": 0,
             "esbmc_unknown_count": 0,
             "esbmc_total_count": 2,
+            "harness_verification_rate_percent": 100.0,
+            "harness_verification_denominator": 2,
+        },
+        "esbmc_cpu_metrics": {
+            "measurement": "linux_procfs_process_tree_cpu_time",
+            "queries_measured": 2,
+            "total_cpu_time_seconds": runtime / 4.0,
+            "average_cpu_utilization_percent": 25.0,
+            "mean_query_cpu_utilization_percent": 25.0,
+            "max_query_cpu_utilization_percent": 30.0,
         },
         "blockwise_verification": {
             "enabled": True,
@@ -122,6 +132,127 @@ def _experiment_summary(sample_id: int, *, c_accuracy: float, runtime: float) ->
 
 
 class ArticleResultAggregationTest(unittest.TestCase):
+    def test_source_aware_summary_keeps_unconditional_denominator(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_root = root / "runs"
+            output_root = root / "results"
+
+            fixtures = []
+            certified = _experiment_summary(0, c_accuracy=0.9, runtime=10.0)
+            fixtures.append(("certified", *certified, "layer_exact_output"))
+
+            inconclusive = _experiment_summary(1, c_accuracy=0.9, runtime=1.0)
+            for method in ("formal_only", "quality_refined"):
+                inconclusive[0][method].update(
+                    {
+                        "success": False,
+                        "accepted": False,
+                        "contract_verified": False,
+                        "contract_status": "SKIPPED",
+                        "deployment_quality_accepted": False,
+                        "final_status": "SOURCE_PROPERTY_INCONCLUSIVE",
+                        "guarantee_level": "unknown",
+                    }
+                )
+            inconclusive_source = {
+                "method": "deeppoly",
+                "status": "INCONCLUSIVE",
+                "eligible_for_transfer": False,
+                "quantized_pipeline_started": False,
+                "esbmc_attempted": False,
+            }
+            inconclusive[0]["source_region"] = inconclusive_source
+            inconclusive[1]["source_region"] = inconclusive_source
+            inconclusive[1]["final_status"] = "SOURCE_PROPERTY_INCONCLUSIVE"
+            inconclusive[1]["esbmc_status_counts"] = {
+                "esbmc_verified_count": 0,
+                "esbmc_failed_count": 0,
+                "esbmc_timeout_count": 0,
+                "esbmc_memout_count": 0,
+                "esbmc_unknown_count": 0,
+                "esbmc_total_count": 0,
+            }
+            fixtures.append(("source_inconclusive", *inconclusive, "source_precondition"))
+
+            timeout = _experiment_summary(2, c_accuracy=0.9, runtime=300.0)
+            for method in ("formal_only", "quality_refined"):
+                timeout[0][method].update(
+                    {
+                        "success": False,
+                        "accepted": False,
+                        "contract_verified": False,
+                        "contract_status": "TIMEOUT",
+                        "deployment_quality_accepted": False,
+                        "final_status": "TIMEOUT",
+                        "guarantee_level": "unknown",
+                    }
+                )
+            timeout_source = {
+                "method": "deeppoly",
+                "status": "VERIFIED",
+                "eligible_for_transfer": True,
+                "quantized_pipeline_started": True,
+                "esbmc_attempted": True,
+            }
+            timeout[0]["source_region"] = timeout_source
+            timeout[1]["source_region"] = timeout_source
+            timeout[1]["esbmc_status_counts"].update(
+                {
+                    "esbmc_verified_count": 0,
+                    "esbmc_timeout_count": 1,
+                    "esbmc_total_count": 1,
+                }
+            )
+            fixtures.append(("timeout", *timeout, "e2e_fallback"))
+
+            certified_source = {
+                "method": "deeppoly",
+                "status": "VERIFIED",
+                "eligible_for_transfer": True,
+                "quantized_pipeline_started": True,
+                "esbmc_attempted": True,
+            }
+            fixtures[0][1]["source_region"] = certified_source
+            fixtures[0][2]["source_region"] = certified_source
+
+            for name, experiment, pipeline, status, composition_path in fixtures:
+                status["name"] = name
+                pipeline["composition_path"] = composition_path
+                experiment["composition_path"] = composition_path
+                for method in ("formal_only", "quality_refined"):
+                    experiment[method]["composition_path"] = composition_path
+                    experiment[method]["source_region"] = experiment["source_region"]
+                run_dir = input_root / name
+                _write_json(run_dir / "reports" / "experiment_summary.json", experiment)
+                _write_json(run_dir / "reports" / "pipeline_summary.json", pipeline)
+                _write_json(run_dir / "run_status.json", status)
+                _write_json(run_dir / "run_config.json", {"mode": "derived_layer_contract"})
+
+            aggregate_script.aggregate(input_root, output_root)
+
+            with (output_root / "table_source_aware_certification_summary.csv").open(
+                newline="", encoding="utf-8"
+            ) as handle:
+                rows = [
+                    row
+                    for row in csv.DictReader(handle)
+                    if row["method"] == "quality_refined"
+                ]
+            self.assertEqual(len(rows), 1)
+            row = rows[0]
+            self.assertEqual(row["n_regions"], "3")
+            self.assertEqual(row["source_verified_count"], "2")
+            self.assertEqual(row["source_inconclusive_count"], "1")
+            self.assertAlmostEqual(float(row["source_eligibility_fraction"]), 2 / 3)
+            self.assertEqual(row["quantized_pipeline_started_count"], "2")
+            self.assertEqual(row["esbmc_attempted_count"], "2")
+            self.assertEqual(row["certified_count"], "1")
+            self.assertAlmostEqual(float(row["certified_fraction_all_regions"]), 1 / 3)
+            self.assertEqual(row["certified_fraction_given_source_verified"], "0.5")
+            self.assertEqual(row["timeout_count"], "1")
+            self.assertEqual(row["pre_esbmc_inconclusive_count"], "1")
+
     def test_composition_paths_are_not_merged(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -206,6 +337,27 @@ class ArticleResultAggregationTest(unittest.TestCase):
             quality_runtime = next(row for row in runtime_rows if row["method"] == "quality_refined")
             self.assertAlmostEqual(float(quality_runtime["total_runtime_seconds_median"]), 15.0)
             self.assertAlmostEqual(float(quality_runtime["total_runtime_seconds_iqr"]), 5.0)
+
+            with (output_root / "table_harness_performance_summary.csv").open(
+                newline="",
+                encoding="utf-8",
+            ) as handle:
+                performance_rows = list(csv.DictReader(handle))
+            quality_performance = next(
+                row for row in performance_rows if row["method"] == "quality_refined"
+            )
+            self.assertEqual(
+                float(quality_performance["harness_verification_rate_percent"]),
+                100.0,
+            )
+            self.assertEqual(
+                float(quality_performance["cpu_utilization_percent_mean"]),
+                25.0,
+            )
+            self.assertEqual(
+                float(quality_performance["accuracy_percent_mean"]),
+                85.0,
+            )
 
     def test_sound_v2_modes_keep_network_success_separate_from_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -417,6 +569,66 @@ class ArticleResultAggregationTest(unittest.TestCase):
 
 
 class ArticleSampleSelectionTest(unittest.TestCase):
+    def test_nine_stratified_samples_are_stable_across_epsilon_sweep(self) -> None:
+        def fake_records(dataset: str, arch: str) -> list[dict]:
+            del dataset, arch
+            return [
+                {
+                    "sample_id": index,
+                    "predicted_label": index % 3,
+                    "sample_label": index % 3,
+                    "clean_margin": float(index + 1),
+                    "correctly_classified": True,
+                }
+                for index in range(15)
+            ]
+
+        original = article_runner._margin_records_for_benchmark
+        article_runner._margin_records_for_benchmark = fake_records
+        try:
+            args = argparse.Namespace(
+                mrr_eps_values=None,
+                mrr_binary_low=None,
+                mrr_binary_high=None,
+                mrr_binary_iters=8,
+                unsound_contract_tolerance=None,
+                propagate_contract_tolerance=None,
+                enforce_contract_chaining=None,
+                mrr_mode=None,
+                include_disabled=False,
+                only=[],
+                skip=[],
+            )
+            runs = article_runner._expand_runs(
+                {
+                    "defaults": {},
+                    "runs": [
+                        {
+                            "name": "iris_source_aware",
+                            "dataset": "iris",
+                            "arch": "1blk_10",
+                            "sample_selection": "stratified_by_margin",
+                            "samples_per_stratum": 3,
+                            "eps_sweep": [0.001, 0.005, 0.01],
+                        }
+                    ],
+                },
+                args,
+            )
+        finally:
+            article_runner._margin_records_for_benchmark = original
+
+        self.assertEqual(len(runs), 27)
+        selected_ids = {run["sample_id"] for run in runs}
+        self.assertEqual(len(selected_ids), 9)
+        for sample_id in selected_ids:
+            sample_runs = [run for run in runs if run["sample_id"] == sample_id]
+            self.assertEqual(
+                {run["input_epsilon"] for run in sample_runs},
+                {0.001, 0.005, 0.01},
+            )
+            self.assertEqual(len({run["sample_selection_stratum"] for run in sample_runs}), 1)
+
     def test_stratified_margin_selection_expands_low_median_high_regions(self) -> None:
         def fake_records(dataset: str, arch: str) -> list[dict]:
             return [

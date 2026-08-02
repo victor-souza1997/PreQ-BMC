@@ -276,6 +276,20 @@ class ExperimentSummaryGuaranteeLevelTest(unittest.TestCase):
         self.assertEqual(summary["quality_refined"]["final_status"], "TIMEOUT")
         self.assertEqual(summary["quality_refined"]["guarantee_level"], "unknown")
 
+    def test_verified_layer_synthesis_without_saturation_rerun_is_preserved(self) -> None:
+        summary = _summary(
+            layers=[],
+            quality_accepted=True,
+            pipeline_final_status="VERIFIED",
+        )
+
+        for method in ("formal_only", "quality_refined"):
+            self.assertTrue(summary[method]["contract_verified"])
+            self.assertEqual(summary[method]["contract_status"], "VERIFIED")
+            self.assertEqual(summary[method]["no_saturation_status"], "SKIPPED")
+            self.assertEqual(summary[method]["final_status"], "VERIFIED")
+            self.assertEqual(summary[method]["guarantee_level"], "deployed-transfer")
+
 
 if __name__ == "__main__":
     unittest.main()

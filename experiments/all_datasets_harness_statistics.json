@@ -1,0 +1,115 @@
+{
+  "metadata": {
+    "description": "Sound block-wise evaluation across every base dataset supported by the active robustness pipeline",
+    "output_root": "output/all_datasets_harness_statistics_runs",
+    "input_root": "output/all_datasets_harness_statistics_runs",
+    "aggregate_output_root": "output/all_datasets_harness_statistics_results",
+    "notes": [
+      "Each dataset contributes one low-, one median-, and one high-clean-margin correctly classified test region.",
+      "Image-dataset eps=1.0 is one raw pixel level, equivalent to 1/255 after normalization; tabular eps=0.01 is expressed in the dataset feature scale.",
+      "All hidden blocks for a candidate are executed so harness verification-rate statistics are not distorted by fail-fast skipping.",
+      "CPU utilization uses Linux process-tree CPU time divided by wall time; 100 percent means one fully occupied CPU core and parallel solvers may exceed 100 percent.",
+      "Accuracy is evaluated over the complete test split because compare_limit is zero.",
+      "TIMEOUT, MEMOUT, and UNKNOWN are reported outcomes and are not interpreted as property violations."
+    ],
+    "requested_tables": [
+      "table_harness_performance.csv",
+      "table_harness_performance_summary.csv",
+      "table_region_certification_summary.csv",
+      "table_runtime_summary.csv",
+      "table_deployment_quality_summary.csv"
+    ]
+  },
+  "defaults": {
+    "bit_lb": 8,
+    "bit_ub": 8,
+    "preimg_mode": "milp",
+    "verify_mode": "esbmc",
+    "solver": "cbc",
+    "method": "both",
+    "mode": "derived_layer_contract",
+    "sample_selection": "stratified_by_margin",
+    "samples_per_stratum": 1,
+    "sample_selection_correct_only": true,
+    "compare_split": "test",
+    "compare_limit": 0,
+    "compile_c_backend": true,
+    "enable_diagnostics": true,
+    "export_paper_tables": true,
+    "error_budget_mode": "derived",
+    "margin_cuts": "on",
+    "e2e_fallback": "on",
+    "cex_feedback": "filter+jump",
+    "harness_scope": "layer",
+    "e2e_invariants": true,
+    "vacuity_check": true,
+    "unsound_contract_tolerance": false,
+    "propagate_contract_tolerance": false,
+    "enforce_contract_chaining": true,
+    "quality_refinement": false,
+    "max_quality_refinement_steps": 0,
+    "formal_no_saturation": false,
+    "require_formal_no_saturation": false,
+    "empirical_saturation_check": false,
+    "accuracy_drop_threshold": 0.05,
+    "saturation_threshold": 0.01,
+    "mismatch_threshold": 0.05,
+    "esbmc_layer_block_size": 10,
+    "esbmc_profile": "paper-z3",
+    "esbmc_timeout_seconds": 300,
+    "esbmc_memlimit": "6g",
+    "esbmc_jobs": 1,
+    "blockwise_fail_fast": true,
+    "blockwise_run_all_blocks_on_failure": true,
+    "no_saturation_continue_on_unknown": false,
+    "gurobi_threads": 4,
+    "allowed_failure": true,
+    "enabled": true
+  },
+  "runs": [
+    {
+      "name": "iris_all_margin_strata_eps001",
+      "dataset": "iris",
+      "arch": "1blk_10",
+      "eps": 0.01,
+      "expected_difficulty": "low"
+    },
+    {
+      "name": "seeds_all_margin_strata_eps001",
+      "dataset": "seeds",
+      "arch": "1blk_10",
+      "eps": 0.01,
+      "expected_difficulty": "low"
+    },
+    {
+      "name": "mnist_all_margin_strata_eps1",
+      "dataset": "mnist",
+      "arch": "1blk_10",
+      "eps": 1.0,
+      "expected_difficulty": "medium"
+    },
+
+    {  
+      "name": "fashion_mnist_all_margin_strata_eps1",
+      "dataset": "fashion-mnist",
+      "arch": "1blk_100",
+      "enabled": false,
+      "eps": 1.0,
+      "expected_difficulty": "frontier"
+    },
+    {
+      "name": "mnist64_all_margin_strata_eps1",
+      "dataset": "mnist64",
+      "arch": "1blk_10",
+      "eps": 1.0,
+      "expected_difficulty": "medium"
+    },
+    {
+      "name": "mnist_onnx_all_margin_strata_eps1",
+      "dataset": "mnist_onnx",
+      "arch": "1blk_10",
+      "eps": 1.0,
+      "expected_difficulty": "medium"
+    }
+  ]
+}

@@ -350,8 +350,11 @@ output/article_results/table_esbmc_status_counts.csv
 output/article_results/table_mrr.csv
 output/article_results/table_implementation_gap.csv
 output/article_results/table_region_certification_summary.csv
+output/article_results/table_source_aware_certification_summary.csv
 output/article_results/table_deployment_quality_summary.csv
 output/article_results/table_runtime_summary.csv
+output/article_results/table_harness_performance.csv
+output/article_results/table_harness_performance_summary.csv
 output/article_results/table_delta_star_summary.csv
 output/article_results/latex/table_main_summary_compact.tex
 output/article_results/latex/table_implementation_gap_compact.tex
@@ -360,6 +363,21 @@ output/article_results/article_summary.md
 ```
 
 `all_experiments.csv` preserves one row per method and input region. The summary tables aggregate those rows by benchmark, epsilon, method, and mode. See [result_aggregation.md](result_aggregation.md) for the sampling and aggregation rationale.
+
+For source-aware experiments, run:
+
+```bash
+preqbmc reproduce \
+  --config experiments/all_datasets_source_aware.json \
+  --aggregate
+```
+
+This configuration selects nine clean-margin-stratified regions per dataset and
+reuses them across three epsilon values. A DeepPoly-inconclusive source region
+completes with `SOURCE_PROPERTY_INCONCLUSIVE` and zero ESBMC calls. The
+additional `table_source_aware_certification_summary.csv` reports both the
+unconditional certification fraction and the fraction conditional on the
+source property being established.
 
 ## 9. Reporting Guidance
 

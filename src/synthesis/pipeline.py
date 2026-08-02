@@ -320,6 +320,14 @@ def _refresh_article_metrics(
         "timeout_rate": esbmc_summary.get("timeout_rate", 0.0),
         "memout_rate": esbmc_summary.get("memout_rate", 0.0),
         "unknown_rate": esbmc_summary.get("unknown_rate", 0.0),
+        "harness_verification_rate_percent": esbmc_summary.get(
+            "verification_rate_percent",
+            0.0,
+        ),
+        "harness_verification_denominator": esbmc_summary.get(
+            "verification_denominator",
+            0,
+        ),
     }
     summary["esbmc_call_records"] = esbmc_summary.get("records", [])
     summary["esbmc_memory_metrics"] = {
@@ -329,6 +337,22 @@ def _refresh_article_metrics(
         "max_query_peak_memory_mib": _safe_float(esbmc_summary.get("max_query_peak_memory_mib")),
         "mean_query_peak_memory_bytes": _safe_float(esbmc_summary.get("mean_query_peak_memory_bytes")),
         "mean_query_peak_memory_mib": _safe_float(esbmc_summary.get("mean_query_peak_memory_mib")),
+    }
+    summary["esbmc_cpu_metrics"] = {
+        "measurement": esbmc_summary.get("cpu_measurement", "unavailable"),
+        "queries_measured": int(esbmc_summary.get("cpu_queries_measured", 0) or 0),
+        "total_cpu_time_seconds": _safe_float(
+            esbmc_summary.get("total_cpu_time_seconds")
+        ),
+        "average_cpu_utilization_percent": _safe_float(
+            esbmc_summary.get("average_cpu_utilization_percent")
+        ),
+        "mean_query_cpu_utilization_percent": _safe_float(
+            esbmc_summary.get("mean_query_cpu_utilization_percent")
+        ),
+        "max_query_cpu_utilization_percent": _safe_float(
+            esbmc_summary.get("max_query_cpu_utilization_percent")
+        ),
     }
     summary["timing_metrics"] = _pipeline_timing_payload(
         pipeline_start_time=pipeline_start_time,
@@ -1193,6 +1217,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         "predicted_label": predicted_label,
         "clean_margin": clean_margin,
         "sample_logits": sample_logits.tolist(),
+        "source_region": synthesizer.source_region_summary(),
         "synthesis": synthesis_result.to_dict(),
         "final_status": synthesis_result.final_status,
         "baseline": {
@@ -1227,6 +1252,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         },
         "accumulator_range": [],
         "verification_claims": {
+            "source_property_verification": "deeppoly_sufficient_condition",
             "fixed_point_semantics": "declared_backend_semantics",
             "accumulator_range": "static_interval_analysis",
             "deployment_metrics": "empirical_dataset_evaluation",
@@ -1242,6 +1268,23 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         }
 
     if not synthesis_result.success:
+        if synthesis_result.final_status == "SOURCE_PROPERTY_INCONCLUSIVE":
+            summary.update(
+                {
+                    "contract_verified": False,
+                    "contract_status": "SKIPPED",
+                    "no_saturation_formally_checked": False,
+                    "no_saturation_status": "SKIPPED",
+                    "no_saturation_verified": False,
+                    "deployment_quality_accepted": False,
+                    "guarantee_level": "unknown",
+                    "transfer_preconditions": {
+                        "source_property_verified": False,
+                        "quantized_pipeline_started": False,
+                        "esbmc_attempted": False,
+                    },
+                }
+            )
         summary["blockwise_verification"] = synthesizer.blockwise_verification_summary()
         summary.update(synthesizer.no_saturation_block_summary())
         summary["contract_tolerance"] = synthesizer.contract_tolerance_summary()
@@ -1251,6 +1294,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         summary["vacuity_check"] = synthesizer.vacuity_summary()
         summary["counterexamples"] = synthesizer.counterexample_summary()
         summary["end_to_end_verification"] = synthesizer.end_to_end_summary()
+        summary["source_region"] = synthesizer.source_region_summary()
         _refresh_article_metrics(
             summary,
             pipeline_start_time=pipeline_start_time,

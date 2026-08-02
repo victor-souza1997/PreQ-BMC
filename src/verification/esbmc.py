@@ -56,6 +56,9 @@ class ESBMCResult:
     stderr_log_path: str = ""
     peak_memory_bytes: int | None = None
     memory_measurement: str = "unavailable"
+    cpu_time_seconds: float | None = None
+    average_cpu_utilization_percent: float | None = None
+    cpu_measurement: str = "unavailable"
     resource_control: dict[str, Any] | None = None
     blocks: tuple[dict[str, Any], ...] = ()
     counterexample_inputs: list[int] | None = None
@@ -249,6 +252,9 @@ class ESBMCRunner:
         command: tuple[str, ...],
         peak_memory_bytes: int | None,
         memory_measurement: str,
+        cpu_time_seconds: float | None,
+        average_cpu_utilization_percent: float | None,
+        cpu_measurement: str,
     ) -> dict[str, Any]:
         return {
             "command": list(command),
@@ -266,6 +272,9 @@ class ESBMCRunner:
                 else None
             ),
             "memory_measurement": memory_measurement,
+            "cpu_time_seconds": cpu_time_seconds,
+            "average_cpu_utilization_percent": average_cpu_utilization_percent,
+            "cpu_measurement": cpu_measurement,
         }
 
     def _capture_counterexample(
@@ -343,15 +352,22 @@ class ESBMCRunner:
             return None, None, None, trace_command, stdout_path, stderr_path
 
     @staticmethod
-    def _process_tree_rss_bytes(root_pid: int) -> tuple[int | None, str]:
-        """Return current Linux RSS for a process and all visible descendants."""
+    def _process_tree_resources(
+        root_pid: int,
+    ) -> tuple[int | None, dict[int, float], str]:
+        """Return current RSS and CPU time for a visible Linux process tree."""
 
         proc_root = Path("/proc")
         if not proc_root.is_dir():
-            return None, "unavailable_non_linux"
+            return None, {}, "unavailable_non_linux"
 
         total_bytes = 0
         measured = False
+        cpu_seconds_by_pid: dict[int, float] = {}
+        try:
+            clock_ticks = float(os.sysconf("SC_CLK_TCK"))
+        except (AttributeError, OSError, ValueError):
+            clock_ticks = 0.0
         pending = [int(root_pid)]
         visited: set[int] = set()
         while pending:
@@ -372,13 +388,40 @@ class ESBMCRunner:
             except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError):
                 pass
 
+            stat_path = proc_root / str(pid) / "stat"
+            try:
+                stat_text = stat_path.read_text(encoding="utf-8", errors="replace")
+                closing_paren = stat_text.rfind(")")
+                fields = stat_text[closing_paren + 2 :].split()
+                if closing_paren >= 0 and len(fields) > 12 and clock_ticks > 0:
+                    cpu_seconds_by_pid[pid] = (
+                        float(fields[11]) + float(fields[12])
+                    ) / clock_ticks
+            except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError):
+                pass
+
             children_path = proc_root / str(pid) / "task" / str(pid) / "children"
             try:
                 pending.extend(int(value) for value in children_path.read_text().split())
             except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError):
                 pass
 
-        return (total_bytes if measured else None), "linux_procfs_process_tree_rss"
+        return (
+            total_bytes if measured else None,
+            cpu_seconds_by_pid,
+            "linux_procfs_process_tree",
+        )
+
+    @staticmethod
+    def _process_tree_rss_bytes(root_pid: int) -> tuple[int | None, str]:
+        """Backward-compatible RSS-only view of process-tree resources."""
+
+        memory, _, measurement = ESBMCRunner._process_tree_resources(root_pid)
+        return memory, (
+            "linux_procfs_process_tree_rss"
+            if measurement == "linux_procfs_process_tree"
+            else measurement
+        )
 
     @staticmethod
     def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
@@ -407,26 +450,59 @@ class ESBMCRunner:
         self,
         process: subprocess.Popen[Any],
         timeout_seconds: float,
-    ) -> tuple[int, int | None, str, bool]:
+    ) -> tuple[int, int | None, str, float | None, float | None, str, bool]:
+        started = time.monotonic()
         deadline = time.monotonic() + float(timeout_seconds)
         peak_memory_bytes: int | None = None
         measurement = "unavailable"
+        observed_cpu_seconds: dict[int, float] = {}
         poll_interval = max(0.01, float(self.config.memory_poll_interval_seconds))
 
+        def result_payload(return_code: int, timed_out: bool) -> tuple[int, int | None, str, float | None, float | None, str, bool]:
+            elapsed = max(time.monotonic() - started, 1e-9)
+            cpu_seconds = (
+                float(sum(observed_cpu_seconds.values()))
+                if observed_cpu_seconds
+                else None
+            )
+            cpu_percent = (
+                float(100.0 * cpu_seconds / elapsed)
+                if cpu_seconds is not None
+                else None
+            )
+            return (
+                int(return_code),
+                peak_memory_bytes,
+                "linux_procfs_process_tree_rss"
+                if measurement == "linux_procfs_process_tree"
+                else measurement,
+                cpu_seconds,
+                cpu_percent,
+                "linux_procfs_process_tree_cpu_time"
+                if observed_cpu_seconds
+                else measurement,
+                timed_out,
+            )
+
         while True:
-            current_memory, current_measurement = self._process_tree_rss_bytes(process.pid)
+            current_memory, current_cpu, current_measurement = self._process_tree_resources(process.pid)
             measurement = current_measurement
             if current_memory is not None:
                 peak_memory_bytes = max(peak_memory_bytes or 0, current_memory)
+            for pid, cpu_seconds in current_cpu.items():
+                observed_cpu_seconds[pid] = max(
+                    observed_cpu_seconds.get(pid, 0.0),
+                    float(cpu_seconds),
+                )
 
             return_code = process.poll()
             if return_code is not None:
-                return int(return_code), peak_memory_bytes, measurement, False
+                return result_payload(int(return_code), False)
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._terminate_process_tree(process)
-                return -1, peak_memory_bytes, measurement, True
+                return result_payload(-1, True)
             time.sleep(min(poll_interval, remaining))
 
     @staticmethod
@@ -484,6 +560,9 @@ class ESBMCRunner:
         start_time = time.monotonic()
         peak_memory_bytes: int | None = None
         memory_measurement = "unavailable"
+        cpu_time_seconds: float | None = None
+        average_cpu_utilization_percent: float | None = None
+        cpu_measurement = "unavailable"
         process: subprocess.Popen[Any] | None = None
         try:
             with stdout_log_path.open("w", encoding="utf-8", errors="replace") as stdout_log, stderr_log_path.open(
@@ -498,7 +577,15 @@ class ESBMCRunner:
                     text=True,
                     start_new_session=os.name == "posix",
                 )
-                return_code, peak_memory_bytes, memory_measurement, timed_out = self._wait_with_peak_memory(
+                (
+                    return_code,
+                    peak_memory_bytes,
+                    memory_measurement,
+                    cpu_time_seconds,
+                    average_cpu_utilization_percent,
+                    cpu_measurement,
+                    timed_out,
+                ) = self._wait_with_peak_memory(
                     process,
                     self.config.timeout_seconds + 300,
                 )
@@ -518,6 +605,9 @@ class ESBMCRunner:
                 command=command,
                 peak_memory_bytes=peak_memory_bytes,
                 memory_measurement=memory_measurement,
+                cpu_time_seconds=cpu_time_seconds,
+                average_cpu_utilization_percent=average_cpu_utilization_percent,
+                cpu_measurement=cpu_measurement,
             )
             return ESBMCResult(
                 status=status,
@@ -532,6 +622,9 @@ class ESBMCRunner:
                 stderr_log_path=str(stderr_log_path),
                 peak_memory_bytes=peak_memory_bytes,
                 memory_measurement=memory_measurement,
+                cpu_time_seconds=cpu_time_seconds,
+                average_cpu_utilization_percent=average_cpu_utilization_percent,
+                cpu_measurement=cpu_measurement,
                 resource_control=resource_control,
             )
 
@@ -549,6 +642,9 @@ class ESBMCRunner:
                 command=command,
                 peak_memory_bytes=peak_memory_bytes,
                 memory_measurement=memory_measurement,
+                cpu_time_seconds=cpu_time_seconds,
+                average_cpu_utilization_percent=average_cpu_utilization_percent,
+                cpu_measurement=cpu_measurement,
             )
             return ESBMCResult(
                 status=status,
@@ -563,6 +659,9 @@ class ESBMCRunner:
                 stderr_log_path=str(stderr_log_path),
                 peak_memory_bytes=peak_memory_bytes,
                 memory_measurement=memory_measurement,
+                cpu_time_seconds=cpu_time_seconds,
+                average_cpu_utilization_percent=average_cpu_utilization_percent,
+                cpu_measurement=cpu_measurement,
                 resource_control=resource_control,
             )
 
@@ -585,6 +684,9 @@ class ESBMCRunner:
             command=command,
             peak_memory_bytes=peak_memory_bytes,
             memory_measurement=memory_measurement,
+            cpu_time_seconds=cpu_time_seconds,
+            average_cpu_utilization_percent=average_cpu_utilization_percent,
+            cpu_measurement=cpu_measurement,
         )
         counterexample_inputs: list[int] | None = None
         counterexample_neuron: int | None = None
@@ -625,6 +727,9 @@ class ESBMCRunner:
             stderr_log_path=str(stderr_log_path),
             peak_memory_bytes=peak_memory_bytes,
             memory_measurement=memory_measurement,
+            cpu_time_seconds=cpu_time_seconds,
+            average_cpu_utilization_percent=average_cpu_utilization_percent,
+            cpu_measurement=cpu_measurement,
             resource_control=resource_control,
             counterexample_inputs=counterexample_inputs,
             counterexample_neuron=counterexample_neuron,

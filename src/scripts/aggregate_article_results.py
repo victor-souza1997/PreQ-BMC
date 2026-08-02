@@ -7,6 +7,8 @@ import math
 from pathlib import Path
 from typing import Any
 
+from reports.experiment_summary import derive_guarantee_level
+
 
 METHODS = ("formal_only", "quality_refined")
 STATUS_ORDER = ("FAILED", "TIMEOUT", "MEMOUT", "UNKNOWN", "SKIPPED")
@@ -298,8 +300,28 @@ def _method_row(
     timing = pipeline.get("timing_metrics", {})
     esbmc = pipeline.get("esbmc_status_counts", {})
     esbmc_memory = pipeline.get("esbmc_memory_metrics", {})
+    esbmc_cpu = pipeline.get("esbmc_cpu_metrics", {})
     blockwise = pipeline.get("blockwise_verification", {})
     resource = section.get("resource_metrics", {})
+    source_region = _coalesce(
+        section.get("source_region"),
+        experiment.get("source_region"),
+        pipeline.get("source_region"),
+        default={},
+    )
+    if not isinstance(source_region, dict):
+        source_region = {}
+    if not source_region and isinstance(pipeline.get("synthesis"), dict):
+        source_region = {
+            "method": "deeppoly",
+            "status": "VERIFIED",
+            "eligible_for_transfer": True,
+            "quantized_pipeline_started": True,
+            "esbmc_attempted": bool(
+                (_num(esbmc.get("esbmc_total_count")) or 0) > 0
+            ),
+            "provenance": "legacy_pipeline_completed_after_source_gate",
+        }
     dataset = benchmark.get("dataset", pipeline.get("dataset", run_config.get("dataset", run_status.get("dataset"))))
     arch = benchmark.get("arch", pipeline.get("arch", run_config.get("arch", run_status.get("arch"))))
     input_epsilon = _input_epsilon(run_status, run_config, pipeline, benchmark)
@@ -351,6 +373,38 @@ def _method_row(
         experiment.get("guarantee_level"),
         pipeline.get("guarantee_level"),
     )
+    pipeline_synthesis = (
+        pipeline.get("formal_synthesis", pipeline.get("synthesis", {}))
+        if method == "formal_only"
+        else pipeline.get("synthesis", {})
+    )
+    end_to_end = pipeline.get("end_to_end_verification", {})
+    pipeline_verified_layer = bool(
+        isinstance(pipeline_synthesis, dict)
+        and pipeline_synthesis.get("success", False)
+        and str(pipeline_synthesis.get("final_status", pipeline.get("final_status", "")))
+        == "VERIFIED"
+        and not bool(isinstance(end_to_end, dict) and end_to_end.get("enabled", False))
+    )
+    if pipeline_verified_layer:
+        contract_status = "VERIFIED"
+        contract_verified_value = True
+        final_status = "VERIFIED"
+        guarantee_level = derive_guarantee_level(
+            pipeline,
+            {
+                "contract_status": contract_status,
+                "contract_verified": True,
+                "no_saturation_status": no_saturation_status,
+                "no_saturation_verified": bool(
+                    section.get("no_saturation_verified", False)
+                ),
+                "deployment_quality_accepted": bool(
+                    section.get("deployment_quality_accepted", False)
+                ),
+                "final_status": final_status,
+            },
+        )["guarantee_level"]
     layer_records = _layer_records_from_pipeline(pipeline, section)
     failure_layer = ""
     failure_block = ""
@@ -423,6 +477,24 @@ def _method_row(
         "sample_selection_stratum": run_config.get("sample_selection_stratum", run_status.get("sample_selection_stratum")),
         "sample_selection_rank": run_config.get("sample_selection_rank", run_status.get("sample_selection_rank")),
         "sample_selection_quantile": run_config.get("sample_selection_quantile", run_status.get("sample_selection_quantile")),
+        "source_property_method": source_region.get("method"),
+        "source_property_status": source_region.get("status"),
+        "source_property_eligible": source_region.get("eligible_for_transfer"),
+        "source_property_provenance": (
+            source_region.get("provenance", "recorded") if source_region else ""
+        ),
+        "source_target_lower_bound": source_region.get("target_lower_bound"),
+        "source_maximum_competitor_upper_bound": source_region.get(
+            "maximum_competitor_upper_bound"
+        ),
+        "source_certified_margin_lower_bound": source_region.get(
+            "certified_margin_lower_bound"
+        ),
+        "source_property_time_seconds": source_region.get("elapsed_seconds"),
+        "quantized_pipeline_started": source_region.get(
+            "quantized_pipeline_started"
+        ),
+        "esbmc_attempted": source_region.get("esbmc_attempted"),
         "float32_accuracy": float32_accuracy,
         "quantized_keras_accuracy": quantized_acc,
         "python_fixed_accuracy": python_acc,
@@ -470,6 +542,24 @@ def _method_row(
         "timeout_rate": esbmc.get("timeout_rate"),
         "memout_rate": esbmc.get("memout_rate"),
         "unknown_rate": esbmc.get("unknown_rate"),
+        "harness_verification_rate_percent": esbmc.get(
+            "harness_verification_rate_percent"
+        ),
+        "harness_verification_denominator": esbmc.get(
+            "harness_verification_denominator"
+        ),
+        "esbmc_cpu_measurement": esbmc_cpu.get("measurement"),
+        "esbmc_cpu_queries_measured": esbmc_cpu.get("queries_measured"),
+        "total_esbmc_cpu_time_seconds": esbmc_cpu.get("total_cpu_time_seconds"),
+        "average_esbmc_cpu_utilization_percent": esbmc_cpu.get(
+            "average_cpu_utilization_percent"
+        ),
+        "mean_query_cpu_utilization_percent": esbmc_cpu.get(
+            "mean_query_cpu_utilization_percent"
+        ),
+        "max_query_cpu_utilization_percent": esbmc_cpu.get(
+            "max_query_cpu_utilization_percent"
+        ),
         "blockwise_enabled": blockwise.get("enabled", section.get("blockwise_verification_enabled")),
         "block_size": blockwise.get("block_size", section.get("blockwise_block_size")),
         "total_blocks": blockwise.get("total_blocks", section.get("blockwise_total_blocks")),
@@ -518,11 +608,20 @@ ALL_FIELDS = [
     "mean_esbmc_query_peak_memory_mib", "number_of_esbmc_calls", "esbmc_verified_count",
     "esbmc_failed_count", "esbmc_timeout_count", "esbmc_memout_count", "esbmc_unknown_count",
     "esbmc_total_count", "timeout_rate", "memout_rate", "unknown_rate", "blockwise_enabled",
+    "harness_verification_rate_percent", "harness_verification_denominator",
+    "esbmc_cpu_measurement", "esbmc_cpu_queries_measured", "total_esbmc_cpu_time_seconds",
+    "average_esbmc_cpu_utilization_percent", "mean_query_cpu_utilization_percent",
+    "max_query_cpu_utilization_percent",
     "block_size", "total_blocks", "verified_blocks", "failed_blocks", "timeout_blocks",
     "memout_blocks", "unknown_blocks", "skipped_blocks_due_to_fail_fast", "largest_neurons_per_query",
     "largest_input_dim_per_query", "largest_estimated_macs_per_query", "output_dir",
     "deployment_quality_accepted", "guarantee_level", "sample_label", "predicted_label", "clean_margin",
     "sample_selection", "sample_selection_stratum", "sample_selection_rank", "sample_selection_quantile",
+    "source_property_method", "source_property_status", "source_property_eligible",
+    "source_property_provenance",
+    "source_target_lower_bound", "source_maximum_competitor_upper_bound",
+    "source_certified_margin_lower_bound", "source_property_time_seconds",
+    "quantized_pipeline_started", "esbmc_attempted",
     "num_parameters", "float_parameter_memory_bytes", "fixed_parameter_memory_bytes",
     "compression_ratio_vs_float32", "activation_memory_bytes_estimate", "peak_activation_values",
 ]
@@ -696,6 +795,106 @@ def _ablation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return output
 
 
+def _reported_accuracy(row: dict[str, Any]) -> float | None:
+    """Return the most deployment-representative available accuracy fraction."""
+
+    for field in (
+        "c_fixed_accuracy",
+        "python_fixed_accuracy",
+        "quantized_keras_accuracy",
+        "float32_accuracy",
+    ):
+        value = _num(row.get(field))
+        if value is not None:
+            return value
+    return None
+
+
+def _harness_performance_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        peak_bytes = _num(row.get("max_esbmc_query_peak_memory_bytes"))
+        accuracy = _reported_accuracy(row)
+        output.append(
+            {
+                "run_name": row.get("run_name"),
+                "dataset": row.get("dataset"),
+                "arch": row.get("arch"),
+                "sample_id": row.get("sample_id"),
+                "method": row.get("method"),
+                "mode": row.get("mode"),
+                "composition_path": row.get("composition_path"),
+                "harness_verification_rate_percent": row.get(
+                    "harness_verification_rate_percent"
+                ),
+                "execution_time_seconds": row.get("total_runtime_seconds"),
+                "peak_memory_usage_mb": (
+                    float(peak_bytes / 1_000_000.0)
+                    if peak_bytes is not None
+                    else ""
+                ),
+                "cpu_utilization_percent": row.get(
+                    "average_esbmc_cpu_utilization_percent"
+                ),
+                "accuracy_percent": (
+                    float(100.0 * accuracy) if accuracy is not None else ""
+                ),
+                "cpu_utilization_definition": "100_percent_equals_one_fully_used_cpu_core",
+            }
+        )
+    return output
+
+
+def _harness_performance_summary_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for group in _group_for_summary(rows).values():
+        verified = sum(
+            int(_num(row.get("esbmc_verified_count")) or 0)
+            for row in group
+        )
+        denominator = sum(
+            int(_num(row.get("harness_verification_denominator")) or 0)
+            for row in group
+        )
+        peak_memory_mb = [
+            float(value / 1_000_000.0)
+            for value in (
+                _num(row.get("max_esbmc_query_peak_memory_bytes"))
+                for row in group
+            )
+            if value is not None
+        ]
+        accuracies = [
+            float(100.0 * value)
+            for value in (_reported_accuracy(row) for row in group)
+            if value is not None
+        ]
+        cpu_values = _values(group, "average_esbmc_cpu_utilization_percent")
+        runtime_values = _values(group, "total_runtime_seconds")
+        output.append(
+            {
+                **_summary_base(group),
+                "harness_verification_rate_percent": (
+                    float(100.0 * verified / denominator)
+                    if denominator
+                    else ""
+                ),
+                "execution_time_seconds_median": _median(runtime_values),
+                "execution_time_seconds_iqr": _iqr(runtime_values),
+                "peak_memory_usage_mb_max": max(peak_memory_mb, default=""),
+                "peak_memory_usage_mb_median": _median(peak_memory_mb),
+                "cpu_utilization_percent_mean": _mean(cpu_values),
+                "cpu_utilization_percent_std": _std(cpu_values),
+                "accuracy_percent_mean": _mean(accuracies),
+                "accuracy_percent_std": _std(accuracies),
+                "cpu_utilization_definition": "100_percent_equals_one_fully_used_cpu_core",
+            }
+        )
+    return sorted(output, key=_summary_key)
+
+
 def _summary_key_value(value: Any) -> str:
     number = _num(value)
     if number is not None:
@@ -847,6 +1046,99 @@ def _region_certification_summary_rows(rows: list[dict[str, Any]]) -> list[dict[
             }
         )
     return sorted(output, key=_summary_key)
+
+
+def _source_summary_key(row: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+    return (
+        _summary_key_value(row.get("dataset")),
+        _summary_key_value(row.get("arch")),
+        _summary_key_value(row.get("input_epsilon")),
+        _summary_key_value(row.get("normalized_input_epsilon")),
+        _summary_key_value(row.get("method")),
+        _summary_key_value(row.get("mode") or "full_pipeline"),
+    )
+
+
+def _source_aware_certification_summary_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str, str, str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(_source_summary_key(row), []).append(row)
+
+    output: list[dict[str, Any]] = []
+    for group in grouped.values():
+        first = group[0]
+        source_verified = sum(
+            1
+            for row in group
+            if str(row.get("source_property_status", "")).upper() == "VERIFIED"
+        )
+        source_inconclusive = sum(
+            1
+            for row in group
+            if str(row.get("source_property_status", "")).upper() == "INCONCLUSIVE"
+        )
+        quantized_started = sum(
+            1 for row in group if _bool(row.get("quantized_pipeline_started")) is True
+        )
+        esbmc_attempted = sum(
+            1 for row in group if _bool(row.get("esbmc_attempted")) is True
+        )
+        guarantee_available = _has_guarantee_level(group)
+        certified = sum(
+            1
+            for row in group
+            if _certified(row, guarantee_level_available=guarantee_available)
+        )
+        n_regions = len(group)
+        output.append(
+            {
+                "benchmark": f"{first.get('dataset')}/{first.get('arch')}",
+                "dataset": first.get("dataset"),
+                "arch": first.get("arch"),
+                "input_epsilon": first.get("input_epsilon"),
+                "normalized_input_epsilon": first.get("normalized_input_epsilon"),
+                "method": first.get("method"),
+                "mode": first.get("mode") or "full_pipeline",
+                "n_regions": n_regions,
+                "source_verified_count": source_verified,
+                "source_inconclusive_count": source_inconclusive,
+                "source_eligibility_fraction": (
+                    source_verified / n_regions if n_regions else ""
+                ),
+                "quantized_pipeline_started_count": quantized_started,
+                "esbmc_attempted_count": esbmc_attempted,
+                "certified_count": certified,
+                "certified_fraction_all_regions": (
+                    certified / n_regions if n_regions else ""
+                ),
+                "certified_fraction_given_source_verified": (
+                    certified / source_verified if source_verified else ""
+                ),
+                "timeout_count": sum(
+                    1 for row in group if _status_present(row, "TIMEOUT")
+                ),
+                "memout_count": sum(
+                    1 for row in group if _status_present(row, "MEMOUT")
+                ),
+                "unknown_count": sum(
+                    1 for row in group if _status_present(row, "UNKNOWN")
+                ),
+                "pre_esbmc_inconclusive_count": sum(
+                    1
+                    for row in group
+                    if _bool(row.get("esbmc_attempted")) is not True
+                    and (
+                        str(row.get("source_property_status", "")).upper()
+                        == "INCONCLUSIVE"
+                        or str(row.get("final_status", "")).upper()
+                        in {"PREIMAGE_DEFLATION_EMPTY", "MARGIN_INCONCLUSIVE"}
+                    )
+                ),
+            }
+        )
+    return sorted(output, key=lambda row: _source_summary_key(row))
 
 
 def _exact_rate(group: list[dict[str, Any]], field: str) -> float | None:
@@ -1348,10 +1640,13 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
     mrr_rows = _mrr_rows(rows)
     implementation_gap_rows = _implementation_gap_rows(rows)
     ablation_rows = _ablation_rows(rows)
+    harness_performance_rows = _harness_performance_rows(rows)
     region_certification_rows = _region_certification_summary_rows(rows)
+    source_aware_certification_rows = _source_aware_certification_summary_rows(rows)
     deployment_quality_summary_rows = _deployment_quality_summary_rows(rows)
     runtime_summary_rows = _runtime_summary_rows(rows)
     delta_star_summary_rows = _delta_star_summary_rows(mrr_rows)
+    harness_performance_summary_rows = _harness_performance_summary_rows(rows)
 
     smt_path = output_root / "smt_complexity.csv"
     smt_rows = _read_csv(smt_path)
@@ -1375,9 +1670,11 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
             "rows": rows,
             "aggregate_tables": {
                 "region_certification": region_certification_rows,
+                "source_aware_certification": source_aware_certification_rows,
                 "deployment_quality": deployment_quality_summary_rows,
                 "runtime": runtime_summary_rows,
                 "delta_star": delta_star_summary_rows,
+                "harness_performance": harness_performance_summary_rows,
             },
         },
     )
@@ -1391,9 +1688,24 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
     _write_csv(output_root / "table_implementation_gap.csv", implementation_gap_rows, IMPLEMENTATION_GAP_FIELDS)
     _write_csv(output_root / "table_ablation.csv", ablation_rows, ABLATION_FIELDS)
     _write_csv(
+        output_root / "table_harness_performance.csv",
+        harness_performance_rows,
+        HARNESS_PERFORMANCE_FIELDS,
+    )
+    _write_csv(
+        output_root / "table_harness_performance_summary.csv",
+        harness_performance_summary_rows,
+        HARNESS_PERFORMANCE_SUMMARY_FIELDS,
+    )
+    _write_csv(
         output_root / "table_region_certification_summary.csv",
         region_certification_rows,
         REGION_CERTIFICATION_FIELDS,
+    )
+    _write_csv(
+        output_root / "table_source_aware_certification_summary.csv",
+        source_aware_certification_rows,
+        SOURCE_AWARE_CERTIFICATION_FIELDS,
     )
     _write_csv(
         output_root / "table_deployment_quality_summary.csv",
@@ -1430,8 +1742,15 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
         "all_experiments_csv": str(output_root / "all_experiments.csv"),
         "all_experiments_json": str(output_root / "all_experiments.json"),
         "table_region_certification_summary_csv": str(output_root / "table_region_certification_summary.csv"),
+        "table_source_aware_certification_summary_csv": str(
+            output_root / "table_source_aware_certification_summary.csv"
+        ),
         "table_deployment_quality_summary_csv": str(output_root / "table_deployment_quality_summary.csv"),
         "table_runtime_summary_csv": str(output_root / "table_runtime_summary.csv"),
+        "table_harness_performance_csv": str(output_root / "table_harness_performance.csv"),
+        "table_harness_performance_summary_csv": str(
+            output_root / "table_harness_performance_summary.csv"
+        ),
         **(
             {"table_delta_star_summary_csv": str(output_root / "table_delta_star_summary.csv")}
             if delta_star_summary_rows
@@ -1493,6 +1812,19 @@ ABLATION_FIELDS = [
     "esbmc_time_seconds", "timeout_rate", "memout_rate", "quantized_keras_accuracy",
     "python_fixed_accuracy", "c_fixed_accuracy", "max_saturation_rate", "mismatch_rate_vs_keras",
 ]
+HARNESS_PERFORMANCE_FIELDS = [
+    "run_name", "dataset", "arch", "sample_id", "method", "mode", "composition_path",
+    "harness_verification_rate_percent", "execution_time_seconds", "peak_memory_usage_mb",
+    "cpu_utilization_percent", "accuracy_percent", "cpu_utilization_definition",
+]
+HARNESS_PERFORMANCE_SUMMARY_FIELDS = [
+    "benchmark", "dataset", "arch", "input_epsilon", "normalized_input_epsilon", "method",
+    "mode", "composition_path", "n_regions", "harness_verification_rate_percent",
+    "execution_time_seconds_median", "execution_time_seconds_iqr", "peak_memory_usage_mb_max",
+    "peak_memory_usage_mb_median", "cpu_utilization_percent_mean",
+    "cpu_utilization_percent_std", "accuracy_percent_mean", "accuracy_percent_std",
+    "cpu_utilization_definition",
+]
 FAILED_RUN_FIELDS = [
     "name", "dataset", "arch", "sample_id", "eps", "input_epsilon", "status", "return_code",
     "started_at", "finished_at", "elapsed_seconds", "output_dir", "error_message",
@@ -1504,6 +1836,14 @@ REGION_CERTIFICATION_FIELDS = [
     "bits_per_param_std", "size_vs_FP32_mean", "size_vs_FP32_std",
     "compression_ratio_vs_float32_mean", "compression_ratio_vs_float32_std", "max_neurons_query",
     "max_input_dim_query", "max_estimated_macs_query",
+]
+SOURCE_AWARE_CERTIFICATION_FIELDS = [
+    "benchmark", "dataset", "arch", "input_epsilon", "normalized_input_epsilon",
+    "method", "mode", "n_regions", "source_verified_count",
+    "source_inconclusive_count", "source_eligibility_fraction",
+    "quantized_pipeline_started_count", "esbmc_attempted_count", "certified_count",
+    "certified_fraction_all_regions", "certified_fraction_given_source_verified",
+    "timeout_count", "memout_count", "unknown_count", "pre_esbmc_inconclusive_count",
 ]
 DEPLOYMENT_QUALITY_SUMMARY_FIELDS = [
     "benchmark", "dataset", "arch", "input_epsilon", "normalized_input_epsilon", "method", "mode", "composition_path",

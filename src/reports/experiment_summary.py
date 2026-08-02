@@ -134,7 +134,11 @@ def _final_status(
         return "FAILED"
     if require_formal_no_saturation and no_saturation_status == "FAILED":
         return "FAILED"
-    if contract_verified and deployment_quality_accepted and no_saturation_verified:
+    if (
+        contract_verified
+        and deployment_quality_accepted
+        and (no_saturation_verified or not require_formal_no_saturation)
+    ):
         return "VERIFIED"
     if contract_verified and deployment_quality_accepted and no_saturation_status in {
         "FAILED",
@@ -292,6 +296,8 @@ def _pipeline_terminal_reason(pipeline_summary: dict[str, Any]) -> str | None:
         return "reachable_output_margin_counterexample"
     if final_status == "PREIMAGE_DEFLATION_EMPTY":
         return "preimage_deflation_empty"
+    if final_status == "SOURCE_PROPERTY_INCONCLUSIVE":
+        return "source_float_property_not_established_by_deeppoly"
     if final_status == "VACUOUS":
         return "vacuous_assumption_box"
     return None
@@ -314,6 +320,19 @@ def _guarantee_level(
     deployment_quality_accepted = bool(status_controls.get("deployment_quality_accepted", False))
     contract_verified = bool(status_controls.get("contract_verified", False))
     final_status = str(status_controls.get("final_status", "UNKNOWN"))
+    source_region = pipeline_summary.get("source_region", {})
+    if (
+        final_status == "SOURCE_PROPERTY_INCONCLUSIVE"
+        or str(source_region.get("status", "")).upper() == "INCONCLUSIVE"
+    ):
+        return {
+            "guarantee_level": "unknown",
+            "transfer_preconditions": {
+                "source_property_verified": False,
+                "contracts_verified": False,
+                "esbmc_attempted": bool(source_region.get("esbmc_attempted", False)),
+            },
+        }
     end_to_end = pipeline_summary.get("end_to_end_verification", {})
     if isinstance(end_to_end, dict) and bool(end_to_end.get("enabled", False)):
         e2e_status = str(end_to_end.get("status", "UNKNOWN"))
@@ -353,6 +372,7 @@ def _guarantee_level(
         "UNKNOWN",
         "MARGIN_INCONCLUSIVE",
         "PREIMAGE_DEFLATION_EMPTY",
+        "SOURCE_PROPERTY_INCONCLUSIVE",
     } or contract_status in {
         "TIMEOUT",
         "MEMOUT",
@@ -439,6 +459,18 @@ def _guarantee_level(
         "guarantee_level": "deployed-transfer" if deployed_transfer else "harness-verified",
         "transfer_preconditions": preconditions,
     }
+
+
+def derive_guarantee_level(
+    pipeline_summary: dict[str, Any],
+    status_controls: dict[str, Any],
+) -> dict[str, Any]:
+    """Derive a transfer claim from authoritative pipeline and status data."""
+
+    return _guarantee_level(
+        pipeline_summary=pipeline_summary,
+        status_controls=status_controls,
+    )
 
 
 def _blockwise_controls(pipeline_summary: dict[str, Any]) -> dict[str, Any]:
@@ -533,6 +565,68 @@ def build_experiment_summary(
         if refined_pipeline_status_value is not None
         else None
     )
+    end_to_end = pipeline_summary.get("end_to_end_verification", {})
+    layer_scope = not bool(
+        isinstance(end_to_end, dict) and end_to_end.get("enabled", False)
+    )
+    if (
+        layer_scope
+        and bool(formal_synthesis.get("success", False))
+        and formal_pipeline_status == "VERIFIED"
+    ):
+        formal_status_controls.update(
+            {
+                "contract_verified": True,
+                "contract_status": "VERIFIED",
+                "final_status": _final_status(
+                    contract_verified=True,
+                    contract_status="VERIFIED",
+                    no_saturation_status=str(
+                        formal_status_controls.get("no_saturation_status", "SKIPPED")
+                    ),
+                    no_saturation_verified=bool(
+                        formal_status_controls.get("no_saturation_verified", False)
+                    ),
+                    deployment_quality_accepted=bool(
+                        formal_status_controls.get("deployment_quality_accepted", False)
+                    ),
+                    require_formal_no_saturation=bool(
+                        formal_saturation_controls.get(
+                            "require_formal_no_saturation", False
+                        )
+                    ),
+                ),
+            }
+        )
+    if (
+        layer_scope
+        and bool(synthesis.get("success", False))
+        and refined_pipeline_status == "VERIFIED"
+    ):
+        refined_status_controls.update(
+            {
+                "contract_verified": True,
+                "contract_status": "VERIFIED",
+                "final_status": _final_status(
+                    contract_verified=True,
+                    contract_status="VERIFIED",
+                    no_saturation_status=str(
+                        refined_status_controls.get("no_saturation_status", "SKIPPED")
+                    ),
+                    no_saturation_verified=bool(
+                        refined_status_controls.get("no_saturation_verified", False)
+                    ),
+                    deployment_quality_accepted=bool(
+                        refined_status_controls.get("deployment_quality_accepted", False)
+                    ),
+                    require_formal_no_saturation=bool(
+                        refined_saturation_controls.get(
+                            "require_formal_no_saturation", False
+                        )
+                    ),
+                ),
+            }
+        )
     terminal_pipeline_statuses = {
         "FAILED",
         "TIMEOUT",
@@ -542,10 +636,22 @@ def build_experiment_summary(
         "MARGIN_INCONCLUSIVE",
         "MARGIN_REFUTED",
         "PREIMAGE_DEFLATION_EMPTY",
+        "SOURCE_PROPERTY_INCONCLUSIVE",
         "VACUOUS",
     }
     if formal_pipeline_status in terminal_pipeline_statuses:
         formal_status_controls["final_status"] = formal_pipeline_status
+        if formal_pipeline_status == "SOURCE_PROPERTY_INCONCLUSIVE":
+            formal_status_controls.update(
+                {
+                    "contract_verified": False,
+                    "contract_status": "SKIPPED",
+                    "no_saturation_formally_checked": False,
+                    "no_saturation_status": "SKIPPED",
+                    "no_saturation_verified": False,
+                    "deployment_quality_accepted": False,
+                }
+            )
         if (
             formal_status_controls.get("contract_status") == "UNKNOWN"
             and formal_pipeline_status in {"FAILED", "TIMEOUT", "MEMOUT"}
@@ -553,6 +659,17 @@ def build_experiment_summary(
             formal_status_controls["contract_status"] = formal_pipeline_status
     if refined_pipeline_status in terminal_pipeline_statuses:
         refined_status_controls["final_status"] = refined_pipeline_status
+        if refined_pipeline_status == "SOURCE_PROPERTY_INCONCLUSIVE":
+            refined_status_controls.update(
+                {
+                    "contract_verified": False,
+                    "contract_status": "SKIPPED",
+                    "no_saturation_formally_checked": False,
+                    "no_saturation_status": "SKIPPED",
+                    "no_saturation_verified": False,
+                    "deployment_quality_accepted": False,
+                }
+            )
         if (
             refined_status_controls.get("contract_status") == "UNKNOWN"
             and refined_pipeline_status in {"FAILED", "TIMEOUT", "MEMOUT"}
@@ -598,6 +715,7 @@ def build_experiment_summary(
         **formal_guarantee_controls,
         **blockwise_controls,
         "composition_path": pipeline_summary.get("composition_path", "layer_contracts"),
+        "source_region": pipeline_summary.get("source_region", {}),
     }
 
     refined_section = {
@@ -622,6 +740,7 @@ def build_experiment_summary(
         **refined_guarantee_controls,
         **blockwise_controls,
         "composition_path": pipeline_summary.get("composition_path", "layer_contracts"),
+        "source_region": pipeline_summary.get("source_region", {}),
     }
 
     return {
@@ -648,6 +767,7 @@ def build_experiment_summary(
         "verification_claims": pipeline_summary.get(
             "verification_claims",
             {
+                "source_property_verification": "deeppoly_sufficient_condition",
                 "fixed_point_semantics": "declared_backend_semantics",
                 "accumulator_range": "static_interval_analysis",
                 "deployment_metrics": "empirical_dataset_evaluation",
@@ -657,6 +777,7 @@ def build_experiment_summary(
         ),
         "contract_harness_semantics": pipeline_summary.get("contract_harness_semantics", {}),
         "contract_tolerance": pipeline_summary.get("contract_tolerance", {}),
+        "source_region": pipeline_summary.get("source_region", {}),
         "output_margin_check": pipeline_summary.get("output_margin_check", {}),
         "margin_cuts": pipeline_summary.get("margin_cuts", {}),
         "preimage_provenance": pipeline_summary.get("preimage_provenance", {}),
@@ -668,6 +789,7 @@ def build_experiment_summary(
         ),
         "blockwise_verification": pipeline_summary.get("blockwise_verification", {}),
         "esbmc_memory_metrics": pipeline_summary.get("esbmc_memory_metrics", {}),
+        "esbmc_cpu_metrics": pipeline_summary.get("esbmc_cpu_metrics", {}),
         "no_saturation_blocks": pipeline_summary.get("no_saturation_blocks", []),
         **refined_saturation_controls,
         **refined_status_controls,
