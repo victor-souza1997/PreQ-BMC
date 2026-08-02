@@ -1,0 +1,130 @@
+{
+  "metadata": {
+    "description": "Staged Seeds and MNIST pilot for repaired derived preimage contracts",
+    "reproduce_command": "preqbmc reproduce --config experiments/seeds_mnist_sound_repair_pilot.json --aggregate",
+    "output_root": "output/seeds_mnist_sound_repair_runs",
+    "input_root": "output/seeds_mnist_sound_repair_runs",
+    "aggregate_output_root": "output/seeds_mnist_sound_repair_results",
+    "notes": [
+      "This pilot uses derived layer contracts and does not permit an end-to-end fallback.",
+      "MILP proposes relational cuts, but ESBMC must validate every cut over the exact deployed prefix before a contract harness can assume it.",
+      "F=8 is fixed to measure dataset and architecture feasibility before an F=8..12 precision search.",
+      "MNIST epsilon is expressed in raw pixel units; eps=1.0 corresponds to 1/255 after normalization.",
+      "Only final_status=VERIFIED with guarantee_level=deployed-transfer is a certificate.",
+      "SOURCE_PROPERTY_INCONCLUSIVE, PREIMAGE_UNAVAILABLE, LAYER_INCONCLUSIVE, TIMEOUT, and MEMOUT are preserved as measured outcomes.",
+      "The 25- and 50-neuron MNIST architectures are staged but disabled initially; no 100-neuron architecture is included."
+    ]
+  },
+  "defaults": {
+    "bit_lb": 8,
+    "bit_ub": 8,
+    "preimg_mode": "milp",
+    "verify_mode": "esbmc",
+    "solver": "cbc",
+    "method": "both",
+    "mode": "derived_layer_contract_relational_cegar",
+    "compare_split": "test",
+    "compare_limit": 100,
+    "compile_c_backend": true,
+    "enable_diagnostics": true,
+    "export_paper_tables": true,
+    "error_budget_mode": "derived",
+    "cex_feedback": "filter+jump",
+    "harness_scope": "layer",
+    "margin_cuts": "on",
+    "cegar_max_rounds": 3,
+    "e2e_fallback": "off",
+    "vacuity_check": true,
+    "unsound_contract_tolerance": false,
+    "propagate_contract_tolerance": false,
+    "enforce_contract_chaining": true,
+    "quality_refinement": false,
+    "max_quality_refinement_steps": 0,
+    "formal_no_saturation": false,
+    "require_formal_no_saturation": false,
+    "empirical_saturation_check": true,
+    "accuracy_drop_threshold": 0.05,
+    "saturation_threshold": 0.01,
+    "mismatch_threshold": 0.05,
+    "esbmc_profile": "paper-z3",
+    "esbmc_timeout_seconds": 300,
+    "esbmc_memlimit": "20g",
+    "esbmc_jobs": 1,
+    "blockwise_fail_fast": true,
+    "blockwise_run_all_blocks_on_failure": false,
+    "no_saturation_continue_on_unknown": false,
+    "gurobi_threads": 4,
+    "allowed_failure": true,
+    "enabled": true
+  },
+  "runs": [
+    {
+      "name": "seeds_1blk10_derived_sample13",
+      "dataset": "seeds",
+      "arch": "1blk_10",
+      "sample_id": 13,
+      "eps_sweep": [0.001, 0.005, 0.01],
+      "esbmc_layer_block_size": 5,
+      "expected_difficulty": "low",
+      "enabled": false
+    },
+    {
+      "name": "mnist_1blk10_derived_sample3",
+      "dataset": "mnist",
+      "arch": "1blk_10",
+      "sample_id": 3,
+      "eps_sweep": [0.25, 0.5, 1.0, 2.0, 4.0],
+      "esbmc_layer_block_size": 2,
+      "expected_difficulty": "high"
+    },
+    {
+      "name": "mnist_2blk10_derived_sample3",
+      "dataset": "mnist",
+      "arch": "2blk_10_10",
+      "sample_id": 3,
+      "eps_sweep": [0.25, 0.5, 1.0, 2.0, 4.0],
+      "esbmc_layer_block_size": 2,
+      "expected_difficulty": "high"
+    },
+    {
+      "name": "mnist_1blk25_derived_sample3",
+      "dataset": "mnist",
+      "arch": "1blk_25",
+      "sample_id": 3,
+      "eps_sweep": [0.25, 0.5, 1.0],
+      "esbmc_layer_block_size": 2,
+      "enabled": false,
+      "expected_difficulty": "frontier"
+    },
+    {
+      "name": "mnist_2blk25_derived_sample3",
+      "dataset": "mnist",
+      "arch": "2blk_25_25",
+      "sample_id": 3,
+      "eps_sweep": [0.25, 0.5, 1.0],
+      "esbmc_layer_block_size": 2,
+      "enabled": false,
+      "expected_difficulty": "frontier"
+    },
+    {
+      "name": "mnist_1blk50_derived_sample3",
+      "dataset": "mnist",
+      "arch": "1blk_50",
+      "sample_id": 3,
+      "eps_sweep": [0.25, 0.5, 1.0],
+      "esbmc_layer_block_size": 2,
+      "enabled": false,
+      "expected_difficulty": "frontier"
+    },
+    {
+      "name": "mnist_2blk50_derived_sample3",
+      "dataset": "mnist",
+      "arch": "2blk_50_50",
+      "sample_id": 3,
+      "eps_sweep": [0.25, 0.5, 1.0],
+      "esbmc_layer_block_size": 2,
+      "enabled": false,
+      "expected_difficulty": "frontier"
+    }
+  ]
+}

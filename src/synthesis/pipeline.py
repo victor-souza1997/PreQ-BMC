@@ -41,6 +41,7 @@ from synthesis.forward import forward_dnn
 from synthesis.preimage_cache import build_preimage_cache_identity
 from synthesis.preqbmc import GPEncoding, QuadapterConfig, SynthesisResult
 from synthesis.solver_backend import SolverBackendName
+from utils.fixed_point import quantize_interval_int_bounds
 from utils.logging_utils import get_logger
 from verification.esbmc import ESBMCConfig, ESBMCProfile
 from verification.properties import ClassificationProperty
@@ -134,11 +135,13 @@ def _fixed_point_input_bounds(
     x_low_real: np.ndarray,
     x_high_real: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    scale = 1 << network.input_fractional_bits
-    return (
-        np.floor(np.asarray(x_low_real, dtype=np.float64) * scale).astype(object),
-        np.ceil(np.asarray(x_high_real, dtype=np.float64) * scale).astype(object),
+    lower, upper = quantize_interval_int_bounds(
+        np.asarray(x_low_real, dtype=np.float64),
+        np.asarray(x_high_real, dtype=np.float64),
+        network.input_total_bits,
+        network.input_fractional_bits,
     )
+    return lower.astype(object), upper.astype(object)
 
 
 def _build_layer_specs(result: SynthesisResult) -> list[LayerQuantizationSpec]:

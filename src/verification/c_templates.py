@@ -19,6 +19,7 @@ def outerlayer_fixed_int(
     margin_cut_high_c_int: str | None = None,
     margin_cut_scale: int | None = None,
     margin_cut_count: int = 0,
+    competitor_class: int | None = None,
 ) -> str:
     input_scale = scale_factor if input_scale_factor is None else int(input_scale_factor)
     cuts_enabled = int(margin_cut_count) > 0
@@ -60,6 +61,48 @@ static void assume_sound_margin_cuts(const long long input[INPUT_SIZE])
 }}
 """
         cut_application = "    assume_sound_margin_cuts(input);\n"
+    if competitor_class is not None:
+        competitor = int(competitor_class)
+        if competitor < 0 or competitor >= int(cur_layer_layer_size):
+            raise ValueError("Output competitor class is outside the layer.")
+        if competitor == int(targetCls):
+            raise ValueError("Output competitor class must differ from the target.")
+        competitor_declaration = f"#define COMPETITOR_CLASS {competitor}\n"
+        classification_function = """\
+static int verify_classification(const long long out_[LAYER_SIZE])
+{
+    return out_[TARGET_CLASS] > out_[COMPETITOR_CLASS];
+}
+"""
+        assertion_message = "Target does not strictly exceed selected competitor"
+    else:
+        competitor_declaration = ""
+        classification_function = """\
+static int verify_classification(const long long out_[LAYER_SIZE])
+{
+    const int T = TARGET_CLASS;
+    const long long target = out_[T];
+    long long max_other = LLONG_MIN / 2;
+
+    int i = 0;
+
+    while (i < LAYER_SIZE)
+    {
+        __ESBMC_loop_invariant(0 <= i && i <= LAYER_SIZE && max_other <= target);
+        if (i != T) {
+            const long long cand = out_[i];
+            if (cand > max_other) {
+                max_other = cand;
+            }
+        }
+        ++i;
+    }
+
+    return max_other < target;
+}
+"""
+        assertion_message = "Classification property violated (output layer, fixed-point)"
+
     return f"""\
 #include <stdint.h>
 #include <limits.h>
@@ -68,6 +111,7 @@ static void assume_sound_margin_cuts(const long long input[INPUT_SIZE])
 #define INPUT_SIZE   {in_layer_layer_size}
 #define LAYER_SIZE   {cur_layer_layer_size}
 #define TARGET_CLASS {targetCls}
+{competitor_declaration}\
 #define SCALE_FACTOR {scale_factor}LL
 #define INPUT_SCALE_FACTOR {input_scale}LL
 #define TOTAL_BITS   {total_bits}
@@ -107,29 +151,8 @@ static void affine_transform_fixed(const long long in_[INPUT_SIZE], long long ou
     }}
 }}
 
-/* verifica se o output condiz a classe esperada */
-static int verify_classification(const long long out_[LAYER_SIZE])
-{{
-    const int T = TARGET_CLASS;
-    const long long target = out_[T];
-    long long max_other = LLONG_MIN / 2;
-
-    int i = 0;
-
-    while (i < LAYER_SIZE)
-    {{
-        __ESBMC_loop_invariant(0 <= i && i <= LAYER_SIZE && max_other <= target);
-        if (i != T) {{
-            const long long cand = out_[i];
-            if (cand > max_other) {{
-                max_other = cand;
-            }}
-        }}
-        ++i;
-    }}
-
-    return max_other < target;
-}}
+/* Verifica a classe esperada, optionally against one decomposed competitor. */
+{classification_function}
 
 int main(void)
 {{
@@ -147,7 +170,7 @@ int main(void)
     affine_transform_fixed(input, output);
 
     __ESBMC_assert(verify_classification(output),
-                   "Classification property violated (output layer, fixed-point)");
+                   "{assertion_message}");
 
     return 0;
 }}
@@ -1072,6 +1095,7 @@ def render_output_target_program(
     margin_cut_high_c_int: str | None = None,
     margin_cut_scale: int | None = None,
     margin_cut_count: int = 0,
+    competitor_class: int | None = None,
 ) -> str:
     """Render the exact deployed output property over a verified hidden box.
 
@@ -1103,6 +1127,7 @@ def render_output_target_program(
         margin_cut_high_c_int=margin_cut_high_c_int,
         margin_cut_scale=margin_cut_scale,
         margin_cut_count=margin_cut_count,
+        competitor_class=competitor_class,
     )
 
 
@@ -1330,8 +1355,15 @@ int main(void)
 
     for (int i = 0; i < INPUT_SIZE; ++i)
     {{
-        input[i] = nondet_longlong();
-        __ESBMC_assume(input[i] >= INPUT_LOW[i] && input[i] <= INPUT_HIGH[i]);
+        if (INPUT_LOW[i] == INPUT_HIGH[i])
+        {{
+            input[i] = INPUT_LOW[i];
+        }}
+        else
+        {{
+            input[i] = nondet_longlong();
+            __ESBMC_assume(input[i] >= INPUT_LOW[i] && input[i] <= INPUT_HIGH[i]);
+        }}
         buffer_a[i] = input[i];
     }}
 
@@ -1433,8 +1465,16 @@ int main(void)
     int64_t buffer_b[{max_width}] = {{0}};
     for (int i = 0; i < INPUT_SIZE; ++i)
     {{
-        const int64_t input = nondet_longlong();
-        __ESBMC_assume(input >= INPUT_LOW[i] && input <= INPUT_HIGH[i]);
+        int64_t input;
+        if (INPUT_LOW[i] == INPUT_HIGH[i])
+        {{
+            input = INPUT_LOW[i];
+        }}
+        else
+        {{
+            input = nondet_longlong();
+            __ESBMC_assume(input >= INPUT_LOW[i] && input <= INPUT_HIGH[i]);
+        }}
         buffer_a[i] = input;
     }}
 

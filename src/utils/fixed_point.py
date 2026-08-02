@@ -59,6 +59,42 @@ def quantize_int(float_value: np.ndarray | float, num_bits: int, frac_bits: int)
     return np.int64(rounded)
 
 
+def quantize_interval_int_bounds(
+    lower: np.ndarray,
+    upper: np.ndarray,
+    num_bits: int,
+    frac_bits: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the exact integer image of a box under deployed input quantization.
+
+    Saturating round-half-away-from-zero quantization is monotone and coordinatewise,
+    so quantizing both closed endpoints gives the exact minimum and maximum integer
+    values attainable by each coordinate. This avoids the extra lattice points added
+    by floor/ceil enclosure while retaining every quantized deployment input.
+    """
+
+    lower_array = np.asarray(lower, dtype=np.float64)
+    upper_array = np.asarray(upper, dtype=np.float64)
+    if lower_array.shape != upper_array.shape:
+        raise ValueError("Quantized interval endpoints must have identical shapes.")
+    if not (np.all(np.isfinite(lower_array)) and np.all(np.isfinite(upper_array))):
+        raise ValueError("Quantized interval endpoints must be finite.")
+    if np.any(lower_array > upper_array):
+        raise ValueError("Quantized interval lower endpoint exceeds upper endpoint.")
+
+    lower_int = np.asarray(
+        quantize_int(lower_array, num_bits, frac_bits),
+        dtype=np.int64,
+    )
+    upper_int = np.asarray(
+        quantize_int(upper_array, num_bits, frac_bits),
+        dtype=np.int64,
+    )
+    if np.any(lower_int > upper_int):
+        raise AssertionError("Monotone quantization produced inverted interval bounds.")
+    return lower_int, upper_int
+
+
 def dequantize_int(int_value: np.ndarray | int, frac_bits: int) -> np.ndarray | float:
     """Convert signed fixed-point integers back to floating-point."""
 

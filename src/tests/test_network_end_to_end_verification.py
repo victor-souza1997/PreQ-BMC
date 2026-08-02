@@ -152,7 +152,7 @@ class NetworkEndToEndVerificationTest(unittest.TestCase):
         )
         self.assertEqual(experiment["final_status"], status)
 
-    def test_failed_network_query_extracts_and_replays_counterexample(self) -> None:
+    def test_exact_input_quantizer_removes_floor_ceil_only_counterexample(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             pipeline, experiment = self._run(
                 dataset="iris",
@@ -165,16 +165,15 @@ class NetworkEndToEndVerificationTest(unittest.TestCase):
                 cex_feedback="filter+jump",
             )
 
-        replay = pipeline["end_to_end_verification"]["counterexample_replay"]
-        self.assertEqual(pipeline["end_to_end_verification"]["status"], "FAILED")
-        self.assertIsNotNone(replay)
-        self.assertTrue(replay["python_replay_confirmed"])
-        self.assertTrue(replay["so_replay_confirmed"])
+        end_to_end = pipeline["end_to_end_verification"]
+        self.assertEqual(end_to_end["status"], "VERIFIED")
+        self.assertEqual(end_to_end["assumption_box_cardinality"], "1")
+        self.assertIsNone(end_to_end["counterexample_replay"])
         self.assertEqual(
-            pipeline["counterexamples"]["counterexample_confirmation_rate"],
-            1.0,
+            pipeline["counterexamples"]["counterexamples_total"],
+            0,
         )
-        self.assertEqual(experiment["final_status"], "FAILED")
+        self.assertEqual(experiment["final_status"], "VERIFIED")
 
 
 if __name__ == "__main__":

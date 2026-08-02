@@ -11,6 +11,26 @@ from verification.esbmc import ESBMCConfig, ESBMCRunner
 
 @unittest.skipUnless(Path("/proc").is_dir(), "Linux /proc is required for RSS monitoring")
 class ESBMCResourceMonitoringTest(unittest.TestCase):
+    def test_solver_abort_near_memlimit_is_classified_as_memout(self) -> None:
+        status = ESBMCRunner._classify_status(
+            "ERROR: SMT solver failed",
+            -6,
+            peak_memory_bytes=int(5.82 * 1024**3),
+            memlimit="6g",
+        )
+
+        self.assertEqual(status, "MEMOUT")
+
+    def test_solver_abort_away_from_memlimit_remains_unknown(self) -> None:
+        status = ESBMCRunner._classify_status(
+            "ERROR: SMT solver failed",
+            -6,
+            peak_memory_bytes=256 * 1024**2,
+            memlimit="6g",
+        )
+
+        self.assertEqual(status, "UNKNOWN")
+
     def test_call_summary_reports_verification_rate_and_cpu_utilization(self) -> None:
         encoder = GPEncoding.__new__(GPEncoding)
         encoder.esbmc_call_records = [

@@ -14,6 +14,7 @@ from backends.fixed_point import (
 )
 from reports.experiment_summary import summarize_saturation
 from reports.resource_metrics import compute_fixed_point_resource_metrics
+from utils.fixed_point import quantize_int, quantize_interval_int_bounds
 
 
 class _ToyDenseLayer:
@@ -46,6 +47,31 @@ def _build_toy_model() -> _ToyModel:
 
 
 class FixedPointForwardTest(unittest.TestCase):
+    def test_quantized_interval_bounds_are_exact_deployed_endpoint_image(self) -> None:
+        lower = np.asarray([-20.0, -0.20, 0.0, 0.49, 7.9], dtype=np.float64)
+        upper = np.asarray([-7.9, 0.20, 0.25 / 255.0, 0.76, 20.0], dtype=np.float64)
+
+        lower_int, upper_int = quantize_interval_int_bounds(lower, upper, 8, 8 - 4)
+
+        np.testing.assert_array_equal(lower_int, quantize_int(lower, 8, 4))
+        np.testing.assert_array_equal(upper_int, quantize_int(upper, 8, 4))
+        for index in range(lower.size):
+            samples = np.linspace(lower[index], upper[index], num=2001)
+            observed = np.asarray(quantize_int(samples, 8, 4), dtype=np.int64)
+            self.assertEqual(int(observed.min()), int(lower_int[index]))
+            self.assertEqual(int(observed.max()), int(upper_int[index]))
+
+    def test_exact_input_bounds_remove_unreachable_mnist_lattice_point(self) -> None:
+        lower_int, upper_int = quantize_interval_int_bounds(
+            np.asarray([0.0]),
+            np.asarray([0.25 / 255.0]),
+            13,
+            8,
+        )
+
+        np.testing.assert_array_equal(lower_int, np.asarray([0], dtype=np.int64))
+        np.testing.assert_array_equal(upper_int, np.asarray([0], dtype=np.int64))
+
     def test_layer_quantization_spec_validates_sign_bit_invariant(self) -> None:
         spec = LayerQuantizationSpec(total_bits=8, integer_bits=3, fractional_bits=4)
 

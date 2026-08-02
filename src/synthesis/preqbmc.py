@@ -30,6 +30,8 @@ from utils.fixed_point import (
     clamp_to_signed_range,
     int_get_min_max,
     quantize_int,
+    quantize_interval_int_bounds,
+    round_half_away_from_zero,
     round_divide_half_away_from_zero,
 )
 from utils.logging_utils import get_logger
@@ -710,15 +712,11 @@ class GPEncoding:
             fractional_bits,
             integer_bits,
         )
-        input_scale = 1 << int(network.input_fractional_bits)
-        input_q_min, input_q_max = specs[0].signed_range
-        x_low = np.maximum(
-            np.floor(np.asarray(self.x_low_real, dtype=np.float64) * input_scale).astype(np.int64),
-            input_q_min,
-        )
-        x_high = np.minimum(
-            np.ceil(np.asarray(self.x_high_real, dtype=np.float64) * input_scale).astype(np.int64),
-            input_q_max,
+        x_low, x_high = quantize_interval_int_bounds(
+            np.asarray(self.x_low_real, dtype=np.float64),
+            np.asarray(self.x_high_real, dtype=np.float64),
+            network.input_total_bits,
+            network.input_fractional_bits,
         )
         assumption_box_cardinality, assumption_box_valid = (
             self._assumption_box_cardinality(x_low, x_high)
@@ -810,6 +808,13 @@ class GPEncoding:
             input_dim=int(x_low.size),
             output_neurons=int(network.layers[-1].biases_int.size),
         )
+        call_record.update(
+            {
+                "input_domain_encoding": "exact_deployed_quantizer_image",
+                "fixed_input_dimensions": int(np.count_nonzero(x_low == x_high)),
+                "symbolic_input_dimensions": int(np.count_nonzero(x_low != x_high)),
+            }
+        )
         self.esbmc_call_records.append(call_record)
 
         replay_record: dict[str, Any] | None = None
@@ -867,6 +872,9 @@ class GPEncoding:
             "total_bits": [int(value) for value in total_bits],
             "integer_bits": [int(value) for value in integer_bits],
             "fractional_bits": [int(value) for value in fractional_bits],
+            "input_domain_encoding": "exact_deployed_quantizer_image",
+            "fixed_input_dimensions": int(np.count_nonzero(x_low == x_high)),
+            "symbolic_input_dimensions": int(np.count_nonzero(x_low != x_high)),
             "assumption_box_cardinality": assumption_box_cardinality,
             "esbmc_calls": 1,
             "harness": str(harness),
@@ -2155,6 +2163,22 @@ class GPEncoding:
         else:
             x_lo = np.array(in_layer.clipped_lb, dtype=np.float64)
             x_hi = np.array(in_layer.clipped_ub, dtype=np.float64)
+        if cur_layer.layer_index == 1:
+            fractional_bits = int(scale).bit_length() - 1
+            if scale != 1 << fractional_bits:
+                raise ValueError("Fixed-point input scale must be a power of two.")
+            internal_integer_bits = getattr(cur_layer, "int_bit", None)
+            if internal_integer_bits is not None:
+                return quantize_interval_int_bounds(
+                    x_lo,
+                    x_hi,
+                    fractional_bits + int(internal_integer_bits),
+                    fractional_bits,
+                )
+            return (
+                np.asarray(round_half_away_from_zero(x_lo * scale), dtype=np.int64),
+                np.asarray(round_half_away_from_zero(x_hi * scale), dtype=np.int64),
+            )
         return (
             np.floor(x_lo * scale).astype(np.int64),
             np.ceil(x_hi * scale).astype(np.int64),
@@ -3055,17 +3079,12 @@ class GPEncoding:
             previous_fractional_bits = fractional_bits
 
         input_total_bits, input_fractional_bits = formats[0]
-        input_scale = 1 << input_fractional_bits
-        input_min = -(1 << (input_total_bits - 1))
-        input_max = (1 << (input_total_bits - 1)) - 1
-        input_low = np.maximum(
-            np.floor(np.asarray(self.x_low_real, dtype=np.float64) * input_scale),
-            input_min,
-        ).astype(np.int64)
-        input_high = np.minimum(
-            np.ceil(np.asarray(self.x_high_real, dtype=np.float64) * input_scale),
-            input_max,
-        ).astype(np.int64)
+        input_low, input_high = quantize_interval_int_bounds(
+            np.asarray(self.x_low_real, dtype=np.float64),
+            np.asarray(self.x_high_real, dtype=np.float64),
+            input_total_bits,
+            input_fractional_bits,
+        )
         return input_low, input_high, payloads, tuple(formats)
 
     def _formally_validate_relational_cut(
@@ -3159,6 +3178,13 @@ class GPEncoding:
                 "direction_int": list(direction),
                 "cut_low_int": cut_low,
                 "cut_high_int": cut_high,
+                "input_domain_encoding": "exact_deployed_quantizer_image",
+                "fixed_input_dimensions": int(
+                    np.count_nonzero(input_low == input_high)
+                ),
+                "symbolic_input_dimensions": int(
+                    np.count_nonzero(input_low != input_high)
+                ),
             }
         )
         self.esbmc_call_records.append(call_record)
@@ -3248,9 +3274,25 @@ class GPEncoding:
             for lo, hi in zip(assumed_low, assumed_high)
         ]
 
+        unresolved_competitors: set[int] | None = None
+        output_margin_records = getattr(self, "output_margin_records", None)
+        if output_margin_records:
+            class_margins = output_margin_records[-1].get("class_margins")
+            if class_margins is not None:
+                unresolved_competitors = {
+                    int(margin["other_class"])
+                    for margin in class_margins
+                    if not bool(margin.get("ok", False))
+                }
+
         records: list[dict[str, Any]] = []
         for competitor in range(cur_layer.layer_size):
             if competitor == target:
+                continue
+            if (
+                unresolved_competitors is not None
+                and competitor not in unresolved_competitors
+            ):
                 continue
             direction = real_weights[competitor] - real_weights[target]
             lower_real, upper_real, elapsed = self._solve_margin_direction_milp(direction)
@@ -4087,6 +4129,34 @@ class GPEncoding:
                     },
                 )
 
+        is_output_target_layer = (
+            cur_layer.layer_index == len(self.dense_layers) + 1
+            and not self.property_spec.valid_labels
+            and self.error_budget_mode == "derived"
+            and bool(self.output_margin_records)
+        )
+        if is_output_target_layer:
+            margin_cuts = self._margin_cut_bounds(
+                cur_layer,
+                in_layer,
+                frac_bit,
+                all_bit,
+            )
+            self.output_margin_records[-1]["margin_cuts"] = [
+                dict(cut) for cut in margin_cuts
+            ]
+            return self._verify_output_margin_competitors_with_esbmc(
+                cur_layer=cur_layer,
+                in_layer=in_layer,
+                qu_w_int=qu_w_int,
+                qu_b_int=qu_b_int,
+                frac_bit=frac_bit,
+                all_bit=all_bit,
+                layer_index=layer_index,
+                margin_cuts=margin_cuts,
+                assumption_box_cardinality=cardinality,
+            )
+
         if self._uses_hidden_block_verification(cur_layer):
             result = self.verify_hidden_layer_blocks_with_esbmc(
                 cur_layer=cur_layer,
@@ -4231,6 +4301,133 @@ class GPEncoding:
             result = replace(result, status="LAYER_INCONCLUSIVE")
         LOGGER.info("ESBMC layer=%s bits(Q=%s,F=%s) status=%s", cur_layer.layer_index, all_bit, frac_bit, result.status)
         return result
+
+    def _verify_output_margin_competitors_with_esbmc(
+        self,
+        *,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        qu_w_int: np.ndarray,
+        qu_b_int: np.ndarray,
+        frac_bit: int,
+        all_bit: int,
+        layer_index: int,
+        margin_cuts: list[dict[str, Any]],
+        assumption_box_cardinality: str,
+    ) -> ESBMCResult:
+        """Verify the output-class conjunction as sequential competitor queries."""
+
+        class_margins = self.output_margin_records[-1].get("class_margins", [])
+        unresolved = [
+            int(margin["other_class"])
+            for margin in class_margins
+            if not bool(margin.get("ok", False))
+        ]
+        analytically_verified = [
+            int(margin["other_class"])
+            for margin in class_margins
+            if bool(margin.get("ok", False))
+        ]
+        if not unresolved:
+            return self._analytic_output_margin_result()
+
+        output_dir = self.output_dir / "layers" / "output_competitors"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        records: list[dict[str, Any]] = []
+        elapsed_total = 0.0
+        terminal_result: ESBMCResult | None = None
+
+        for competitor in unresolved:
+            source = self.generate_esbmc_verification_code(
+                cur_layer=cur_layer,
+                in_layer=in_layer,
+                qu_w_int=qu_w_int,
+                qu_b_int=qu_b_int,
+                frac_bit=frac_bit,
+                all_bit=all_bit,
+                layer_index=layer_index,
+                output_competitor_class=competitor,
+                output_margin_cuts=margin_cuts,
+            )
+            harness = output_dir / (
+                f"layer_{layer_index}_competitor_{competitor}_Q{all_bit}_F{frac_bit}.c"
+            )
+            harness.write_text(source, encoding="utf-8")
+            result = self._run_esbmc_file(
+                harness,
+                extract_counterexample=self.cex_feedback != "off",
+            )
+            self._stats["esbmc_calls"] += 1.0
+            elapsed_total += float(result.elapsed_seconds)
+            record = self._esbmc_call_record(
+                result=result,
+                layer_index=layer_index,
+                block_index=None,
+                start_neuron=None,
+                end_neuron=None,
+                all_bit=all_bit,
+                frac_bit=frac_bit,
+                harness=harness,
+                property_type="output_margin_competitor",
+                mode="competitor_decomposition",
+                input_dim=in_layer.layer_size,
+                output_neurons=2,
+            )
+            record.update(
+                {
+                    "target_class": int(
+                        self.property_spec.target_label
+                        if self.property_spec.target_label is not None
+                        else self.targetCls
+                    ),
+                    "competitor_class": int(competitor),
+                    "assumption_box_cardinality": assumption_box_cardinality,
+                    "shared_layer_qif": True,
+                }
+            )
+            records.append(record)
+            self.esbmc_call_records.append(record)
+            terminal_result = result
+            LOGGER.info(
+                "ESBMC output competitor layer=%s class=%s bits(Q=%s,F=%s) status=%s",
+                cur_layer.layer_index,
+                competitor,
+                all_bit,
+                frac_bit,
+                result.status,
+            )
+            if result.status != "VERIFIED":
+                break
+
+        assert terminal_result is not None
+        all_verified = (
+            len(records) == len(unresolved)
+            and all(record["status"] == "VERIFIED" for record in records)
+        )
+        aggregate_status = "VERIFIED" if all_verified else str(terminal_result.status)
+        checked = {int(record["competitor_class"]) for record in records}
+        skipped = [competitor for competitor in unresolved if competitor not in checked]
+        resource_control = {
+            "timeout": f"{int(self.config.esbmc.timeout_seconds)}s",
+            "memlimit": str(self.config.esbmc.memlimit),
+            "elapsed_seconds": float(elapsed_total),
+            "return_code": int(0 if all_verified else terminal_result.return_code),
+            "status": aggregate_status,
+            "mode": "output_competitor_decomposition",
+            "shared_layer_qif": True,
+            "analytically_verified_competitors": analytically_verified,
+            "formally_checked_competitors": sorted(checked),
+            "skipped_competitors_due_to_fail_fast": skipped,
+        }
+        return replace(
+            terminal_result,
+            status=aggregate_status,
+            command=(),
+            return_code=0 if all_verified else terminal_result.return_code,
+            elapsed_seconds=float(elapsed_total),
+            resource_control=resource_control,
+            blocks=tuple(records),
+        )
 
     def verify_hidden_layer_blocks_with_esbmc(
         self,
@@ -4738,6 +4935,8 @@ class GPEncoding:
         all_bit: int,
         layer_index: int,
         contract_cuts: list[dict[str, Any]] | None = None,
+        output_competitor_class: int | None = None,
+        output_margin_cuts: list[dict[str, Any]] | None = None,
     ) -> str:
         del layer_index
         self._require_validated_hidden_row_cuts(qu_w_int, contract_cuts)
@@ -4781,11 +4980,15 @@ class GPEncoding:
                     total_bits=all_bit,
                     input_scale_factor=input_scale,
                 )
-            margin_cuts = self._margin_cut_bounds(
-                cur_layer,
-                in_layer,
-                frac_bit,
-                all_bit,
+            margin_cuts = (
+                [dict(cut) for cut in output_margin_cuts]
+                if output_margin_cuts is not None
+                else self._margin_cut_bounds(
+                    cur_layer,
+                    in_layer,
+                    frac_bit,
+                    all_bit,
+                )
             )
             if self.output_margin_records:
                 self.output_margin_records[-1]["margin_cuts"] = [
@@ -4838,6 +5041,7 @@ class GPEncoding:
                     else None
                 ),
                 margin_cut_count=len(margin_cuts),
+                competitor_class=output_competitor_class,
             )
 
         return render_hidden_affine_bounds_program(

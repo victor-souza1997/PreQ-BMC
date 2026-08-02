@@ -21,6 +21,41 @@ from verification.replay import LayerReplayFormat, replay_on_python
 
 
 class OutputMarginHarnessTest(unittest.TestCase):
+    def test_competitor_harness_checks_one_output_conjunct(self) -> None:
+        source = render_output_target_program(
+            output_size=3,
+            input_size=2,
+            weights_c_int="{{1, 0}, {0, 1}, {-1, 1}}",
+            biases_c_int="{0, 0, 0}",
+            input_bounds_low_c_int="{0, 0}",
+            input_bounds_high_c_int="{1, 1}",
+            target_label=0,
+            scale_factor=1,
+            total_bits=8,
+            input_scale_factor=1,
+            competitor_class=2,
+        )
+
+        self.assertIn("#define COMPETITOR_CLASS 2", source)
+        self.assertIn("out_[TARGET_CLASS] > out_[COMPETITOR_CLASS]", source)
+        self.assertNotIn("max_other", source)
+
+    def test_first_layer_assumption_uses_exact_deployed_input_quantizer_image(self) -> None:
+        encoder = GPEncoding.__new__(GPEncoding)
+        encoder.x_low_real = np.asarray([0.0, 64.0 / 255.0 - 0.25 / 255.0])
+        encoder.x_high_real = np.asarray([0.25 / 255.0, 64.0 / 255.0 + 0.25 / 255.0])
+        current = SimpleNamespace(layer_index=1, int_bit=5)
+        inputs = SimpleNamespace(
+            layer_size=2,
+            lb=np.zeros(2),
+            ub=np.ones(2),
+        )
+
+        lower, upper = encoder._layer_input_bounds_int(current, inputs, 1 << 8)
+
+        np.testing.assert_array_equal(lower, np.asarray([0, 64]))
+        np.testing.assert_array_equal(upper, np.asarray([0, 65]))
+
     def test_common_hidden_vector_can_verify_when_independent_extrema_fail(self) -> None:
         # For h in [0, 2]^3, independent bounds compare target low=1 with
         # competitor high=6 and fail. At every common h, however, the target is
@@ -173,6 +208,136 @@ class OutputMarginHarnessTest(unittest.TestCase):
             self.assertGreaterEqual(int(observed.min()), int(cut["cut_low_int"]))
             self.assertLessEqual(int(observed.max()), int(cut["cut_high_int"]))
             self.assertGreaterEqual(cut["total_widening_product_units"], 0)
+
+    def test_margin_cuts_skip_analytically_verified_competitors(self) -> None:
+        encoder = GPEncoding.__new__(GPEncoding)
+        encoder.dense_layers = [SimpleNamespace(layer_size=1)]
+        encoder.margin_cuts = True
+        encoder.error_budget_mode = "derived"
+        encoder.property_spec = SimpleNamespace(target_label=0, valid_labels=None)
+        encoder.targetCls = 0
+        encoder.output_margin_records = [
+            {
+                "class_margins": [
+                    {"other_class": 1, "ok": True},
+                    {"other_class": 2, "ok": False},
+                ]
+            }
+        ]
+        encoder.margin_cut_records = []
+        encoder.x_low_real = np.asarray([0.0], dtype=np.float64)
+        encoder.x_high_real = np.asarray([1.0], dtype=np.float64)
+        encoder.solver = "cbc"
+        encoder.config = SimpleNamespace(gurobi_threads=1)
+
+        hidden = SimpleNamespace(
+            layer_index=1,
+            layer_size=1,
+            layer_paras=[np.asarray([[1.0]]), np.asarray([0.0])],
+            lb=np.asarray([0.0]),
+            ub=np.asarray([1.0]),
+            realVal=np.asarray([0.5]),
+            frac_bit=2,
+            error_budget_int=np.asarray([0]),
+            verified_activation_lb=np.asarray([0.0]),
+            verified_activation_ub=np.asarray([1.0]),
+        )
+        output = SimpleNamespace(
+            layer_index=2,
+            layer_size=3,
+            layer_paras=[
+                np.asarray([[1.0], [0.0], [-1.0]]),
+                np.zeros(3),
+            ],
+        )
+
+        with patch.object(
+            encoder,
+            "_solve_margin_direction_milp",
+            return_value=(-1.0, 1.0, 0.01),
+        ), patch.object(
+            encoder,
+            "_formally_validate_relational_cut",
+            return_value=True,
+        ):
+            cuts = encoder._margin_cut_bounds(output, hidden, 2, 8)
+
+        self.assertEqual([cut["competitor_class"] for cut in cuts], [2])
+
+    def test_output_competitor_decomposition_fails_fast_with_shared_qif(self) -> None:
+        encoder = GPEncoding.__new__(GPEncoding)
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        encoder.output_dir = Path(temp_dir.name)
+        encoder.output_margin_records = [
+            {
+                "class_margins": [
+                    {"other_class": 1, "ok": True},
+                    {"other_class": 2, "ok": False},
+                    {"other_class": 3, "ok": False},
+                    {"other_class": 4, "ok": False},
+                ]
+            }
+        ]
+        encoder.property_spec = SimpleNamespace(target_label=0)
+        encoder.targetCls = 0
+        encoder.cex_feedback = "off"
+        encoder.config = SimpleNamespace(
+            esbmc=SimpleNamespace(timeout_seconds=60, memlimit="1g")
+        )
+        encoder._stats = {"esbmc_calls": 0.0}
+        encoder.esbmc_call_records = []
+        current = SimpleNamespace(layer_index=2)
+        inputs = SimpleNamespace(layer_size=3)
+        verified = ESBMCResult(
+            status="VERIFIED",
+            command=("esbmc",),
+            stdout="",
+            stderr="",
+            return_code=0,
+            elapsed_seconds=1.0,
+        )
+        failed = ESBMCResult(
+            status="FAILED",
+            command=("esbmc",),
+            stdout="",
+            stderr="",
+            return_code=1,
+            elapsed_seconds=2.0,
+        )
+
+        with patch.object(
+            encoder,
+            "generate_esbmc_verification_code",
+            return_value="int main(void) { return 0; }",
+        ), patch.object(
+            encoder,
+            "_run_esbmc_file",
+            side_effect=[verified, failed],
+        ):
+            result = encoder._verify_output_margin_competitors_with_esbmc(
+                cur_layer=current,
+                in_layer=inputs,
+                qu_w_int=np.zeros((5, 3), dtype=np.int64),
+                qu_b_int=np.zeros(5, dtype=np.int64),
+                frac_bit=8,
+                all_bit=13,
+                layer_index=1,
+                margin_cuts=[],
+                assumption_box_cardinality="8",
+            )
+
+        self.assertEqual(result.status, "FAILED")
+        self.assertEqual(result.elapsed_seconds, 3.0)
+        self.assertEqual(
+            [record["competitor_class"] for record in result.blocks],
+            [2, 3],
+        )
+        self.assertEqual(
+            result.resource_control["skipped_competitors_due_to_fail_fast"],
+            [4],
+        )
+        self.assertTrue(all(record["shared_layer_qif"] for record in result.blocks))
 
     def test_inconclusive_output_box_can_conclude_via_single_e2e_fallback(self) -> None:
         encoder = GPEncoding.__new__(GPEncoding)

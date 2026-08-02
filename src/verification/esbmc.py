@@ -506,7 +506,30 @@ class ESBMCRunner:
             time.sleep(min(poll_interval, remaining))
 
     @staticmethod
-    def _classify_status(combined_output: str, return_code: int) -> str:
+    def _memlimit_bytes(memlimit: str | None) -> int | None:
+        if not memlimit:
+            return None
+        match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kmgt]?)b?\s*", memlimit.lower())
+        if match is None:
+            return None
+        multiplier = {
+            "": 1,
+            "k": 1024,
+            "m": 1024**2,
+            "g": 1024**3,
+            "t": 1024**4,
+        }[match.group(2)]
+        return int(float(match.group(1)) * multiplier)
+
+    @classmethod
+    def _classify_status(
+        cls,
+        combined_output: str,
+        return_code: int,
+        *,
+        peak_memory_bytes: int | None = None,
+        memlimit: str | None = None,
+    ) -> str:
         lower_output = combined_output.lower()
         memory_markers = (
             "memory limit",
@@ -526,7 +549,22 @@ class ESBMCRunner:
             return "VERIFIED"
         if "VERIFICATION FAILED" in combined_output:
             return "FAILED"
-        if any(marker in lower_output for marker in memory_markers) or return_code in {-9, 137}:
+        memlimit_bytes = cls._memlimit_bytes(memlimit)
+        near_memory_limit = (
+            peak_memory_bytes is not None
+            and memlimit_bytes is not None
+            and peak_memory_bytes >= int(0.90 * memlimit_bytes)
+        )
+        solver_aborted_under_memory_pressure = (
+            return_code in {-6, 134}
+            and near_memory_limit
+            and "smt solver failed" in lower_output
+        )
+        if (
+            any(marker in lower_output for marker in memory_markers)
+            or return_code in {-9, 137}
+            or solver_aborted_under_memory_pressure
+        ):
             return "MEMOUT"
         if return_code == 124 or any(marker in lower_output for marker in timeout_markers):
             return "TIMEOUT"
@@ -674,7 +712,12 @@ class ESBMCRunner:
         LOGGER.debug("--- STDERR tail ---\n%s", stderr_tail[-20000:])
 
         combined_output = f"{stdout_tail}\n{stderr_tail}"
-        status = self._classify_status(combined_output, int(return_code))
+        status = self._classify_status(
+            combined_output,
+            int(return_code),
+            peak_memory_bytes=peak_memory_bytes,
+            memlimit=self.config.memlimit,
+        )
         resource_control = self._resource_control(
             stdout_log_path=stdout_log_path,
             stderr_log_path=stderr_log_path,

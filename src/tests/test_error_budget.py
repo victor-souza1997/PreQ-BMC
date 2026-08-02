@@ -509,6 +509,8 @@ class DerivedErrorBudgetTest(unittest.TestCase):
         )
 
         self.assertIn("nondet_longlong", source)
+        self.assertIn("if (INPUT_LOW[i] == INPUT_HIGH[i])", source)
+        self.assertIn("input = INPUT_LOW[i]", source)
         self.assertIn("div_round_half_away_from_zero_i128", source)
         self.assertIn("clamp_to_signed_range_i128", source)
         self.assertIn("direction_value >= (__int128)CUT_LOW", source)
