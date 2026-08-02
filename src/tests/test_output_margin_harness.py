@@ -152,7 +152,20 @@ class OutputMarginHarnessTest(unittest.TestCase):
         encoder.targetCls = 0
         encoder.margin_cut_records = []
 
-        cuts = encoder._margin_cut_bounds(output, hidden, frac)
+        with patch.object(
+            encoder,
+            "_formally_validate_relational_cut",
+            side_effect=lambda record, **_: (
+                record.update(
+                    {
+                        "formal_validation_status": "VERIFIED",
+                        "soundness": "esbmc_exact_deployed_prefix_validated",
+                    }
+                )
+                is None
+            ),
+        ):
+            cuts = encoder._margin_cut_bounds(output, hidden, frac, 8)
         self.assertEqual(len(cuts), 2)
         for cut in cuts:
             direction = np.asarray(cut["direction_int"], dtype=np.int64)

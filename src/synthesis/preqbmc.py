@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -25,7 +26,12 @@ from symbolic_pp.DeepPoly_preqbmc import DP_DNN_network
 from synthesis.preimage_cache import load_preimage_cache, save_preimage_cache
 from synthesis.solver_backend import BackendConstants as GRB
 from synthesis.solver_backend import SolverBackendName, build_model
-from utils.fixed_point import int_get_min_max, quantize_int
+from utils.fixed_point import (
+    clamp_to_signed_range,
+    int_get_min_max,
+    quantize_int,
+    round_divide_half_away_from_zero,
+)
 from utils.logging_utils import get_logger
 from verification.c_templates import (
     render_assumption_sentinel_program,
@@ -36,6 +42,7 @@ from verification.c_templates import (
     render_network_end_to_end_program,
     render_output_target_program,
     render_output_valid_set_program,
+    render_prefix_direction_cut_validation_program,
 )
 from verification.esbmc import ESBMCConfig, ESBMCRunner, ESBMCResult
 from verification.invariants import propagate_exact_interval_details
@@ -85,6 +92,7 @@ class QuadapterConfig:
     e2e_invariants: bool = True
     margin_cuts: bool | None = None
     e2e_fallback: bool | None = None
+    cegar_max_rounds: int = 3
 
     @classmethod
     def from_namespace(cls, args: Any) -> "QuadapterConfig":
@@ -140,6 +148,7 @@ class QuadapterConfig:
                 if getattr(args, "e2e_fallback", None) is None
                 else str(getattr(args, "e2e_fallback")).lower() == "on"
             ),
+            cegar_max_rounds=max(0, int(getattr(args, "cegar_max_rounds", 3))),
         )
 
 
@@ -342,11 +351,17 @@ class GPEncoding:
             else bool(self.config.e2e_fallback)
         )
         self.e2e_fallback_attempted = False
+        self.cegar_max_rounds = max(0, int(self.config.cegar_max_rounds))
         self.composition_path = (
             "network_e2e" if self.harness_scope == "network" else "layer_contracts"
         )
         self.margin_cut_records: list[dict[str, Any]] = []
+        self.hidden_contract_cut_records: list[dict[str, Any]] = []
+        self._hidden_contract_cut_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self._relational_cut_validation_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self.preimage_attempt_records: list[dict[str, Any]] = []
         self.preimage_deflation_records: list[dict[str, Any]] = []
+        self._last_contract_target_status = "NOT_RUN"
         self.esbmc_call_records: list[dict[str, Any]] = []
         self.esbmc_block_records: list[dict[str, Any]] = []
         self.esbmc_no_saturation_block_records: list[dict[str, Any]] = []
@@ -945,6 +960,38 @@ class GPEncoding:
             self.load_cached_preimage()
         else:
             self.backward_preimage_computation()
+            missing_preimages = [
+                layer
+                for layer in self.dense_layers
+                if str(getattr(layer, "preimage_source", ""))
+                not in {
+                    "milp_preimage",
+                    "milp_preimage_no_violation_to_cap",
+                    "quantized_milp_preimage",
+                }
+            ]
+            if (
+                self.error_budget_mode == "derived"
+                and self.harness_scope == "layer"
+                and missing_preimages
+            ):
+                self.synthesis_final_status = "PREIMAGE_UNAVAILABLE"
+                LOGGER.error(
+                    "Derived layer contracts require property preimages; unavailable for hidden layer(s): %s",
+                    ", ".join(str(layer.layer_index) for layer in missing_preimages),
+                )
+                backward_end_time = time.time()
+                self._stats["backward_time"] = backward_end_time - backward_start_time
+                self._stats["forward_time"] = 0.0
+                self._stats["total_time"] = self._stats["backward_time"]
+                return SynthesisResult(
+                    success=False,
+                    total_bits=[],
+                    fractional_bits=[],
+                    integer_bits=[],
+                    stats={key: float(value) for key, value in self._stats.items()},
+                    final_status=self.synthesis_final_status,
+                )
             if self.config.save_preimage_cache:
                 self.save_cached_preimage()
         self._widen_internal_integer_bits_for_fixed_point_contracts()
@@ -1091,7 +1138,14 @@ class GPEncoding:
             scale_value = 0.0
             if self.preimg_mode in {"milp", "comp"}:
                 scale_value = self.underPreImageMILP(in_layer_index, in_layer, cur_layer)
-            if self.preimg_mode == "abstr" or (self.preimg_mode == "comp" and scale_value <= 0):
+            milp_preimage_available = str(in_layer.preimage_source) in {
+                "milp_preimage",
+                "milp_preimage_no_violation_to_cap",
+                "quantized_milp_preimage",
+            }
+            if self.preimg_mode == "abstr" or (
+                self.preimg_mode == "comp" and not milp_preimage_available
+            ):
                 LOGGER.warning(
                     "Layer %s is using DeepPoly/abstract preimage fallback instead of a MILP preimage.",
                     in_layer.layer_index,
@@ -1099,7 +1153,12 @@ class GPEncoding:
                 scale_value = self.underPreImageAbstr(in_layer_index, in_layer, cur_layer)
                 if scale_value > 0:
                     in_layer.preimage_source = "deeppoly_forward_FALLBACK"
-            if scale_value <= 0:
+            property_preimage_available = str(in_layer.preimage_source) in {
+                "milp_preimage",
+                "milp_preimage_no_violation_to_cap",
+                "quantized_milp_preimage",
+            }
+            if not property_preimage_available:
                 LOGGER.warning(
                     "Layer %s has no successful preimage solve; using forward DeepPoly bounds.",
                     in_layer.layer_index,
@@ -1108,7 +1167,54 @@ class GPEncoding:
                 in_layer.relaxed_ub = np.asarray(in_layer.ub, dtype=np.float32).copy()
                 in_layer.preimage_source = "deeppoly_forward_FALLBACK"
             self.scaleValueSet[in_layer.layer_index - 1] = scale_value
+            if self.error_budget_mode == "derived" and not property_preimage_available:
+                # A predecessor preimage cannot be derived through a missing
+                # downstream property preimage. Stop instead of constructing
+                # constraints from placeholder relaxed expressions.
+                for predecessor in self.dense_layers[:in_layer_index]:
+                    predecessor.relaxed_lb = np.asarray(
+                        predecessor.lb, dtype=np.float32
+                    ).copy()
+                    predecessor.relaxed_ub = np.asarray(
+                        predecessor.ub, dtype=np.float32
+                    ).copy()
+                    predecessor.preimage_source = "downstream_preimage_unavailable"
+                    self.scaleValueSet[predecessor.layer_index - 1] = -10000.0
+                break
             cur_layer = in_layer
+
+    def _store_milp_preimage_solution(
+        self,
+        in_layer_index: int,
+        in_layer: LayerEncoding,
+        *,
+        source: str,
+    ) -> None:
+        for in_index in range(in_layer.layer_size):
+            alpha = self.gp_model.value(in_layer.alpha[in_index])
+            beta = self.gp_model.value(in_layer.beta[in_index])
+            in_layer.relaxed_ub[in_index] = in_layer.ub[in_index] + beta
+            in_layer.relaxed_lb[in_index] = in_layer.lb[in_index] - alpha
+
+            neuron = self.deepPolyNets_DNN.layers[
+                2 * (in_layer_index + 1) - 1
+            ].neurons[in_index]
+            in_lb_algebra = neuron.concrete_algebra_lower
+            in_ub_algebra = neuron.concrete_algebra_upper
+            in_layer.relaxed_lb_expression[in_index] = self._linear_combination(
+                in_lb_algebra[:-1],
+                self.input_gp_vars,
+                in_lb_algebra[-1] - alpha,
+            )
+            in_layer.relaxed_ub_expression[in_index] = self._linear_combination(
+                in_ub_algebra[:-1],
+                self.input_gp_vars,
+                in_ub_algebra[-1] + beta,
+            )
+            if in_layer.relaxed_ub[in_index] <= 0:
+                in_layer.relaxed_ub_expression[in_index] = 0
+
+        in_layer.preimage_source = source
 
     def underPreImageMILP(self, in_layer_index: int, in_layer: LayerEncoding, cur_layer: LayerEncoding) -> float:
         enc_start_time = time.time()
@@ -1231,39 +1337,75 @@ class GPEncoding:
         self._stats["solving_time"] += opt_finish_time - opt_start_time
 
         scaleValue = -10000.0
-        if self.gp_model.status == GRB.OPTIMAL:
-            scaleValue = float(self.gp_model.value(relaxScale))
-            for in_index in range(in_layer.layer_size):
-                alpha = self.gp_model.value(in_layer.alpha[in_index])
-                beta = self.gp_model.value(in_layer.beta[in_index])
-                in_layer.relaxed_ub[in_index] = in_layer.ub[in_index] + beta
-                in_layer.relaxed_lb[in_index] = in_layer.lb[in_index] - alpha
-
-                in_lb_algebra = self.deepPolyNets_DNN.layers[2 * (in_layer_index + 1) - 1].neurons[
-                    in_index
-                ].concrete_algebra_lower
-                in_ub_algebra = self.deepPolyNets_DNN.layers[2 * (in_layer_index + 1) - 1].neurons[
-                    in_index
-                ].concrete_algebra_upper
-
-                relaxed_lb_bias = in_lb_algebra[-1] - alpha
-                relaxed_ub_bias = in_ub_algebra[-1] + beta
-                in_layer.relaxed_lb_expression[in_index] = self._linear_combination(
-                    in_lb_algebra[:-1], self.input_gp_vars, relaxed_lb_bias
+        initial_status = self.gp_model.status
+        solver_status = str(initial_status)
+        accepted_source: str | None = None
+        cap_status: str | None = None
+        cap_elapsed = 0.0
+        if initial_status == GRB.OPTIMAL:
+            candidate_scale = float(self.gp_model.value(relaxScale))
+            # An existential violation at scale zero means the current box is
+            # not a valid Cartesian property preimage.
+            if candidate_scale > 0.0:
+                scaleValue = candidate_scale
+                accepted_source = "milp_preimage"
+                self._store_milp_preimage_solution(
+                    in_layer_index,
+                    in_layer,
+                    source=accepted_source,
                 )
-                in_layer.relaxed_ub_expression[in_index] = self._linear_combination(
-                    in_ub_algebra[:-1], self.input_gp_vars, relaxed_ub_bias
-                )
-                if in_layer.relaxed_ub[in_index] <= 0:
-                    in_layer.relaxed_ub_expression[in_index] = 0
-
-            in_layer.preimage_source = "milp_preimage"
-
+        elif initial_status == GRB.INFEASIBLE:
+            # The primary query asks for any property violation over the whole
+            # bounded expansion family. If it is proven infeasible, maximize
+            # the expansion after removing only the violation constraints.
+            # A feasible cap solution plus the prior infeasibility proof makes
+            # that whole capped box a valid property preimage.
             self.gp_model.remove(prop_cstr_ll)
-            self.gp_model.remove(model_cstr_ll)
-            self.gp_model.remove(relaxScale_LL)
-            self.gp_model.remove(var_ll)
+            prop_cstr_ll = []
             self.gp_model.update()
+            self.gp_model.setObjective(relaxScale, GRB.MAXIMIZE)
+            cap_started = time.time()
+            self.gp_model.optimize()
+            cap_finished = time.time()
+            cap_elapsed = cap_finished - cap_started
+            self._stats["solving_time"] += cap_elapsed
+            cap_status = str(self.gp_model.status)
+            if self.gp_model.status == GRB.OPTIMAL:
+                scaleValue = float(self.gp_model.value(relaxScale))
+                accepted_source = "milp_preimage_no_violation_to_cap"
+                self._store_milp_preimage_solution(
+                    in_layer_index,
+                    in_layer,
+                    source=accepted_source,
+                )
+
+        self.preimage_attempt_records.append(
+            {
+                "network_layer_index": int(in_layer.layer_index),
+                "source": accepted_source or "milp_preimage",
+                "solver_status": solver_status,
+                "cap_solver_status": cap_status,
+                "scale_value": float(scaleValue),
+                "accepted": accepted_source is not None,
+                "proof_kind": (
+                    "minimum_violating_expansion_boundary"
+                    if accepted_source == "milp_preimage"
+                    else "no_violation_within_bounded_expansion_family"
+                    if accepted_source == "milp_preimage_no_violation_to_cap"
+                    else "none"
+                ),
+                "elapsed_seconds": float(
+                    opt_finish_time - opt_start_time + cap_elapsed
+                ),
+            }
+        )
+        # Candidate-local constraints must not leak into the next backward
+        # layer when the solver is infeasible, unbounded, or otherwise fails.
+        self.gp_model.remove(prop_cstr_ll)
+        self.gp_model.remove(model_cstr_ll)
+        self.gp_model.remove(relaxScale_LL)
+        self.gp_model.remove(var_ll)
+        self.gp_model.update()
 
         return scaleValue
 
@@ -1616,7 +1758,9 @@ class GPEncoding:
             self.synthesis_final_status = "VERIFIED"
             return True, selected_q, selected_f, selected_i
 
-        if terminal_statuses and set(terminal_statuses) <= {"MARGIN_INCONCLUSIVE"}:
+        if "PREIMAGE_UNAVAILABLE" in terminal_statuses:
+            self.synthesis_final_status = "PREIMAGE_UNAVAILABLE"
+        elif terminal_statuses and set(terminal_statuses) <= {"MARGIN_INCONCLUSIVE"}:
             self.synthesis_final_status = "MARGIN_INCONCLUSIVE"
         elif "MARGIN_REFUTED" in terminal_statuses:
             self.synthesis_final_status = "MARGIN_REFUTED"
@@ -1628,6 +1772,8 @@ class GPEncoding:
             self.synthesis_final_status = "MEMOUT"
         elif "UNKNOWN" in terminal_statuses or "ERROR" in terminal_statuses:
             self.synthesis_final_status = "UNKNOWN"
+        elif "LAYER_INCONCLUSIVE" in terminal_statuses:
+            self.synthesis_final_status = "LAYER_INCONCLUSIVE"
         elif terminal_statuses:
             self.synthesis_final_status = "FAILED"
         return False, None, None, None
@@ -1747,6 +1893,8 @@ class GPEncoding:
                     record["status"] = contract_result.status
                     if contract_result.status == "PREIMAGE_DEFLATION_EMPTY":
                         record["failure_type"] = "preimage_deflation_empty"
+                    elif contract_result.status == "PREIMAGE_UNAVAILABLE":
+                        record["failure_type"] = "property_preimage_unavailable"
                 record["final_status"] = (
                     "FAILED"
                     if margin_record is None and contract_result.status == "FAILED"
@@ -1756,6 +1904,8 @@ class GPEncoding:
                     if margin_record is not None
                     else "PREIMAGE_DEFLATION_EMPTY"
                     if contract_result.status == "PREIMAGE_DEFLATION_EMPTY"
+                    else "PREIMAGE_UNAVAILABLE"
+                    if contract_result.status == "PREIMAGE_UNAVAILABLE"
                     else "UNKNOWN"
                 )
                 record["no_saturation_status"] = "SKIPPED"
@@ -2089,22 +2239,53 @@ class GPEncoding:
         the proved guarantee ``(P deflated by delta) expanded by delta``, which is a
         subset of ``P`` in exact integer arithmetic. No tolerance is weakened. If a
         coordinate collapses, the candidate is rejected as
-        ``PREIMAGE_DEFLATION_EMPTY`` before ESBMC.
+        ``PREIMAGE_DEFLATION_EMPTY`` before ESBMC. A forward DeepPoly box is
+        never substituted for ``P``; that case is ``PREIMAGE_UNAVAILABLE``.
         """
 
         scale = 1 << int(frac_bit)
         pre_low, pre_high = self._layer_preimage_bounds_int(cur_layer, scale)
-        budget, _, _, _ = self._candidate_error_budget_int(
+        budget, assumed_lo, assumed_hi, frac_in = self._candidate_error_budget_int(
             cur_layer,
             in_layer,
             weights_int,
             frac_bit,
         )
+        budget_components = getattr(self, "_last_error_budget_components", None)
+        if (
+            not isinstance(budget_components, dict)
+            or "total" not in budget_components
+            or not np.array_equal(
+                np.asarray(budget_components["total"], dtype=np.int64),
+                np.asarray(budget, dtype=np.int64),
+            )
+        ):
+            budget_components = {"total": np.asarray(budget, dtype=np.int64)}
         is_last_hidden = (
             cur_layer.layer_index == len(self.dense_layers)
             and cur_layer.layer_index < len(self.dense_layers) + 1
         )
-        if self.error_budget_mode == "derived" and is_last_hidden:
+        preimage_source = str(
+            getattr(cur_layer, "preimage_source", "deeppoly_forward_FALLBACK")
+        )
+        property_preimage_available = preimage_source in {
+            "milp_preimage",
+            "milp_preimage_no_violation_to_cap",
+            "quantized_milp_preimage",
+        }
+        if (
+            self.error_budget_mode == "derived"
+            and is_last_hidden
+            and not property_preimage_available
+        ):
+            # Forward reachable bounds and property preimages are different
+            # mathematical objects. A forward box has no property-interior
+            # slack and must never be deflated into a derived contract target.
+            target_low = np.asarray(pre_low, dtype=np.int64)
+            target_high = np.asarray(pre_high, dtype=np.int64)
+            valid = False
+            status = "PREIMAGE_UNAVAILABLE"
+        elif self.error_budget_mode == "derived" and is_last_hidden:
             target_low = np.asarray(pre_low, dtype=np.int64) + np.asarray(budget, dtype=np.int64)
             target_high = np.asarray(pre_high, dtype=np.int64) - np.asarray(budget, dtype=np.int64)
             valid = bool(np.all(target_low <= target_high))
@@ -2115,21 +2296,30 @@ class GPEncoding:
             valid = True
             status = "NOT_REQUIRED"
 
+        self._last_contract_target_status = status
+
         if record:
             collapsed = np.flatnonzero(target_low > target_high)
+            widths = np.asarray(pre_high, dtype=np.int64) - np.asarray(pre_low, dtype=np.int64)
+            symmetric_slack = np.maximum(widths // 2, 0)
             self.preimage_deflation_records.append(
                 {
                     "layer_index": int(cur_layer.layer_index - 1),
                     "network_layer_index": int(cur_layer.layer_index),
-                    "preimage_source": str(
-                        getattr(cur_layer, "preimage_source", "deeppoly_forward_FALLBACK")
-                    ),
+                    "preimage_source": preimage_source,
+                    "property_preimage_available": bool(property_preimage_available),
                     "Q": int(frac_bit + int(cur_layer.int_bit)),
                     "F": int(frac_bit),
                     "status": status,
                     "preimage_low_int": [int(value) for value in pre_low],
                     "preimage_high_int": [int(value) for value in pre_high],
                     "error_budget_int": [int(value) for value in budget],
+                    "preimage_width_int": [int(value) for value in widths],
+                    "preimage_symmetric_slack_int": [int(value) for value in symmetric_slack],
+                    "budget_decomposition": {
+                        name: [int(value) for value in values]
+                        for name, values in budget_components.items()
+                    },
                     "target_low_int": [int(value) for value in target_low],
                     "target_high_int": [int(value) for value in target_high],
                     "collapsed_neurons": [int(value) for value in collapsed],
@@ -2188,7 +2378,7 @@ class GPEncoding:
         ranges = np.abs(pre_hi - pre_lo)
         return (abs_tol + (rel_tol_num * ranges) // rel_tol_den).astype(np.int64)
 
-    def _derived_error_budget_int(
+    def _derived_error_budget_components_int(
         self,
         cur_layer: LayerEncoding,
         weights_int: np.ndarray,
@@ -2197,8 +2387,8 @@ class GPEncoding:
         frac_in: int,
         delta_in_int: np.ndarray | int,
         frac_out: int | None = None,
-    ) -> np.ndarray:
-        """Bound implementation/real-affine deviation in output-integer ULPs.
+    ) -> dict[str, np.ndarray]:
+        """Decompose implementation/real-affine deviation in output ULPs.
 
         Let ``S_in = 2**frac_in`` and ``S_out`` be the weight/output scale.
         An input integer ``A_j`` denotes ``A_j / S_in`` real units. Rounding a
@@ -2257,7 +2447,7 @@ class GPEncoding:
             if candidate.shape == weights.shape:
                 real_weights = candidate
 
-        budget_values: list[int] = []
+        delta_input_values: list[int] = []
         for neuron, row in enumerate(weights):
             if real_weights is not None:
                 output_scale = 1 << int(frac_out)
@@ -2277,12 +2467,46 @@ class GPEncoding:
                 delta_input = (
                     amplified_twice + (2 * scale_in) - 1
                 ) // (2 * scale_in)
-            budget_values.append(int(delta_weights_scalar + 1 + delta_input))
+            delta_input_values.append(int(delta_input))
 
         max_int64 = int(np.iinfo(np.int64).max)
+        budget_values = [
+            int(delta_weights_scalar + 1 + delta_input)
+            for delta_input in delta_input_values
+        ]
         if any(value > max_int64 for value in budget_values):
             raise OverflowError("Derived error budget exceeds int64 reporting range.")
-        budget = np.asarray(budget_values, dtype=np.int64)
+        return {
+            "dw": np.full(
+                weights.shape[0], int(delta_weights_scalar), dtype=np.int64
+            ),
+            "dr": np.ones(weights.shape[0], dtype=np.int64),
+            "dp": np.asarray(delta_input_values, dtype=np.int64),
+            "total": np.asarray(budget_values, dtype=np.int64),
+        }
+
+    def _derived_error_budget_int(
+        self,
+        cur_layer: LayerEncoding,
+        weights_int: np.ndarray,
+        assumed_lo_int: np.ndarray,
+        assumed_hi_int: np.ndarray,
+        frac_in: int,
+        delta_in_int: np.ndarray | int,
+        frac_out: int | None = None,
+    ) -> np.ndarray:
+        """Return the conservative total derived budget in output ULPs."""
+
+        components = self._derived_error_budget_components_int(
+            cur_layer=cur_layer,
+            weights_int=weights_int,
+            assumed_lo_int=assumed_lo_int,
+            assumed_hi_int=assumed_hi_int,
+            frac_in=frac_in,
+            delta_in_int=delta_in_int,
+            frac_out=frac_out,
+        )
+        budget = components["total"]
         assert np.all(budget >= 1)
         return budget
 
@@ -2333,6 +2557,20 @@ class GPEncoding:
             frac_in=frac_in,
             delta_in_int=self._inherited_error_budget_int(cur_layer, in_layer),
         )
+        if self.error_budget_mode == "derived":
+            self._last_error_budget_components = self._derived_error_budget_components_int(
+                cur_layer=cur_layer,
+                weights_int=weights_int,
+                assumed_lo_int=assumed_lo,
+                assumed_hi_int=assumed_hi,
+                frac_in=frac_in,
+                delta_in_int=self._inherited_error_budget_int(cur_layer, in_layer),
+                frac_out=int(frac_bit),
+            )
+        else:
+            self._last_error_budget_components = {
+                "total": np.asarray(budget, dtype=np.int64)
+            }
         return budget, assumed_lo, assumed_hi, frac_in
 
     def _real_affine_bounds_on_integer_box(
@@ -2655,8 +2893,10 @@ class GPEncoding:
     def _solve_margin_direction_milp(
         self,
         direction: np.ndarray,
+        *,
+        hidden_layer_count: int | None = None,
     ) -> tuple[float, float, float]:
-        """Bound one real output direction over the exact one-hidden-layer graph.
+        """Bound one direction over an exact real-network hidden prefix.
 
         The MILP variables encode the original real input box, affine hidden
         pre-activations, and exact ReLUs. DeepPoly pre-activation bounds provide the
@@ -2664,25 +2904,19 @@ class GPEncoding:
         objective bound and are rounded outward with ``nextafter``.
         """
 
-        if len(self.dense_layers) != 1:
-            raise NotImplementedError("Margin-cut MILP currently supports one hidden layer.")
-        hidden = self.dense_layers[0]
-        weights = np.asarray(hidden.layer_paras[0], dtype=np.float64)
-        biases = np.asarray(hidden.layer_paras[1], dtype=np.float64)
+        prefix_count = (
+            len(self.dense_layers)
+            if hidden_layer_count is None
+            else int(hidden_layer_count)
+        )
+        if prefix_count < 1 or prefix_count > len(self.dense_layers):
+            raise ValueError("Directional MILP requires a non-empty hidden prefix.")
+        prefix = self.dense_layers[:prefix_count]
         low = np.asarray(self.x_low_real, dtype=np.float64).reshape(-1)
         high = np.asarray(self.x_high_real, dtype=np.float64).reshape(-1)
-        pre_low = np.asarray(hidden.lb, dtype=np.float64).reshape(-1)
-        pre_high = np.asarray(hidden.ub, dtype=np.float64).reshape(-1)
-        if weights.shape != (hidden.layer_size, low.size):
-            raise ValueError("Hidden weights are not row-per-neuron for margin-cut MILP.")
-        if direction.shape != (hidden.layer_size,):
+        if direction.shape != (prefix[-1].layer_size,):
             raise ValueError("Output direction does not match the last hidden layer.")
-        if not (
-            np.all(np.isfinite(low))
-            and np.all(np.isfinite(high))
-            and np.all(np.isfinite(pre_low))
-            and np.all(np.isfinite(pre_high))
-        ):
+        if not (np.all(np.isfinite(low)) and np.all(np.isfinite(high))):
             raise ValueError("Margin-cut MILP requires finite input and DeepPoly bounds.")
 
         model = build_model(
@@ -2691,56 +2925,66 @@ class GPEncoding:
             threads=max(1, int(getattr(self.config, "gurobi_threads", 4))),
             output_flag=0,
         )
-        inputs = [
+        previous_values = [
             model.add_var(lb=float(lo), ub=float(hi), name=f"margin_x_{index}")
             for index, (lo, hi) in enumerate(zip(low, high))
         ]
-        hidden_values: list[Any] = []
-        hidden_bounds: list[tuple[float, float]] = []
-        for neuron, (row, bias, lo, hi) in enumerate(
-            zip(weights, biases, pre_low, pre_high)
-        ):
-            if float(lo) > float(hi):
-                raise ValueError("DeepPoly produced an invalid hidden pre-activation interval.")
-            pre = model.add_var(lb=float(lo), ub=float(hi), name=f"margin_pre_{neuron}")
-            model.add_constr(
-                pre == self._linear_combination(row, inputs, float(bias)),
-                name=f"margin_affine_{neuron}",
-            )
-            relu_low = max(0.0, float(lo))
-            relu_high = max(0.0, float(hi))
-            value = model.add_var(
-                lb=relu_low,
-                ub=relu_high,
-                name=f"margin_hidden_{neuron}",
-            )
-            if float(hi) <= 0.0:
-                model.add_constr(value == 0.0, name=f"margin_relu_zero_{neuron}")
-            elif float(lo) >= 0.0:
-                model.add_constr(value == pre, name=f"margin_relu_linear_{neuron}")
-            else:
-                active = model.add_var(
-                    lb=0.0,
-                    ub=1.0,
-                    vtype=GRB.BINARY,
-                    name=f"margin_relu_active_{neuron}",
-                )
-                model.add_constr(value >= pre, name=f"margin_relu_lower_pre_{neuron}")
-                model.add_constr(value >= 0.0, name=f"margin_relu_lower_zero_{neuron}")
+        previous_bounds = [(float(lo), float(hi)) for lo, hi in zip(low, high)]
+        for layer_offset, hidden in enumerate(prefix):
+            weights = np.asarray(hidden.layer_paras[0], dtype=np.float64)
+            biases = np.asarray(hidden.layer_paras[1], dtype=np.float64)
+            pre_low = np.asarray(hidden.lb, dtype=np.float64).reshape(-1)
+            pre_high = np.asarray(hidden.ub, dtype=np.float64).reshape(-1)
+            if weights.shape != (hidden.layer_size, len(previous_values)):
+                raise ValueError("Hidden weights are not row-per-neuron for directional MILP.")
+            if not (np.all(np.isfinite(pre_low)) and np.all(np.isfinite(pre_high))):
+                raise ValueError("Directional MILP requires finite DeepPoly bounds.")
+
+            hidden_values: list[Any] = []
+            hidden_bounds: list[tuple[float, float]] = []
+            for neuron, (row, bias, lo, hi) in enumerate(
+                zip(weights, biases, pre_low, pre_high)
+            ):
+                if float(lo) > float(hi):
+                    raise ValueError("DeepPoly produced an invalid hidden interval.")
+                prefix_name = f"margin_l{layer_offset}_n{neuron}"
+                pre = model.add_var(lb=float(lo), ub=float(hi), name=f"{prefix_name}_pre")
                 model.add_constr(
-                    value <= pre - float(lo) * (1 - active),
-                    name=f"margin_relu_upper_pre_{neuron}",
+                    pre == self._linear_combination(row, previous_values, float(bias)),
+                    name=f"{prefix_name}_affine",
                 )
-                model.add_constr(
-                    value <= float(hi) * active,
-                    name=f"margin_relu_upper_zero_{neuron}",
-                )
-            hidden_values.append(value)
-            hidden_bounds.append((relu_low, relu_high))
+                relu_low = max(0.0, float(lo))
+                relu_high = max(0.0, float(hi))
+                value = model.add_var(lb=relu_low, ub=relu_high, name=f"{prefix_name}_relu")
+                if float(hi) <= 0.0:
+                    model.add_constr(value == 0.0, name=f"{prefix_name}_zero")
+                elif float(lo) >= 0.0:
+                    model.add_constr(value == pre, name=f"{prefix_name}_linear")
+                else:
+                    active = model.add_var(
+                        lb=0.0,
+                        ub=1.0,
+                        vtype=GRB.BINARY,
+                        name=f"{prefix_name}_active",
+                    )
+                    model.add_constr(value >= pre, name=f"{prefix_name}_lower_pre")
+                    model.add_constr(value >= 0.0, name=f"{prefix_name}_lower_zero")
+                    model.add_constr(
+                        value <= pre - float(lo) * (1 - active),
+                        name=f"{prefix_name}_upper_pre",
+                    )
+                    model.add_constr(
+                        value <= float(hi) * active,
+                        name=f"{prefix_name}_upper_zero",
+                    )
+                hidden_values.append(value)
+                hidden_bounds.append((relu_low, relu_high))
+            previous_values = hidden_values
+            previous_bounds = hidden_bounds
 
         direction_low, direction_high = self._interval_linear_combination(
             direction,
-            hidden_bounds,
+            previous_bounds,
             0.0,
         )
         objective = model.add_var(
@@ -2749,7 +2993,7 @@ class GPEncoding:
             name="margin_direction_value",
         )
         model.add_constr(
-            objective == self._linear_combination(direction, hidden_values, 0.0),
+            objective == self._linear_combination(direction, previous_values, 0.0),
             name="margin_direction_definition",
         )
         started = time.monotonic()
@@ -2763,13 +3007,192 @@ class GPEncoding:
         upper = math.nextafter(float(model.objective_bound()), math.inf)
         return lower, upper, float(time.monotonic() - started)
 
+    def _deployed_prefix_cut_payload(
+        self,
+        hidden_layer_count: int,
+    ) -> tuple[np.ndarray, np.ndarray, list[dict[str, object]], tuple[tuple[int, int], ...]]:
+        """Quantize one already-selected hidden prefix for exact cut validation."""
+
+        prefix = self.dense_layers[: int(hidden_layer_count)]
+        if not prefix or len(prefix) != int(hidden_layer_count):
+            raise ValueError("Cut validation requires a non-empty selected hidden prefix.")
+
+        formats: list[tuple[int, int]] = []
+        payloads: list[dict[str, object]] = []
+        previous_fractional_bits: int | None = None
+        for layer in prefix:
+            if layer.frac_bit is None or layer.int_bit is None:
+                raise RuntimeError(
+                    "Cannot validate a relational cut before the prefix Q/I/F is selected."
+                )
+            fractional_bits = int(layer.frac_bit)
+            total_bits = fractional_bits + int(layer.int_bit)
+            formats.append((total_bits, fractional_bits))
+            input_fractional_bits = (
+                fractional_bits
+                if previous_fractional_bits is None
+                else previous_fractional_bits
+            )
+            weights_int = np.asarray(
+                quantize_int(layer.layer_paras[0], total_bits, fractional_bits),
+                dtype=np.int64,
+            )
+            biases_int = np.asarray(
+                quantize_int(layer.layer_paras[1], total_bits, fractional_bits),
+                dtype=np.int64,
+            )
+            payloads.append(
+                {
+                    "input_size": int(weights_int.shape[1]),
+                    "output_size": int(weights_int.shape[0]),
+                    "total_bits": total_bits,
+                    "fractional_bits": fractional_bits,
+                    "input_fractional_bits": input_fractional_bits,
+                    "weights_c_int": self.numpy_to_c_int_array(weights_int),
+                    "biases_c_int": self.numpy_to_c_int_array(biases_int),
+                }
+            )
+            previous_fractional_bits = fractional_bits
+
+        input_total_bits, input_fractional_bits = formats[0]
+        input_scale = 1 << input_fractional_bits
+        input_min = -(1 << (input_total_bits - 1))
+        input_max = (1 << (input_total_bits - 1)) - 1
+        input_low = np.maximum(
+            np.floor(np.asarray(self.x_low_real, dtype=np.float64) * input_scale),
+            input_min,
+        ).astype(np.int64)
+        input_high = np.minimum(
+            np.ceil(np.asarray(self.x_high_real, dtype=np.float64) * input_scale),
+            input_max,
+        ).astype(np.int64)
+        return input_low, input_high, payloads, tuple(formats)
+
+    def _formally_validate_relational_cut(
+        self,
+        record: dict[str, Any],
+        *,
+        hidden_layer_count: int,
+        layer_index: int,
+        all_bit: int,
+        frac_bit: int,
+        cut_kind: str,
+        identifier: str,
+    ) -> bool:
+        """Validate a MILP-proposed cut over the exact deployed prefix with ESBMC."""
+
+        input_low, input_high, layers, prefix_formats = self._deployed_prefix_cut_payload(
+            hidden_layer_count
+        )
+        direction = tuple(int(value) for value in record["direction_int"])
+        cut_low = int(record["cut_low_int"])
+        cut_high = int(record["cut_high_int"])
+        cache_key = (prefix_formats, direction, cut_low, cut_high)
+        validation_cache = getattr(self, "_relational_cut_validation_cache", None)
+        if validation_cache is None:
+            validation_cache = {}
+            self._relational_cut_validation_cache = validation_cache
+        cached = validation_cache.get(cache_key)
+        if cached is not None:
+            record.update(
+                {
+                    "formal_validation_status": str(cached["status"]),
+                    "formal_validation_harness": str(cached["harness"]),
+                    "formal_validation_cache_hit": True,
+                    "soundness": str(cached["soundness"]),
+                }
+            )
+            return str(cached["status"]) == "VERIFIED"
+
+        source = render_prefix_direction_cut_validation_program(
+            input_size=int(input_low.size),
+            input_bounds_low_c_int=self.numpy_to_c_int_array(input_low),
+            input_bounds_high_c_int=self.numpy_to_c_int_array(input_high),
+            layers=layers,
+            direction_c_int=self.numpy_to_c_int_array(
+                np.asarray(direction, dtype=object)
+            ),
+            cut_low_int=cut_low,
+            cut_high_int=cut_high,
+        )
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "formats": prefix_formats,
+                    "direction": direction,
+                    "low": cut_low,
+                    "high": cut_high,
+                },
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()[:12]
+        cut_dir = self.output_dir / "layers" / "cuts"
+        cut_dir.mkdir(parents=True, exist_ok=True)
+        harness = cut_dir / (
+            f"{cut_kind}_layer_{int(layer_index)}_{identifier}_{fingerprint}.c"
+        )
+        harness.write_text(source, encoding="utf-8")
+        result = self._run_esbmc_file(harness, extract_counterexample=False)
+        self._stats["esbmc_calls"] += 1.0
+        call_record = self._esbmc_call_record(
+            result=result,
+            layer_index=layer_index,
+            block_index=None,
+            start_neuron=None,
+            end_neuron=None,
+            all_bit=all_bit,
+            frac_bit=frac_bit,
+            harness=harness,
+            property_type="relational_cut_validation",
+            mode="exact_deployed_prefix",
+            input_dim=int(input_low.size),
+            output_neurons=1,
+        )
+        call_record.update(
+            {
+                "cut_kind": cut_kind,
+                "cut_identifier": identifier,
+                "hidden_prefix_layers": int(hidden_layer_count),
+                "prefix_formats": [
+                    {"Q": int(q), "F": int(f)} for q, f in prefix_formats
+                ],
+                "direction_int": list(direction),
+                "cut_low_int": cut_low,
+                "cut_high_int": cut_high,
+            }
+        )
+        self.esbmc_call_records.append(call_record)
+
+        validation_status = str(result.status)
+        soundness = (
+            "esbmc_exact_deployed_prefix_validated"
+            if validation_status == "VERIFIED"
+            else "untrusted_milp_proposal_not_injected"
+        )
+        record.update(
+            {
+                "formal_validation_status": validation_status,
+                "formal_validation_harness": str(harness),
+                "formal_validation_resource_control": result.resource_control,
+                "formal_validation_cache_hit": False,
+                "soundness": soundness,
+            }
+        )
+        validation_cache[cache_key] = {
+            "status": validation_status,
+            "harness": str(harness),
+            "soundness": soundness,
+        }
+        return validation_status == "VERIFIED"
+
     def _margin_cut_bounds(
         self,
         cur_layer: LayerEncoding,
         in_layer: LayerEncoding,
         frac_bit: int,
+        all_bit: int,
     ) -> list[dict[str, Any]]:
-        """Build sound integer cuts for decisive output directions.
+        """Build candidate integer cuts for decisive output directions.
 
         For competitor ``k``, the real MILP bounds ``d_k*h_real`` where
         ``d_k = V_real[k]-V_real[target]``. The output harness instead contains the
@@ -2777,18 +3200,18 @@ class GPEncoding:
         At product scale ``S_d*S_h`` the inherited hidden error contributes
         ``S_d * sum_j |d_j|*delta_j``. Direction quantization contributes
         ``sum_j |D_j-S_d*d_j|*max(|h_j|)``. Both exact rational sums are rounded
-        upward, while MILP endpoints are converted outward. Thus every reachable
-        deployed hidden vector satisfies each emitted cut; no robustness behavior is
-        assumed away.
+        upward, while MILP endpoints are converted outward.  Because the numerical
+        MILP backend is not proof-producing, each resulting bound is additionally
+        checked over the exact deployed prefix by ESBMC before it is returned.
         """
 
         if not self.margin_cuts or self.error_budget_mode != "derived":
             return []
-        if self.property_spec.valid_labels or len(self.dense_layers) != 1:
+        if self.property_spec.valid_labels:
             self.margin_cut_records.append(
                 {
                     "enabled": True,
-                    "status": "SKIPPED_UNSUPPORTED_PROPERTY_OR_DEPTH",
+                    "status": "SKIPPED_UNSUPPORTED_VALID_SET_PROPERTY",
                     "hidden_layers": int(len(self.dense_layers)),
                 }
             )
@@ -2861,7 +3284,8 @@ class GPEncoding:
             ) + widening
             record = {
                 "enabled": True,
-                "status": "OPTIMAL",
+                "status": "PROPOSED",
+                "proposal_status": "OPTIMAL",
                 "target_class": int(target),
                 "competitor_class": int(competitor),
                 "direction_scale": int(direction_scale),
@@ -2880,11 +3304,219 @@ class GPEncoding:
                 "cut_low_int": int(cut_low),
                 "cut_high_int": int(cut_high),
                 "milp_wall_time_seconds": float(elapsed),
-                "soundness": "outward_milp_bound_plus_exact_hidden_and_direction_widening",
+                "soundness": "pending_exact_deployed_prefix_validation",
             }
-            records.append(record)
+            validated = self._formally_validate_relational_cut(
+                record,
+                hidden_layer_count=int(in_layer.layer_index),
+                layer_index=int(cur_layer.layer_index - 1),
+                all_bit=int(all_bit),
+                frac_bit=int(frac_bit),
+                cut_kind="output_margin",
+                identifier=f"competitor_{int(competitor)}",
+            )
+            record["status"] = "VERIFIED" if validated else "VALIDATION_REJECTED"
             self.margin_cut_records.append(record)
+            if validated:
+                records.append(record)
         return records
+
+    def _hidden_contract_cut_bounds(
+        self,
+        *,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        weights_int: np.ndarray,
+        frac_bit: int,
+        all_bit: int,
+        start_neuron: int,
+        end_neuron: int,
+        maximum_cuts: int,
+        neuron_indices: list[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Propose and formally validate relational hidden-prefix invariants.
+
+        Each direction is one exact quantized row of the layer under check.
+        The MILP bounds that direction over the exact real-network prefix. The
+        inherited per-coordinate implementation budget widens the result. ESBMC
+        then checks the proposed integer endpoints over the exact deployed prefix;
+        only validated cuts can reach a contract harness.
+        """
+
+        if (
+            not self.margin_cuts
+            or self.error_budget_mode != "derived"
+            or in_layer.layer_index <= 0
+            or maximum_cuts <= 0
+        ):
+            return []
+        inherited = getattr(in_layer, "error_budget_int", None)
+        if inherited is None:
+            self.hidden_contract_cut_records.append(
+                {
+                    "layer_index": int(cur_layer.layer_index - 1),
+                    "status": "SKIPPED_NO_INHERITED_BUDGET",
+                }
+            )
+            return []
+
+        _, _, frac_in = self._assumption_box_int(cur_layer, in_layer, frac_bit)
+        scale_in = 1 << int(frac_in)
+        delta = np.asarray(inherited, dtype=object).reshape(-1)
+        rows = np.asarray(weights_int, dtype=object)
+        records: list[dict[str, Any]] = []
+        selected_neurons = (
+            [
+                int(neuron)
+                for neuron in neuron_indices
+                if int(start_neuron) <= int(neuron) < int(end_neuron)
+            ][: int(maximum_cuts)]
+            if neuron_indices is not None
+            else list(
+                range(
+                    int(start_neuron),
+                    min(int(end_neuron), int(start_neuron) + int(maximum_cuts)),
+                )
+            )
+        )
+        for neuron in selected_neurons:
+            direction = np.asarray(rows[neuron], dtype=object).reshape(-1)
+            if direction.size != in_layer.layer_size or delta.size != direction.size:
+                raise ValueError("Hidden contract cut dimensions do not match the input layer.")
+            cache_key = (
+                int(cur_layer.layer_index),
+                int(frac_in),
+                tuple(
+                    (
+                        int(layer.frac_bit) + int(layer.int_bit),
+                        int(layer.frac_bit),
+                    )
+                    for layer in self.dense_layers[: int(in_layer.layer_index)]
+                ),
+                tuple(int(value) for value in direction),
+                tuple(int(value) for value in delta),
+            )
+            cached = self._hidden_contract_cut_cache.get(cache_key)
+            if cached is not None:
+                record = dict(cached)
+                record["cache_hit"] = True
+                records.append(record)
+                self.hidden_contract_cut_records.append(record)
+                continue
+
+            lower_real, upper_real, elapsed = self._solve_margin_direction_milp(
+                np.asarray([float(value) for value in direction], dtype=np.float64),
+                hidden_layer_count=int(in_layer.layer_index),
+            )
+            widening = sum(
+                abs(int(coefficient)) * int(error)
+                for coefficient, error in zip(direction, delta)
+            )
+            cut_low = self._floor_fraction(
+                Fraction.from_float(float(lower_real)) * scale_in
+            ) - int(widening)
+            cut_high = self._ceil_fraction(
+                Fraction.from_float(float(upper_real)) * scale_in
+            ) + int(widening)
+            int64_info = np.iinfo(np.int64)
+            if cut_low < int(int64_info.min) or cut_high > int(int64_info.max):
+                self.hidden_contract_cut_records.append(
+                    {
+                        "layer_index": int(cur_layer.layer_index - 1),
+                        "network_layer_index": int(cur_layer.layer_index),
+                        "neuron_index": int(neuron),
+                        "status": "SKIPPED_INT64_REPRESENTATION",
+                        "cut_low_int": int(cut_low),
+                        "cut_high_int": int(cut_high),
+                    }
+                )
+                continue
+            record = {
+                "layer_index": int(cur_layer.layer_index - 1),
+                "network_layer_index": int(cur_layer.layer_index),
+                "neuron_index": int(neuron),
+                "status": "PROPOSED",
+                "proposal_status": "OPTIMAL",
+                "direction_int": [int(value) for value in direction],
+                "input_fractional_bits": int(frac_in),
+                "milp_low_real": float(lower_real),
+                "milp_high_real": float(upper_real),
+                "inherited_widening_int": int(widening),
+                "cut_low_int": int(cut_low),
+                "cut_high_int": int(cut_high),
+                "milp_wall_time_seconds": float(elapsed),
+                "cache_hit": False,
+                "soundness": "pending_exact_deployed_prefix_validation",
+            }
+            validated = self._formally_validate_relational_cut(
+                record,
+                hidden_layer_count=int(in_layer.layer_index),
+                layer_index=int(cur_layer.layer_index - 1),
+                all_bit=int(all_bit),
+                frac_bit=int(frac_bit),
+                cut_kind="hidden_contract",
+                identifier=f"neuron_{int(neuron)}",
+            )
+            record["status"] = "VERIFIED" if validated else "VALIDATION_REJECTED"
+            self.hidden_contract_cut_records.append(record)
+            if validated:
+                self._hidden_contract_cut_cache[cache_key] = dict(record)
+                records.append(record)
+        return records
+
+    def _hidden_contract_violation_order(
+        self,
+        *,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        weights_int: np.ndarray,
+        biases_int: np.ndarray,
+        frac_bit: int,
+        all_bit: int,
+        start_neuron: int,
+        end_neuron: int,
+    ) -> list[int]:
+        target_low, target_high, budget, valid = self._candidate_contract_target_bounds_int(
+            cur_layer,
+            in_layer,
+            weights_int,
+            frac_bit,
+        )
+        if not valid:
+            return []
+        assumed_low, assumed_high, frac_in = self._assumption_box_int(
+            cur_layer,
+            in_layer,
+            frac_bit,
+        )
+        denominator = 1 << int(frac_in)
+        scored: list[tuple[int, int]] = []
+        for neuron in range(int(start_neuron), int(end_neuron)):
+            lower_acc = 0
+            upper_acc = 0
+            for weight, low, high in zip(
+                np.asarray(weights_int[neuron]).reshape(-1),
+                assumed_low,
+                assumed_high,
+            ):
+                coefficient = int(weight)
+                lower_acc += coefficient * int(low if coefficient >= 0 else high)
+                upper_acc += coefficient * int(high if coefficient >= 0 else low)
+            lower = clamp_to_signed_range(
+                round_divide_half_away_from_zero(lower_acc, denominator)
+                + int(biases_int[neuron]),
+                int(all_bit),
+            )
+            upper = clamp_to_signed_range(
+                round_divide_half_away_from_zero(upper_acc, denominator)
+                + int(biases_int[neuron]),
+                int(all_bit),
+            )
+            accepted_low = int(target_low[neuron]) - int(budget[neuron])
+            accepted_high = int(target_high[neuron]) + int(budget[neuron])
+            violation = max(accepted_low - lower, upper - accepted_high, 0)
+            scored.append((int(violation), int(neuron)))
+        return [neuron for _, neuron in sorted(scored, key=lambda item: (-item[0], item[1]))]
 
     @staticmethod
     def _analytic_output_margin_result() -> ESBMCResult:
@@ -3418,9 +4050,22 @@ class GPEncoding:
                 record=True,
             )
             if not target_valid:
-                self.synthesis_final_status = "PREIMAGE_DEFLATION_EMPTY"
+                target_status = str(
+                    getattr(
+                        self,
+                        "_last_contract_target_status",
+                        "PREIMAGE_DEFLATION_EMPTY",
+                    )
+                )
+                self.synthesis_final_status = target_status
+                reason = (
+                    "derived contracts require a MILP property preimage; "
+                    "forward DeepPoly bounds cannot be deflated"
+                    if target_status == "PREIMAGE_UNAVAILABLE"
+                    else "derived budget collapses the property preimage"
+                )
                 return ESBMCResult(
-                    status="PREIMAGE_DEFLATION_EMPTY",
+                    status=target_status,
                     command=(),
                     stdout="",
                     stderr="",
@@ -3429,9 +4074,16 @@ class GPEncoding:
                     timeout_seconds=int(self.config.esbmc.timeout_seconds),
                     memlimit=str(self.config.esbmc.memlimit),
                     resource_control={
-                        "status": "PREIMAGE_DEFLATION_EMPTY",
+                        "status": target_status,
                         "elapsed_seconds": 0.0,
-                        "reason": "derived budget collapses the property preimage",
+                        "reason": reason,
+                        "preimage_source": str(
+                            getattr(
+                                cur_layer,
+                                "preimage_source",
+                                "deeppoly_forward_FALLBACK",
+                            )
+                        ),
                     },
                 )
 
@@ -3488,6 +4140,95 @@ class GPEncoding:
         )
         self.esbmc_call_records.append(record)
         record["assumption_box_cardinality"] = cardinality
+        if (
+            result.status == "FAILED"
+            and cur_layer.layer_index <= len(self.dense_layers)
+            and getattr(self, "cegar_max_rounds", 0) > 0
+            and self.margin_cuts
+            and self.error_budget_mode == "derived"
+            and int(getattr(in_layer, "layer_index", 0)) > 0
+        ):
+            violation_order = self._hidden_contract_violation_order(
+                cur_layer=cur_layer,
+                in_layer=in_layer,
+                weights_int=qu_w_int,
+                biases_int=qu_b_int,
+                frac_bit=frac_bit,
+                all_bit=all_bit,
+                start_neuron=0,
+                end_neuron=cur_layer.layer_size,
+            )
+            accumulated_cuts: list[dict[str, Any]] = []
+            for round_index, neuron in enumerate(
+                violation_order[: int(getattr(self, "cegar_max_rounds", 0))], start=1
+            ):
+                new_cuts = self._hidden_contract_cut_bounds(
+                    cur_layer=cur_layer,
+                    in_layer=in_layer,
+                    weights_int=qu_w_int,
+                    frac_bit=frac_bit,
+                    all_bit=all_bit,
+                    start_neuron=0,
+                    end_neuron=cur_layer.layer_size,
+                    maximum_cuts=1,
+                    neuron_indices=[neuron],
+                )
+                if not new_cuts:
+                    break
+                accumulated_cuts.extend(new_cuts)
+                refined_source = self.generate_esbmc_verification_code(
+                    cur_layer=cur_layer,
+                    in_layer=in_layer,
+                    qu_w_int=qu_w_int,
+                    qu_b_int=qu_b_int,
+                    frac_bit=frac_bit,
+                    all_bit=all_bit,
+                    layer_index=layer_index,
+                    contract_cuts=accumulated_cuts,
+                )
+                refined_file = layers_dir / (
+                    f"layer_{layer_index}_Q{all_bit}_F{frac_bit}_cegar_{round_index}.c"
+                )
+                refined_file.write_text(refined_source, encoding="utf-8")
+                result = self._run_esbmc_file(
+                    refined_file,
+                    extract_counterexample=True,
+                )
+                self._stats["esbmc_calls"] += 1.0
+                refined_record = self._esbmc_call_record(
+                    result=result,
+                    layer_index=layer_index,
+                    block_index=None,
+                    start_neuron=None,
+                    end_neuron=None,
+                    all_bit=all_bit,
+                    frac_bit=frac_bit,
+                    harness=refined_file,
+                    property_type="preimage",
+                    mode="full_layer_relational_cegar",
+                    input_dim=in_layer.layer_size,
+                    output_neurons=cur_layer.layer_size,
+                )
+                refined_record["cegar_round"] = int(round_index)
+                refined_record["contract_cuts"] = [
+                    dict(cut) for cut in accumulated_cuts
+                ]
+                refined_record["assumption_box_cardinality"] = cardinality
+                self.esbmc_call_records.append(refined_record)
+                if result.status != "FAILED":
+                    break
+        if (
+            result.status == "FAILED"
+            and cur_layer.layer_index <= len(self.dense_layers)
+            and int(getattr(in_layer, "layer_index", 0)) > 0
+            and self.error_budget_mode == "derived"
+        ):
+            # A hidden-box endpoint is not necessarily generated by one common
+            # network input. Without a separately proved reachable witness it is
+            # an abstraction limitation, not a refutation of the candidate format.
+            self.esbmc_call_records[-1]["raw_status"] = "FAILED"
+            self.esbmc_call_records[-1]["status"] = "LAYER_INCONCLUSIVE"
+            result = replace(result, status="LAYER_INCONCLUSIVE")
         LOGGER.info("ESBMC layer=%s bits(Q=%s,F=%s) status=%s", cur_layer.layer_index, all_bit, frac_bit, result.status)
         return result
 
@@ -3541,32 +4282,122 @@ class GPEncoding:
                 archived_file,
                 extract_counterexample=self.cex_feedback != "off",
             )
+            query_results: list[tuple[Path, ESBMCResult, int, list[dict[str, Any]]]] = [
+                (archived_file, block_result, 0, [])
+            ]
+            accumulated_cuts: list[dict[str, Any]] = []
+            if (
+                block_result.status == "FAILED"
+                and getattr(self, "cegar_max_rounds", 0) > 0
+                and self.margin_cuts
+                and self.error_budget_mode == "derived"
+                and int(getattr(in_layer, "layer_index", 0)) > 0
+            ):
+                violation_order = self._hidden_contract_violation_order(
+                    cur_layer=cur_layer,
+                    in_layer=in_layer,
+                    weights_int=qu_w_int,
+                    biases_int=qu_b_int,
+                    frac_bit=frac_bit,
+                    all_bit=all_bit,
+                    start_neuron=start_neuron,
+                    end_neuron=end_neuron,
+                )
+                for round_index, neuron in enumerate(
+                    violation_order[: int(getattr(self, "cegar_max_rounds", 0))],
+                    start=1,
+                ):
+                    new_cuts = self._hidden_contract_cut_bounds(
+                        cur_layer=cur_layer,
+                        in_layer=in_layer,
+                        weights_int=qu_w_int,
+                        frac_bit=frac_bit,
+                        all_bit=all_bit,
+                        start_neuron=start_neuron,
+                        end_neuron=end_neuron,
+                        maximum_cuts=1,
+                        neuron_indices=[neuron],
+                    )
+                    if not new_cuts:
+                        break
+                    accumulated_cuts.extend(new_cuts)
+                    refined_source = self.generate_esbmc_hidden_block_verification_code(
+                        cur_layer=cur_layer,
+                        in_layer=in_layer,
+                        qu_w_int=qu_w_int,
+                        qu_b_int=qu_b_int,
+                        frac_bit=frac_bit,
+                        all_bit=all_bit,
+                        start_neuron=start_neuron,
+                        end_neuron=end_neuron,
+                        contract_cuts=accumulated_cuts,
+                    )
+                    refined_file = layers_dir / harness_name.replace(
+                        ".c", f"_cegar_{round_index}.c"
+                    )
+                    refined_file.write_text(refined_source, encoding="utf-8")
+                    block_result = self._run_esbmc_file(
+                        refined_file,
+                        extract_counterexample=True,
+                    )
+                    query_results.append(
+                        (refined_file, block_result, round_index, list(accumulated_cuts))
+                    )
+                    if block_result.status != "FAILED":
+                        break
 
-            self._stats["esbmc_calls"] += 1.0
-            self._stats["esbmc_block_calls"] += 1.0
-            elapsed_total += float(block_result.elapsed_seconds)
-            aggregate_return_code = max(aggregate_return_code, int(block_result.return_code))
-            stdout_parts.append(block_result.stdout)
-            stderr_parts.append(block_result.stderr)
+            query_records: list[dict[str, Any]] = []
+            for query_file, query_result, cegar_round, query_cuts in query_results:
+                self._stats["esbmc_calls"] += 1.0
+                self._stats["esbmc_block_calls"] += 1.0
+                elapsed_total += float(query_result.elapsed_seconds)
+                aggregate_return_code = max(
+                    aggregate_return_code, int(query_result.return_code)
+                )
+                stdout_parts.append(query_result.stdout)
+                stderr_parts.append(query_result.stderr)
+                query_status = self._record_block_status(query_result.status)
+                query_record = self._esbmc_call_record(
+                    result=query_result,
+                    layer_index=layer_index,
+                    block_index=block_index,
+                    start_neuron=start_neuron,
+                    end_neuron=end_neuron,
+                    all_bit=all_bit,
+                    frac_bit=frac_bit,
+                    harness=query_file,
+                    property_type="preimage",
+                    mode="blockwise" if cegar_round == 0 else "blockwise_relational_cegar",
+                    input_dim=in_layer.layer_size,
+                    output_neurons=end_neuron - start_neuron,
+                    status=query_status,
+                )
+                query_record["cegar_round"] = int(cegar_round)
+                query_record["contract_cuts"] = [dict(cut) for cut in query_cuts]
+                query_record["intermediate_query"] = query_file != query_results[-1][0]
+                self.esbmc_call_records.append(query_record)
+                query_records.append(query_record)
 
-            record_status = self._record_block_status(block_result.status)
-            record = self._esbmc_call_record(
-                result=block_result,
-                layer_index=layer_index,
-                block_index=block_index,
-                start_neuron=start_neuron,
-                end_neuron=end_neuron,
-                all_bit=all_bit,
-                frac_bit=frac_bit,
-                harness=archived_file,
-                property_type="preimage",
-                mode="blockwise",
-                input_dim=in_layer.layer_size,
-                output_neurons=end_neuron - start_neuron,
-                status=record_status,
-            )
+            record = query_records[-1]
+            record_status = str(record["status"])
+            if (
+                record_status == "FAILED"
+                and int(getattr(in_layer, "layer_index", 0)) > 0
+                and self.error_budget_mode == "derived"
+            ):
+                # The remaining witness is a point in a relational
+                # over-approximation, not a confirmed deployed-network input.
+                record_status = "LAYER_INCONCLUSIVE"
+                record["raw_status"] = "FAILED"
+                record["status"] = record_status
+            record["cegar"] = {
+                "attempted": len(query_results) > 1,
+                "rounds": len(query_results) - 1,
+                "cuts": [dict(cut) for cut in accumulated_cuts],
+                "initial_status": str(query_results[0][1].status),
+                "final_status": record_status,
+            }
             records.append(record)
-            self.esbmc_call_records.append(record)
             self.esbmc_block_records.append(record)
 
             LOGGER.info(
@@ -3906,8 +4737,10 @@ class GPEncoding:
         frac_bit: int,
         all_bit: int,
         layer_index: int,
+        contract_cuts: list[dict[str, Any]] | None = None,
     ) -> str:
         del layer_index
+        self._require_validated_hidden_row_cuts(qu_w_int, contract_cuts)
         scale = 1 << int(frac_bit)
         weights_c_int = self.numpy_to_c_int_array(qu_w_int)
         biases_c_int = self.numpy_to_c_int_array(qu_b_int)
@@ -3952,6 +4785,7 @@ class GPEncoding:
                 cur_layer,
                 in_layer,
                 frac_bit,
+                all_bit,
             )
             if self.output_margin_records:
                 self.output_margin_records[-1]["margin_cuts"] = [
@@ -4024,6 +4858,35 @@ class GPEncoding:
                 if self.error_budget_mode == "derived"
                 else None
             ),
+            contract_cut_directions_c_int=(
+                self.numpy_to_c_int_array(
+                    np.asarray([cut["direction_int"] for cut in contract_cuts], dtype=object)
+                )
+                if contract_cuts
+                else None
+            ),
+            contract_cut_low_c_int=(
+                self.numpy_to_c_int_array(
+                    np.asarray([cut["cut_low_int"] for cut in contract_cuts], dtype=object)
+                )
+                if contract_cuts
+                else None
+            ),
+            contract_cut_high_c_int=(
+                self.numpy_to_c_int_array(
+                    np.asarray([cut["cut_high_int"] for cut in contract_cuts], dtype=object)
+                )
+                if contract_cuts
+                else None
+            ),
+            contract_cut_output_indices_c_int=(
+                self.numpy_to_c_int_array(
+                    np.asarray([cut["neuron_index"] for cut in contract_cuts], dtype=object)
+                )
+                if contract_cuts
+                else None
+            ),
+            contract_cut_count=len(contract_cuts or []),
         )
 
     def generate_esbmc_hidden_block_verification_code(
@@ -4036,7 +4899,9 @@ class GPEncoding:
         all_bit: int,
         start_neuron: int,
         end_neuron: int,
+        contract_cuts: list[dict[str, Any]] | None = None,
     ) -> str:
+        self._require_validated_hidden_row_cuts(qu_w_int, contract_cuts)
         scale = 1 << int(frac_bit)
         tolerance_int, input_lo_int, input_hi_int, frac_in = self._candidate_error_budget_int(
             cur_layer,
@@ -4077,7 +4942,63 @@ class GPEncoding:
                 if self.error_budget_mode == "derived"
                 else None
             ),
+            contract_cut_directions_c_int=(
+                self.numpy_to_c_int_array(
+                    np.asarray([cut["direction_int"] for cut in contract_cuts], dtype=object)
+                )
+                if contract_cuts
+                else None
+            ),
+            contract_cut_low_c_int=(
+                self.numpy_to_c_int_array(
+                    np.asarray([cut["cut_low_int"] for cut in contract_cuts], dtype=object)
+                )
+                if contract_cuts
+                else None
+            ),
+            contract_cut_high_c_int=(
+                self.numpy_to_c_int_array(
+                    np.asarray([cut["cut_high_int"] for cut in contract_cuts], dtype=object)
+                )
+                if contract_cuts
+                else None
+            ),
+            contract_cut_output_indices_c_int=(
+                self.numpy_to_c_int_array(
+                    np.asarray(
+                        [
+                            int(cut["neuron_index"]) - int(start_neuron)
+                            for cut in contract_cuts
+                        ],
+                        dtype=object,
+                    )
+                )
+                if contract_cuts
+                else None
+            ),
+            contract_cut_count=len(contract_cuts or []),
         )
+
+    @staticmethod
+    def _require_validated_hidden_row_cuts(
+        weights_int: np.ndarray,
+        contract_cuts: list[dict[str, Any]] | None,
+    ) -> None:
+        """Reject unproved or miswired cuts before rendering an assume harness."""
+
+        rows = np.asarray(weights_int, dtype=object)
+        for cut in contract_cuts or []:
+            if str(cut.get("formal_validation_status")) != "VERIFIED":
+                raise ValueError("A hidden relational cut must be formally validated.")
+            neuron = int(cut["neuron_index"])
+            if neuron < 0 or neuron >= rows.shape[0]:
+                raise ValueError("Hidden relational cut neuron is outside the layer.")
+            direction = tuple(int(value) for value in cut["direction_int"])
+            expected = tuple(int(value) for value in rows[neuron].reshape(-1))
+            if direction != expected:
+                raise ValueError(
+                    "Hidden relational cut direction must equal its quantized affine row."
+                )
 
     def generate_esbmc_no_saturation_code(
         self,
@@ -4166,7 +5087,11 @@ class GPEncoding:
         timeout_blocks = sum(1 for record in records if record.get("status") == "TIMEOUT")
         failed_blocks = sum(1 for record in records if record.get("status") == "FAILED")
         memout_blocks = sum(1 for record in records if record.get("status") == "MEMOUT")
-        unknown_blocks = sum(1 for record in records if record.get("status") == "UNKNOWN")
+        unknown_blocks = sum(
+            1
+            for record in records
+            if record.get("status") in {"UNKNOWN", "LAYER_INCONCLUSIVE"}
+        )
         skipped_blocks = sum(1 for record in records if record.get("status") == "SKIPPED")
         largest_neurons = max((int(record.get("neurons_per_query", 0) or 0) for record in records), default=0)
         largest_input_dim = max((int(record.get("input_dim", 0) or 0) for record in records), default=0)
@@ -4352,19 +5277,62 @@ class GPEncoding:
 
     def margin_cut_summary(self) -> dict[str, Any]:
         records = [dict(record) for record in self.margin_cut_records]
+        validated = [
+            record
+            for record in records
+            if record.get("formal_validation_status") == "VERIFIED"
+        ]
         return {
             "enabled": bool(self.margin_cuts and self.error_budget_mode == "derived"),
             "status": (
-                "GENERATED"
-                if any(record.get("status") == "OPTIMAL" for record in records)
+                "VERIFIED"
+                if validated
                 else str(records[-1].get("status"))
                 if records
                 else "NOT_RUN"
             ),
-            "cuts_total": int(
-                sum(1 for record in records if record.get("status") == "OPTIMAL")
-            ),
+            "cuts_total": int(len(records)),
+            "cuts_formally_validated": int(len(validated)),
             "cuts": records,
+        }
+
+    def cegar_summary(self) -> dict[str, Any]:
+        calls = [
+            dict(record)
+            for record in self.esbmc_call_records
+            if record.get("mode")
+            in {"blockwise_relational_cegar", "full_layer_relational_cegar"}
+        ]
+        statuses = [str(record.get("status", "UNKNOWN")) for record in calls]
+        cut_validations = [
+            dict(record)
+            for record in self.esbmc_call_records
+            if record.get("property_type") == "relational_cut_validation"
+        ]
+        return {
+            "enabled": bool(
+                self.margin_cuts
+                and self.error_budget_mode == "derived"
+                and int(getattr(self, "cegar_max_rounds", 0)) > 0
+            ),
+            "max_rounds": int(getattr(self, "cegar_max_rounds", 0)),
+            "rounds_run": int(len(calls)),
+            "status": (
+                "VERIFIED"
+                if "VERIFIED" in statuses
+                else "MEMOUT"
+                if "MEMOUT" in statuses
+                else "TIMEOUT"
+                if "TIMEOUT" in statuses
+                else "LAYER_INCONCLUSIVE"
+                if calls
+                else "NOT_RUN"
+            ),
+            "cuts": [dict(record) for record in self.hidden_contract_cut_records],
+            "queries": calls,
+            "cut_validation_queries": cut_validations,
+            "cuts_require_exact_prefix_validation": True,
+            "witness_policy": "unconfirmed_relational_witnesses_are_inconclusive",
         }
 
     def preimage_provenance_summary(self) -> dict[str, Any]:
@@ -4378,13 +5346,37 @@ class GPEncoding:
             }
             for layer in self.dense_layers
         ]
+        all_property_preimages_available = bool(
+            layers
+            and all(
+                layer["preimage_source"]
+                in {
+                    "milp_preimage",
+                    "milp_preimage_no_violation_to_cap",
+                    "quantized_milp_preimage",
+                }
+                for layer in layers
+            )
+        )
         return {
             "layers": layers,
-            "deflation": [dict(record) for record in self.preimage_deflation_records],
+            "attempts": [
+                dict(record)
+                for record in getattr(self, "preimage_attempt_records", [])
+            ],
+            "deflation": [
+                dict(record)
+                for record in getattr(self, "preimage_deflation_records", [])
+            ],
             "all_milp_preimage": bool(
                 layers
-                and all(layer["preimage_source"] == "milp_preimage" for layer in layers)
+                and all(
+                    str(layer["preimage_source"]).startswith("milp_preimage")
+                    for layer in layers
+                )
             ),
+            "all_property_preimages_available": all_property_preimages_available,
+            "status": "AVAILABLE" if all_property_preimages_available else "UNAVAILABLE",
         }
 
     def vacuity_summary(self) -> dict[str, Any]:
@@ -4474,6 +5466,7 @@ class GPEncoding:
             "TIMEOUT",
             "MEMOUT",
             "UNKNOWN",
+            "LAYER_INCONCLUSIVE",
             "SKIPPED",
             "SENTINEL_EXPECTED_FAILURE",
             "VACUOUS",
@@ -4509,12 +5502,13 @@ class GPEncoding:
         ]
         total_calls = int(sum(counts.values()))
         total_non_skipped = int(total_calls - counts["skipped"])
+        unknown_count = int(counts["unknown"] + counts["layer_inconclusive"])
         verification_denominator = int(
             counts["verified"]
             + counts["failed"]
             + counts["timeout"]
             + counts["memout"]
-            + counts["unknown"]
+            + unknown_count
             + counts["vacuous"]
         )
         return {
@@ -4523,7 +5517,8 @@ class GPEncoding:
             "failed_count": counts["failed"],
             "timeout_count": counts["timeout"],
             "memout_count": counts["memout"],
-            "unknown_count": counts["unknown"],
+            "unknown_count": unknown_count,
+            "layer_inconclusive_count": counts["layer_inconclusive"],
             "skipped_count": counts["skipped"],
             "vacuity_sentinel_count": counts["sentinel_expected_failure"],
             "vacuous_count": counts["vacuous"],
@@ -4531,7 +5526,7 @@ class GPEncoding:
             "executed_count": total_non_skipped,
             "timeout_rate": float(counts["timeout"] / total_calls) if total_calls else 0.0,
             "memout_rate": float(counts["memout"] / total_calls) if total_calls else 0.0,
-            "unknown_rate": float(counts["unknown"] / total_calls) if total_calls else 0.0,
+            "unknown_rate": float(unknown_count / total_calls) if total_calls else 0.0,
             "verification_rate_percent": float(
                 100.0 * counts["verified"] / verification_denominator
             ) if verification_denominator else 0.0,

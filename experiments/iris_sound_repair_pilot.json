@@ -1,0 +1,83 @@
+{
+  "metadata": {
+    "description": "Iris derived-contract pilot for bounded MILP/ESBMC relational refinement",
+    "output_root": "output/iris_sound_repair_runs",
+    "input_root": "output/iris_sound_repair_runs",
+    "aggregate_output_root": "output/iris_sound_repair_results",
+    "notes": [
+      "The loaded iris_weight.h5 architecture is [4,10,10,3], reported as 2blk_10_10.",
+      "A proven-infeasible violating-expansion query is followed by a feasible maximum-expansion solve before its capped preimage is accepted.",
+      "Failed Cartesian hidden contracts receive at most three MILP-proposed affine-row cuts; every cut is proved over the exact deployed prefix by ESBMC before use.",
+      "No E2E fallback, heuristic tolerance, partition-specific format, or block-specific format is used."
+    ]
+  },
+  "defaults": {
+    "dataset": "iris",
+    "arch": "2blk_10_10",
+    "sample_id": 1,
+    "bit_lb": 8,
+    "bit_ub": 8,
+    "preimg_mode": "milp",
+    "verify_mode": "esbmc",
+    "solver": "cbc",
+    "method": "both",
+    "mode": "derived_layer_contract_relational_cegar",
+    "compare_split": "test",
+    "compare_limit": 10,
+    "compile_c_backend": true,
+    "enable_diagnostics": true,
+    "export_paper_tables": true,
+    "error_budget_mode": "derived",
+    "cex_feedback": "filter+jump",
+    "harness_scope": "layer",
+    "margin_cuts": "on",
+    "cegar_max_rounds": 3,
+    "e2e_fallback": "off",
+    "vacuity_check": true,
+    "unsound_contract_tolerance": false,
+    "enforce_contract_chaining": true,
+    "quality_refinement": false,
+    "formal_no_saturation": false,
+    "require_formal_no_saturation": false,
+    "empirical_saturation_check": true,
+    "esbmc_layer_block_size": 10,
+    "esbmc_profile": "paper-fast",
+    "esbmc_timeout_seconds": 300,
+    "esbmc_memlimit": "6g",
+    "esbmc_jobs": 1,
+    "blockwise_fail_fast": true,
+    "blockwise_run_all_blocks_on_failure": false,
+    "gurobi_threads": 4,
+    "allowed_failure": true,
+    "enabled": true
+  },
+  "runs": [
+    {
+      "name": "iris_repair_fixed_f8_eps0001",
+      "eps": 0.001
+    },
+    {
+      "name": "iris_repair_fixed_f8_eps0005",
+      "eps": 0.005
+    },
+    {
+      "name": "iris_repair_fixed_f8_eps001",
+      "eps": 0.01
+    },
+    {
+      "name": "iris_repair_synthesis_f8_12_eps0001",
+      "eps": 0.001,
+      "bit_ub": 12
+    },
+    {
+      "name": "iris_repair_synthesis_f8_12_eps0005",
+      "eps": 0.005,
+      "bit_ub": 12
+    },
+    {
+      "name": "iris_repair_synthesis_f8_12_eps001",
+      "eps": 0.01,
+      "bit_ub": 12
+    }
+  ]
+}

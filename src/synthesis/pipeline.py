@@ -100,6 +100,7 @@ class RobustnessPipelineConfig:
     e2e_invariants: bool = True
     margin_cuts: bool | None = None
     e2e_fallback: bool | None = None
+    cegar_max_rounds: int = 3
     export_paper_tables: bool = True
     baseline_results_json: Path | None = None
 
@@ -238,6 +239,7 @@ def _quality_thresholds_payload(config: RobustnessPipelineConfig) -> dict[str, A
         "cex_feedback": str(config.cex_feedback),
         "harness_scope": str(config.harness_scope),
         "e2e_invariants": bool(config.e2e_invariants),
+        "cegar_max_rounds": int(config.cegar_max_rounds),
     }
 
 
@@ -375,6 +377,7 @@ def _refresh_article_metrics(
         "no_saturation_continue_on_unknown": bool(config.no_saturation_continue_on_unknown),
         "error_budget_mode": str(config.error_budget_mode),
         "vacuity_check": config.vacuity_check,
+        "cegar_max_rounds": int(config.cegar_max_rounds),
     }
 
 
@@ -1165,6 +1168,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         e2e_invariants=bool(config.e2e_invariants),
         margin_cuts=config.margin_cuts,
         e2e_fallback=config.e2e_fallback,
+        cegar_max_rounds=max(0, int(config.cegar_max_rounds)),
         esbmc=ESBMCConfig(
             timeout_seconds=max(1, int(config.esbmc_timeout_seconds)),
             memlimit=str(config.esbmc_memlimit),
@@ -1205,6 +1209,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         "chaining_ok": synthesizer.chaining_summary(),
         "output_margin_check": synthesizer.output_margin_summary(),
         "margin_cuts": synthesizer.margin_cut_summary(),
+        "cegar": synthesizer.cegar_summary(),
         "preimage_provenance": synthesizer.preimage_provenance_summary(),
         "vacuity_check": synthesizer.vacuity_summary(),
         "counterexamples": synthesizer.counterexample_summary(),
@@ -1285,12 +1290,42 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
                     },
                 }
             )
+        elif synthesis_result.final_status in {
+            "PREIMAGE_UNAVAILABLE",
+            "PREIMAGE_DEFLATION_EMPTY",
+            "LAYER_INCONCLUSIVE",
+        }:
+            summary.update(
+                {
+                    "contract_verified": False,
+                    "contract_status": synthesis_result.final_status,
+                    "no_saturation_formally_checked": False,
+                    "no_saturation_status": "SKIPPED",
+                    "no_saturation_verified": False,
+                    "deployment_quality_accepted": False,
+                    "guarantee_level": "unknown",
+                    "transfer_preconditions": {
+                        "source_property_verified": True,
+                        "property_preimage_available": (
+                            synthesis_result.final_status
+                            != "PREIMAGE_UNAVAILABLE"
+                        ),
+                        "contracts_verified": False,
+                        "esbmc_attempted": bool(
+                            synthesizer.source_region_record.get(
+                                "esbmc_attempted", False
+                            )
+                        ),
+                    },
+                }
+            )
         summary["blockwise_verification"] = synthesizer.blockwise_verification_summary()
         summary.update(synthesizer.no_saturation_block_summary())
         summary["contract_tolerance"] = synthesizer.contract_tolerance_summary()
         summary["chaining_ok"] = synthesizer.chaining_summary()
         summary["soundness"] = synthesizer.soundness_label()
         summary["output_margin_check"] = synthesizer.output_margin_summary()
+        summary["cegar"] = synthesizer.cegar_summary()
         summary["vacuity_check"] = synthesizer.vacuity_summary()
         summary["counterexamples"] = synthesizer.counterexample_summary()
         summary["end_to_end_verification"] = synthesizer.end_to_end_summary()

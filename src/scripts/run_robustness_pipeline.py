@@ -116,6 +116,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Continue no-saturation block checks after TIMEOUT/MEMOUT/UNKNOWN for diagnostics.",
     )
     parser.add_argument(
+        "--cegar-max-rounds",
+        dest="cegar_max_rounds",
+        type=int,
+        default=3,
+        help="Maximum sound relational-refinement rounds for a failed hidden contract block.",
+    )
+    parser.add_argument(
         "--no-no-saturation-continue-on-unknown",
         dest="no_saturation_continue_on_unknown",
         action="store_false",
@@ -433,6 +440,7 @@ def main(argv: list[str] | None = None) -> None:
         e2e_invariants=bool(args.e2e_invariants),
         margin_cuts=(None if args.margin_cuts is None else args.margin_cuts == "on"),
         e2e_fallback=(None if args.e2e_fallback is None else args.e2e_fallback == "on"),
+        cegar_max_rounds=max(0, int(args.cegar_max_rounds)),
         export_paper_tables=args.export_paper_tables,
         baseline_results_json=args.baseline_results_json,
     )

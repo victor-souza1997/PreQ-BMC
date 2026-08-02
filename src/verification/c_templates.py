@@ -153,6 +153,156 @@ int main(void)
 }}
 """
 
+def _render_hidden_affine_with_row_cuts(
+    *,
+    cur_layer_layer_size: int,
+    in_layer_layer_size: int,
+    weights_c_int: str,
+    biases_c_int: str,
+    preimage_low_int: str,
+    preimage_high_int: str,
+    input_bounds_low_int: str,
+    input_bounds_high_int: str,
+    scale_factor: int,
+    total_bits: int,
+    activation_id: int,
+    input_scale: int,
+    contract_tolerance_declaration: str,
+    preimage_tolerance_expr: str,
+    abs_tol_expr: str,
+    rel_tol_num: int,
+    contract_cut_directions_c_int: str,
+    contract_cut_low_c_int: str,
+    contract_cut_high_c_int: str,
+    contract_cut_output_indices_c_int: str,
+    contract_cut_count: int,
+) -> str:
+    """Render endpoint propagation tightened by bounds on selected affine rows.
+
+    Every cut direction is exactly the corresponding quantized weight row.  A
+    formally validated bound on that dot product can therefore replace the box
+    endpoint accumulator for that output without introducing nondeterministic
+    hidden vectors.
+    """
+
+    return f"""\
+#include <stdint.h>
+#include <limits.h>
+
+#define INPUT_SIZE {in_layer_layer_size}
+#define LAYER_SIZE {cur_layer_layer_size}
+#define SCALE_FACTOR {scale_factor}LL
+#define INPUT_SCALE_FACTOR {input_scale}LL
+#define TOTAL_BITS {total_bits}
+#define ACTIVATION_KIND {activation_id}
+#define CONTRACT_CUT_COUNT {contract_cut_count}
+
+void __ESBMC_assert(_Bool, const char *);
+
+long long weights[LAYER_SIZE][INPUT_SIZE] = {weights_c_int};
+long long biases[LAYER_SIZE] = {biases_c_int};
+long long preimage_low[LAYER_SIZE] = {preimage_low_int};
+long long preimage_high[LAYER_SIZE] = {preimage_high_int};
+long long input_bounds_low[INPUT_SIZE] = {input_bounds_low_int};
+long long input_bounds_high[INPUT_SIZE] = {input_bounds_high_int};
+{contract_tolerance_declaration}
+
+long long contract_cut_directions[CONTRACT_CUT_COUNT][INPUT_SIZE] = {contract_cut_directions_c_int};
+long long contract_cut_low[CONTRACT_CUT_COUNT] = {contract_cut_low_c_int};
+long long contract_cut_high[CONTRACT_CUT_COUNT] = {contract_cut_high_c_int};
+int contract_cut_output_indices[CONTRACT_CUT_COUNT] = {contract_cut_output_indices_c_int};
+
+long long counterexample_input[INPUT_SIZE] = {{0}};
+int counterexample_neuron = -1;
+__int128 counterexample_preclamp = 0;
+
+{render_arith_kernel()}
+
+static inline __int128 apply_activation_value(__int128 value)
+{{
+    if (ACTIVATION_KIND == 1)
+    {{
+        return value < 0 ? 0 : value;
+    }}
+    if (ACTIVATION_KIND == 2)
+    {{
+        const __int128 six = (__int128)6 * (__int128)SCALE_FACTOR;
+        if (value < 0) return 0;
+        if (value > six) return six;
+    }}
+    return value;
+}}
+
+int main(void)
+{{
+    const __int128 abs_tol = {abs_tol_expr};
+    const __int128 rel_tol_num = {rel_tol_num};
+    const __int128 rel_tol_den = 100;
+
+    for (int i = 0; i < LAYER_SIZE; ++i)
+    {{
+        __int128 lower_acc = 0;
+        __int128 upper_acc = 0;
+        for (int j = 0; j < INPUT_SIZE; ++j)
+        {{
+            const long long w = weights[i][j];
+            lower_acc = mac_i128(
+                lower_acc,
+                w,
+                (w >= 0) ? input_bounds_low[j] : input_bounds_high[j]
+            );
+            upper_acc = mac_i128(
+                upper_acc,
+                w,
+                (w >= 0) ? input_bounds_high[j] : input_bounds_low[j]
+            );
+        }}
+
+        for (int cut = 0; cut < CONTRACT_CUT_COUNT; ++cut)
+        {{
+            if (contract_cut_output_indices[cut] == i)
+            {{
+                lower_acc = (__int128)contract_cut_low[cut];
+                upper_acc = (__int128)contract_cut_high[cut];
+            }}
+        }}
+
+        const __int128 raw_low = div_round_half_away_from_zero_i128(
+            lower_acc, (__int128)INPUT_SCALE_FACTOR
+        ) + (__int128)biases[i];
+        const __int128 raw_high = div_round_half_away_from_zero_i128(
+            upper_acc, (__int128)INPUT_SCALE_FACTOR
+        ) + (__int128)biases[i];
+        __int128 value_low = apply_activation_value(
+            clamp_to_signed_range_i128(raw_low, TOTAL_BITS)
+        );
+        __int128 value_high = apply_activation_value(
+            clamp_to_signed_range_i128(raw_high, TOTAL_BITS)
+        );
+        value_low = clamp_to_signed_range_i128(value_low, TOTAL_BITS);
+        value_high = clamp_to_signed_range_i128(value_high, TOTAL_BITS);
+
+        const __int128 pre_lo = (__int128)preimage_low[i];
+        const __int128 pre_hi = (__int128)preimage_high[i];
+        const __int128 range = pre_hi >= pre_lo ? pre_hi - pre_lo : pre_lo - pre_hi;
+        const __int128 preimage_tolerance = {preimage_tolerance_expr};
+        const __int128 accepted_low = pre_lo - preimage_tolerance;
+        const __int128 accepted_high = pre_hi + preimage_tolerance;
+        if (value_low < accepted_low || value_high > accepted_high)
+        {{
+            counterexample_neuron = i;
+            counterexample_preclamp = value_low < accepted_low ? raw_low : raw_high;
+        }}
+        __ESBMC_assert(
+            value_low >= accepted_low && value_high <= accepted_high,
+            "affine output outside tolerated preimage under sound relational cuts"
+        );
+    }}
+    return 0;
+}}
+"""
+
+
 def innerlayer_fixed_int_bounds_only(
     cur_layer_layer_size: int,
     in_layer_layer_size: int,
@@ -168,6 +318,11 @@ def innerlayer_fixed_int_bounds_only(
     unsound_contract_tolerance: bool = False,
     input_scale_factor: int | None = None,
     contract_tolerance_c_int: str | None = None,
+    contract_cut_directions_c_int: str | None = None,
+    contract_cut_low_c_int: str | None = None,
+    contract_cut_high_c_int: str | None = None,
+    contract_cut_output_indices_c_int: str | None = None,
+    contract_cut_count: int = 0,
 ) -> str:
     if activation not in {"none", "relu", "relu6"}:
         raise ValueError(
@@ -196,6 +351,38 @@ def innerlayer_fixed_int_bounds_only(
         if contract_tolerance_c_int is not None
         else ""
     )
+
+    if int(contract_cut_count) > 0:
+        if (
+            contract_cut_directions_c_int is None
+            or contract_cut_low_c_int is None
+            or contract_cut_high_c_int is None
+            or contract_cut_output_indices_c_int is None
+        ):
+            raise ValueError("Hidden contract cuts require directions and bounds.")
+        return _render_hidden_affine_with_row_cuts(
+            cur_layer_layer_size=cur_layer_layer_size,
+            in_layer_layer_size=in_layer_layer_size,
+            weights_c_int=weights_c_int,
+            biases_c_int=biases_c_int,
+            preimage_low_int=preimage_low_int,
+            preimage_high_int=preimage_high_int,
+            input_bounds_low_int=input_bounds_low_int,
+            input_bounds_high_int=input_bounds_high_int,
+            scale_factor=scale_factor,
+            total_bits=total_bits,
+            activation_id=activation_id,
+            input_scale=input_scale,
+            contract_tolerance_declaration=contract_tolerance_declaration,
+            preimage_tolerance_expr=preimage_tolerance_expr,
+            abs_tol_expr=abs_tol_expr,
+            rel_tol_num=rel_tol_num,
+            contract_cut_directions_c_int=contract_cut_directions_c_int,
+            contract_cut_low_c_int=contract_cut_low_c_int,
+            contract_cut_high_c_int=contract_cut_high_c_int,
+            contract_cut_output_indices_c_int=contract_cut_output_indices_c_int,
+            contract_cut_count=int(contract_cut_count),
+        )
 
     return f"""\
 #include <stdint.h>
@@ -449,6 +636,11 @@ def innerlayer_fixed_int(
     unsound_contract_tolerance: bool = False,
     input_scale_factor: int | None = None,
     contract_tolerance_c_int: str | None = None,
+    contract_cut_directions_c_int: str | None = None,
+    contract_cut_low_c_int: str | None = None,
+    contract_cut_high_c_int: str | None = None,
+    contract_cut_output_indices_c_int: str | None = None,
+    contract_cut_count: int = 0,
 ) -> str:
     return innerlayer_fixed_int_bounds_only(
         cur_layer_layer_size=cur_layer_layer_size,
@@ -465,6 +657,11 @@ def innerlayer_fixed_int(
         unsound_contract_tolerance=unsound_contract_tolerance,
         input_scale_factor=input_scale_factor,
         contract_tolerance_c_int=contract_tolerance_c_int,
+        contract_cut_directions_c_int=contract_cut_directions_c_int,
+        contract_cut_low_c_int=contract_cut_low_c_int,
+        contract_cut_high_c_int=contract_cut_high_c_int,
+        contract_cut_output_indices_c_int=contract_cut_output_indices_c_int,
+        contract_cut_count=contract_cut_count,
     )
 
 
@@ -784,6 +981,11 @@ def render_hidden_affine_bounds_program(
     unsound_contract_tolerance: bool = False,
     input_scale_factor: int | None = None,
     contract_tolerance_c_int: str | None = None,
+    contract_cut_directions_c_int: str | None = None,
+    contract_cut_low_c_int: str | None = None,
+    contract_cut_high_c_int: str | None = None,
+    contract_cut_output_indices_c_int: str | None = None,
+    contract_cut_count: int = 0,
 ) -> str:
     return innerlayer_fixed_int_bounds_only(
         cur_layer_layer_size=output_size,
@@ -800,6 +1002,11 @@ def render_hidden_affine_bounds_program(
         unsound_contract_tolerance=unsound_contract_tolerance,
         input_scale_factor=input_scale_factor,
         contract_tolerance_c_int=contract_tolerance_c_int,
+        contract_cut_directions_c_int=contract_cut_directions_c_int,
+        contract_cut_low_c_int=contract_cut_low_c_int,
+        contract_cut_high_c_int=contract_cut_high_c_int,
+        contract_cut_output_indices_c_int=contract_cut_output_indices_c_int,
+        contract_cut_count=contract_cut_count,
     )
 
 
@@ -818,6 +1025,11 @@ def render_hidden_affine_bounds_block_program(
     unsound_contract_tolerance: bool = False,
     input_scale_factor: int | None = None,
     contract_tolerance_c_int: str | None = None,
+    contract_cut_directions_c_int: str | None = None,
+    contract_cut_low_c_int: str | None = None,
+    contract_cut_high_c_int: str | None = None,
+    contract_cut_output_indices_c_int: str | None = None,
+    contract_cut_count: int = 0,
 ) -> str:
     """Render a hidden affine contract harness for a contiguous output-neuron block."""
 
@@ -836,6 +1048,11 @@ def render_hidden_affine_bounds_block_program(
         unsound_contract_tolerance=unsound_contract_tolerance,
         input_scale_factor=input_scale_factor,
         contract_tolerance_c_int=contract_tolerance_c_int,
+        contract_cut_directions_c_int=contract_cut_directions_c_int,
+        contract_cut_low_c_int=contract_cut_low_c_int,
+        contract_cut_high_c_int=contract_cut_high_c_int,
+        contract_cut_output_indices_c_int=contract_cut_output_indices_c_int,
+        contract_cut_count=contract_cut_count,
     )
 
 
@@ -1050,6 +1267,8 @@ static int is_valid_class(int value)
     return 0;
 }}
 """
+
+
         property_body = f"""
     int64_t max_valid = INT64_MIN;
     int64_t max_invalid = INT64_MIN;
@@ -1118,6 +1337,122 @@ int main(void)
 
 {''.join(steps)}
 {property_body}
+    return 0;
+}}
+"""
+
+
+def render_prefix_direction_cut_validation_program(
+    *,
+    input_size: int,
+    input_bounds_low_c_int: str,
+    input_bounds_high_c_int: str,
+    layers: list[dict[str, object]],
+    direction_c_int: str,
+    cut_low_int: int,
+    cut_high_int: int,
+) -> str:
+    """Render an exact deployed-prefix proof for one relational cut."""
+
+    if not layers:
+        raise ValueError("A relational cut requires a non-empty hidden prefix.")
+
+    max_width = max(
+        max(int(layer["input_size"]), int(layer["output_size"]))
+        for layer in layers
+    )
+    declarations: list[str] = []
+    steps: list[str] = []
+    for index, layer in enumerate(layers):
+        input_dim = int(layer["input_size"])
+        output_dim = int(layer["output_size"])
+        total_bits = int(layer["total_bits"])
+        input_fractional_bits = int(layer["input_fractional_bits"])
+        declarations.append(
+            f"""
+static const int LAYER_{index}_IN = {input_dim};
+static const int LAYER_{index}_OUT = {output_dim};
+static const int LAYER_{index}_Q = {total_bits};
+static const int64_t LAYER_{index}_WEIGHTS[{output_dim}][{input_dim}] = {layer["weights_c_int"]};
+static const int64_t LAYER_{index}_BIASES[{output_dim}] = {layer["biases_c_int"]};
+"""
+        )
+        input_buffer = "buffer_a" if index % 2 == 0 else "buffer_b"
+        output_buffer = "buffer_b" if index % 2 == 0 else "buffer_a"
+        steps.append(
+            f"""
+    for (int out_idx = 0; out_idx < LAYER_{index}_OUT; ++out_idx)
+    {{
+        __int128 acc = 0;
+        for (int in_idx = 0; in_idx < LAYER_{index}_IN; ++in_idx)
+        {{
+            acc = mac_i128(
+                acc,
+                LAYER_{index}_WEIGHTS[out_idx][in_idx],
+                {input_buffer}[in_idx]
+            );
+        }}
+        __int128 value = div_round_half_away_from_zero_i128(
+            acc,
+            ((__int128)1 << {input_fractional_bits})
+        ) + (__int128)LAYER_{index}_BIASES[out_idx];
+        value = clamp_to_signed_range_i128(value, LAYER_{index}_Q);
+        if (value < 0) value = 0;
+        value = clamp_to_signed_range_i128(value, LAYER_{index}_Q);
+        {output_buffer}[out_idx] = (int64_t)value;
+    }}
+"""
+        )
+
+    prefix_output_size = int(layers[-1]["output_size"])
+    final_buffer = "buffer_b" if (len(layers) - 1) % 2 == 0 else "buffer_a"
+    return f"""\
+#include <stdint.h>
+#include <limits.h>
+
+#define INPUT_SIZE {int(input_size)}
+#define PREFIX_OUTPUT_SIZE {prefix_output_size}
+
+extern long long nondet_longlong(void);
+void __ESBMC_assert(_Bool, const char *);
+void __ESBMC_assume(_Bool);
+#define QNN_ASSERT(cond, msg) __ESBMC_assert((cond), (msg))
+
+{render_arith_kernel()}
+
+static const int64_t INPUT_LOW[INPUT_SIZE] = {input_bounds_low_c_int};
+static const int64_t INPUT_HIGH[INPUT_SIZE] = {input_bounds_high_c_int};
+static const int64_t CUT_DIRECTION[PREFIX_OUTPUT_SIZE] = {direction_c_int};
+static const int64_t CUT_LOW = {int(cut_low_int)}LL;
+static const int64_t CUT_HIGH = {int(cut_high_int)}LL;
+{''.join(declarations)}
+
+int main(void)
+{{
+    int64_t buffer_a[{max(max_width, input_size)}] = {{0}};
+    int64_t buffer_b[{max_width}] = {{0}};
+    for (int i = 0; i < INPUT_SIZE; ++i)
+    {{
+        const int64_t input = nondet_longlong();
+        __ESBMC_assume(input >= INPUT_LOW[i] && input <= INPUT_HIGH[i]);
+        buffer_a[i] = input;
+    }}
+
+{''.join(steps)}
+    __int128 direction_value = 0;
+    for (int i = 0; i < PREFIX_OUTPUT_SIZE; ++i)
+    {{
+        direction_value = mac_i128(
+            direction_value,
+            CUT_DIRECTION[i],
+            {final_buffer}[i]
+        );
+    }}
+    __ESBMC_assert(
+        direction_value >= (__int128)CUT_LOW &&
+        direction_value <= (__int128)CUT_HIGH,
+        "relational cut does not contain the exact deployed prefix"
+    );
     return 0;
 }}
 """

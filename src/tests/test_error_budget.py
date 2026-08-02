@@ -11,7 +11,10 @@ from unittest.mock import patch
 import numpy as np
 
 from synthesis.preqbmc import GPEncoding
-from verification.c_templates import render_hidden_affine_bounds_program
+from verification.c_templates import (
+    render_hidden_affine_bounds_program,
+    render_prefix_direction_cut_validation_program,
+)
 from verification.esbmc import ESBMCConfig, ESBMCResult
 
 
@@ -286,6 +289,301 @@ class DerivedErrorBudgetTest(unittest.TestCase):
         np.testing.assert_array_equal(low - emitted_budget, pre_low)
         np.testing.assert_array_equal(high + emitted_budget, pre_high)
         self.assertEqual(encoder.preimage_deflation_records[-1]["status"], "DEFLATED")
+
+    def test_forward_fallback_is_not_deflated_as_property_preimage(self) -> None:
+        encoder = GPEncoding.__new__(GPEncoding)
+        hidden = SimpleNamespace(
+            layer_index=1,
+            int_bit=4,
+            preimage_source="deeppoly_forward_FALLBACK",
+        )
+        encoder.dense_layers = [hidden]
+        encoder.error_budget_mode = "derived"
+        encoder.preimage_deflation_records = []
+        pre_low = np.asarray([-2, 4], dtype=np.int64)
+        pre_high = np.asarray([3, 7], dtype=np.int64)
+        budget = np.asarray([2, 2], dtype=np.int64)
+        with (
+            patch.object(
+                encoder,
+                "_layer_preimage_bounds_int",
+                return_value=(pre_low, pre_high),
+            ),
+            patch.object(
+                encoder,
+                "_candidate_error_budget_int",
+                return_value=(budget, np.asarray([0]), np.asarray([0]), 3),
+            ),
+        ):
+            low, high, emitted_budget, valid = (
+                encoder._candidate_contract_target_bounds_int(
+                    hidden,
+                    SimpleNamespace(),
+                    np.asarray([[1]], dtype=np.int64),
+                    3,
+                    record=True,
+                )
+            )
+
+        self.assertFalse(valid)
+        np.testing.assert_array_equal(low, pre_low)
+        np.testing.assert_array_equal(high, pre_high)
+        np.testing.assert_array_equal(emitted_budget, budget)
+        record = encoder.preimage_deflation_records[-1]
+        self.assertEqual(record["status"], "PREIMAGE_UNAVAILABLE")
+        self.assertFalse(record["property_preimage_available"])
+        self.assertEqual(record["collapsed_neurons"], [])
+
+    def test_forward_fallback_stops_before_esbmc(self) -> None:
+        encoder = GPEncoding.__new__(GPEncoding)
+        hidden = SimpleNamespace(
+            layer_index=1,
+            layer_size=1,
+            int_bit=4,
+            preimage_source="deeppoly_forward_FALLBACK",
+        )
+        encoder.dense_layers = [hidden]
+        encoder.error_budget_mode = "derived"
+        encoder.preimage_deflation_records = []
+        encoder.esbmc_layer_block_size = 0
+        encoder.synthesis_final_status = "UNKNOWN"
+        encoder.x_low_real = np.asarray([0.0], dtype=np.float64)
+        encoder.x_high_real = np.asarray([1.0], dtype=np.float64)
+        encoder.config = SimpleNamespace(esbmc=ESBMCConfig())
+        encoder.esbmc_runner = SimpleNamespace(
+            run_file=lambda _: self.fail("ESBMC must not run without a property preimage")
+        )
+        with (
+            patch.object(
+                encoder,
+                "_assumption_box_int",
+                return_value=(
+                    np.asarray([0], dtype=np.int64),
+                    np.asarray([1], dtype=np.int64),
+                    0,
+                ),
+            ),
+            patch.object(
+                encoder,
+                "_candidate_error_budget_int",
+                return_value=(
+                    np.asarray([1], dtype=np.int64),
+                    np.asarray([0], dtype=np.int64),
+                    np.asarray([1], dtype=np.int64),
+                    0,
+                ),
+            ),
+            patch.object(
+                encoder,
+                "_layer_preimage_bounds_int",
+                return_value=(
+                    np.asarray([0], dtype=np.int64),
+                    np.asarray([1], dtype=np.int64),
+                ),
+            ),
+        ):
+            result = encoder.verify_layer_with_esbmc(
+                cur_layer=hidden,
+                in_layer=SimpleNamespace(layer_size=1),
+                qu_w_int=np.asarray([[1]], dtype=np.int64),
+                qu_b_int=np.asarray([0], dtype=np.int64),
+                frac_bit=0,
+                all_bit=5,
+                layer_index=0,
+            )
+
+        self.assertEqual(result.status, "PREIMAGE_UNAVAILABLE")
+        self.assertEqual(encoder.synthesis_final_status, "PREIMAGE_UNAVAILABLE")
+        self.assertIn("cannot be deflated", result.resource_control["reason"])
+
+    def test_hidden_relational_cut_is_widened_by_inherited_budget(self) -> None:
+        encoder = GPEncoding.__new__(GPEncoding)
+        encoder.margin_cuts = True
+        encoder.error_budget_mode = "derived"
+        encoder.solver = "cbc"
+        encoder.config = SimpleNamespace(gurobi_threads=1)
+        encoder.hidden_contract_cut_records = []
+        encoder._hidden_contract_cut_cache = {}
+        current = SimpleNamespace(layer_index=2)
+        previous = SimpleNamespace(
+            layer_index=1,
+            layer_size=2,
+            frac_bit=2,
+            int_bit=6,
+            error_budget_int=np.asarray([1, 2], dtype=np.int64),
+        )
+        encoder.dense_layers = [previous]
+        with (
+            patch.object(
+                encoder,
+                "_assumption_box_int",
+                return_value=(
+                    np.asarray([0, 0], dtype=np.int64),
+                    np.asarray([4, 4], dtype=np.int64),
+                    2,
+                ),
+            ),
+            patch.object(
+                encoder,
+                "_solve_margin_direction_milp",
+                return_value=(0.5, 1.5, 0.01),
+            ),
+            patch.object(
+                encoder,
+                "_formally_validate_relational_cut",
+                side_effect=lambda record, **_: (
+                    record.update(
+                        {
+                            "formal_validation_status": "VERIFIED",
+                            "soundness": "esbmc_exact_deployed_prefix_validated",
+                        }
+                    )
+                    is None
+                ),
+            ),
+        ):
+            cuts = encoder._hidden_contract_cut_bounds(
+                cur_layer=current,
+                in_layer=previous,
+                weights_int=np.asarray([[2, -1]], dtype=np.int64),
+                frac_bit=2,
+                all_bit=8,
+                start_neuron=0,
+                end_neuron=1,
+                maximum_cuts=1,
+            )
+
+        self.assertEqual(len(cuts), 1)
+        self.assertEqual(cuts[0]["inherited_widening_int"], 4)
+        self.assertEqual(cuts[0]["cut_low_int"], -2)
+        self.assertEqual(cuts[0]["cut_high_int"], 10)
+        self.assertEqual(
+            cuts[0]["soundness"],
+            "esbmc_exact_deployed_prefix_validated",
+        )
+
+    def test_hidden_cut_harness_tightens_accumulator_endpoints(self) -> None:
+        source = render_hidden_affine_bounds_program(
+            output_size=1,
+            input_size=2,
+            weights_c_int="{{2, -1}}",
+            biases_c_int="{0}",
+            preimage_low_c_int="{-2}",
+            preimage_high_c_int="{2}",
+            input_bounds_low_c_int="{0, 0}",
+            input_bounds_high_c_int="{4, 4}",
+            scale_factor=4,
+            total_bits=8,
+            input_scale_factor=4,
+            contract_tolerance_c_int="{1}",
+            contract_cut_directions_c_int="{{2, -1}}",
+            contract_cut_low_c_int="{-2}",
+            contract_cut_high_c_int="{10}",
+            contract_cut_output_indices_c_int="{0}",
+            contract_cut_count=1,
+        )
+
+        self.assertIn("contract_cut_output_indices[cut] == i", source)
+        self.assertIn("lower_acc = (__int128)contract_cut_low[cut]", source)
+        self.assertNotIn("nondet_longlong", source)
+
+    def test_relational_cut_validator_uses_exact_deployed_prefix(self) -> None:
+        source = render_prefix_direction_cut_validation_program(
+            input_size=1,
+            input_bounds_low_c_int="{-2}",
+            input_bounds_high_c_int="{2}",
+            layers=[
+                {
+                    "input_size": 1,
+                    "output_size": 2,
+                    "total_bits": 8,
+                    "fractional_bits": 3,
+                    "input_fractional_bits": 3,
+                    "weights_c_int": "{{4}, {-4}}",
+                    "biases_c_int": "{0, 0}",
+                }
+            ],
+            direction_c_int="{2, -1}",
+            cut_low_int=-4,
+            cut_high_int=8,
+        )
+
+        self.assertIn("nondet_longlong", source)
+        self.assertIn("div_round_half_away_from_zero_i128", source)
+        self.assertIn("clamp_to_signed_range_i128", source)
+        self.assertIn("direction_value >= (__int128)CUT_LOW", source)
+        self.assertNotIn("LAYER_0_LOW", source)
+
+    def test_failed_exact_prefix_validation_marks_cut_untrusted(self) -> None:
+        encoder = GPEncoding.__new__(GPEncoding)
+        encoder.dense_layers = [
+            SimpleNamespace(
+                frac_bit=2,
+                int_bit=6,
+                layer_paras=[
+                    np.asarray([[1.0]], dtype=np.float64),
+                    np.asarray([0.0], dtype=np.float64),
+                ],
+            )
+        ]
+        encoder.x_low_real = np.asarray([-0.5], dtype=np.float64)
+        encoder.x_high_real = np.asarray([0.5], dtype=np.float64)
+        encoder._relational_cut_validation_cache = {}
+        encoder._stats = {"esbmc_calls": 0.0}
+        encoder.esbmc_call_records = []
+        encoder.config = SimpleNamespace(esbmc=ESBMCConfig())
+        encoder.esbmc_runner = SimpleNamespace(
+            run_file=lambda _: ESBMCResult(
+                status="FAILED",
+                command=("esbmc",),
+                stdout="",
+                stderr="",
+                return_code=1,
+            )
+        )
+        record = {
+            "direction_int": [1],
+            "cut_low_int": 0,
+            "cut_high_int": 0,
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            encoder.output_dir = Path(temp_dir)
+            validated = encoder._formally_validate_relational_cut(
+                record,
+                hidden_layer_count=1,
+                layer_index=1,
+                all_bit=8,
+                frac_bit=2,
+                cut_kind="hidden_contract",
+                identifier="neuron_0",
+            )
+
+        self.assertFalse(validated)
+        self.assertEqual(record["formal_validation_status"], "FAILED")
+        self.assertEqual(record["soundness"], "untrusted_milp_proposal_not_injected")
+        self.assertEqual(
+            encoder.esbmc_call_records[0]["property_type"],
+            "relational_cut_validation",
+        )
+
+    def test_hidden_harness_rejects_unvalidated_or_miswired_cuts(self) -> None:
+        weights = np.asarray([[2, -1]], dtype=np.int64)
+        unvalidated = {
+            "neuron_index": 0,
+            "direction_int": [2, -1],
+            "formal_validation_status": "TIMEOUT",
+        }
+        with self.assertRaisesRegex(ValueError, "formally validated"):
+            GPEncoding._require_validated_hidden_row_cuts(weights, [unvalidated])
+
+        miswired = {
+            "neuron_index": 0,
+            "direction_int": [1, -1],
+            "formal_validation_status": "VERIFIED",
+        }
+        with self.assertRaisesRegex(ValueError, "quantized affine row"):
+            GPEncoding._require_validated_hidden_row_cuts(weights, [miswired])
 
 
 if __name__ == "__main__":

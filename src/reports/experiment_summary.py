@@ -296,6 +296,10 @@ def _pipeline_terminal_reason(pipeline_summary: dict[str, Any]) -> str | None:
         return "reachable_output_margin_counterexample"
     if final_status == "PREIMAGE_DEFLATION_EMPTY":
         return "preimage_deflation_empty"
+    if final_status == "PREIMAGE_UNAVAILABLE":
+        return "property_preimage_unavailable"
+    if final_status == "LAYER_INCONCLUSIVE":
+        return "relational_layer_refinement_inconclusive"
     if final_status == "SOURCE_PROPERTY_INCONCLUSIVE":
         return "source_float_property_not_established_by_deeppoly"
     if final_status == "VACUOUS":
@@ -372,6 +376,8 @@ def _guarantee_level(
         "UNKNOWN",
         "MARGIN_INCONCLUSIVE",
         "PREIMAGE_DEFLATION_EMPTY",
+        "PREIMAGE_UNAVAILABLE",
+        "LAYER_INCONCLUSIVE",
         "SOURCE_PROPERTY_INCONCLUSIVE",
     } or contract_status in {
         "TIMEOUT",
@@ -379,6 +385,8 @@ def _guarantee_level(
         "UNKNOWN",
         "MARGIN_INCONCLUSIVE",
         "PREIMAGE_DEFLATION_EMPTY",
+        "PREIMAGE_UNAVAILABLE",
+        "LAYER_INCONCLUSIVE",
     }:
         return {
             "guarantee_level": "unknown",
@@ -636,6 +644,8 @@ def build_experiment_summary(
         "MARGIN_INCONCLUSIVE",
         "MARGIN_REFUTED",
         "PREIMAGE_DEFLATION_EMPTY",
+        "PREIMAGE_UNAVAILABLE",
+        "LAYER_INCONCLUSIVE",
         "SOURCE_PROPERTY_INCONCLUSIVE",
         "VACUOUS",
     }
@@ -654,7 +664,16 @@ def build_experiment_summary(
             )
         if (
             formal_status_controls.get("contract_status") == "UNKNOWN"
-            and formal_pipeline_status in {"FAILED", "TIMEOUT", "MEMOUT"}
+            and formal_pipeline_status
+            in {
+                "FAILED",
+                "TIMEOUT",
+                "MEMOUT",
+                "PREIMAGE_DEFLATION_EMPTY",
+                "PREIMAGE_UNAVAILABLE",
+                "MARGIN_INCONCLUSIVE",
+                "LAYER_INCONCLUSIVE",
+            }
         ):
             formal_status_controls["contract_status"] = formal_pipeline_status
     if refined_pipeline_status in terminal_pipeline_statuses:
@@ -672,7 +691,16 @@ def build_experiment_summary(
             )
         if (
             refined_status_controls.get("contract_status") == "UNKNOWN"
-            and refined_pipeline_status in {"FAILED", "TIMEOUT", "MEMOUT"}
+            and refined_pipeline_status
+            in {
+                "FAILED",
+                "TIMEOUT",
+                "MEMOUT",
+                "PREIMAGE_DEFLATION_EMPTY",
+                "PREIMAGE_UNAVAILABLE",
+                "MARGIN_INCONCLUSIVE",
+                "LAYER_INCONCLUSIVE",
+            }
         ):
             refined_status_controls["contract_status"] = refined_pipeline_status
     formal_guarantee_controls = _guarantee_level(

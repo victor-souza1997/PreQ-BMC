@@ -478,6 +478,7 @@ def _runtime_metadata(args: argparse.Namespace, run: dict[str, Any], command: li
         "e2e_invariants": bool(run.get("e2e_invariants", True)),
         "margin_cuts": str(run.get("margin_cuts", "on" if str(run.get("error_budget_mode", "heuristic")) == "derived" else "off")),
         "e2e_fallback": str(run.get("e2e_fallback", "on" if str(run.get("error_budget_mode", "heuristic")) == "derived" else "off")),
+        "cegar_max_rounds": int(run.get("cegar_max_rounds", 3)),
         "enforce_contract_chaining": bool(run.get("enforce_contract_chaining", True)),
         "dataset": run.get("dataset"),
         "architecture": run.get("arch"),
@@ -621,6 +622,12 @@ def _build_pipeline_command(
         "--gurobi-threads",
         str(run.get("gurobi_threads", args.gurobi_threads)),
     ]
+    _add_flag(
+        command,
+        supported_flags,
+        "--cegar-max-rounds",
+        int(run.get("cegar_max_rounds", 3)),
+    )
 
     if not bool(run.get("compile_c_backend", True)):
         _add_flag(command, supported_flags, "--skip-c-backend")
