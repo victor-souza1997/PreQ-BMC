@@ -21,3 +21,4 @@ shells
 venv/
 image_gen
 logs
+prominent_results/
