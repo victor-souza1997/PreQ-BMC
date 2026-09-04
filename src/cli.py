@@ -173,6 +173,12 @@ def _demo_result_summary(output_dir: Path) -> dict[str, Any] | None:
     refined = report.get("quality_refined", {})
     method = "quality_refined" if refined.get("accepted") is True else "formal_only"
     result = report.get(method, {})
+    # The per-method block and the run's overall verdict can disagree: when
+    # refinement is attempted and rejected, formal_only can read
+    # PARTIAL_VERIFIED while the top-level status the report and every
+    # aggregated table carry is FAILED. Surface both rather than printing the
+    # method block alone, so the terminal and the JSON cannot be read as
+    # contradicting each other.
     return {
         "method": method,
         "final_status": str(result.get("final_status", "UNKNOWN")),
@@ -182,6 +188,8 @@ def _demo_result_summary(output_dir: Path) -> dict[str, Any] | None:
         "Q": [int(value) for value in result.get("Q", [])],
         "I": [int(value) for value in result.get("I", [])],
         "F": [int(value) for value in result.get("F", [])],
+        "overall_final_status": str(report.get("final_status", "UNKNOWN")),
+        "overall_guarantee_level": str(report.get("guarantee_level", "unknown")),
     }
 
 
@@ -324,6 +332,16 @@ def cmd_demo(args: argparse.Namespace, extra: list[str]) -> int:
     print(f"Contract status: {result['contract_status']}")
     print(f"No-saturation status: {result['no_saturation_status']}")
     print(f"Selected Q/I/F: {result['Q']} / {result['I']} / {result['F']}")
+    overall_status = result["overall_final_status"]
+    overall_guarantee = result["overall_guarantee_level"]
+    print(f"Overall run status: {overall_status} ({overall_guarantee})")
+    if overall_status != result["final_status"]:
+        print(
+            f"Note: '{result['method']}' reports {result['final_status']}, but the "
+            f"run's overall status is {overall_status}. The overall status is what "
+            "reports/experiment_summary.json and the aggregated tables carry.",
+            flush=True,
+        )
     if result["final_status"] in {"FAILED", "UNKNOWN"}:
         print("Demo completed operationally, but the selected verification result was not accepted.")
         return 1
