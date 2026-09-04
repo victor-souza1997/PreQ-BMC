@@ -7,6 +7,7 @@ import unittest
 import numpy as np
 
 from backends.fixed_point import LayerQuantizationSpec
+from verification.c_templates import render_network_end_to_end_program
 from verification.invariants import propagate_exact_intervals
 from verification.replay import LayerReplayFormat, replay_on_python
 
@@ -53,6 +54,58 @@ class EndToEndInvariantTest(unittest.TestCase):
         self.assertTrue(np.all(outputs <= bound_high))
         self.assertEqual(bound_low.tolist(), outputs.min(axis=0).tolist())
         self.assertEqual(bound_high.tolist(), outputs.max(axis=0).tolist())
+
+
+class NarrowAccumulatorEncodingTest(unittest.TestCase):
+    """Pin the accumulator encoding used when invariants.py proves int64 suffices.
+
+    When ``accumulator_c_type`` is ``int64_t`` the emitted code declares a 64-bit
+    accumulator but still evaluates each MAC through ``mac_i128`` and truncates.
+    That is semantically identical to native int64 arithmetic under the
+    ``all_prefixes_fit_i64`` obligation (invariants.py:52-68), because every
+    prefix sum is proved to fit, so the truncation is a no-op.
+
+    It looks like a missed optimisation and it is not. Replacing the body with
+    native ``int64_t`` operations was measured on this harness (bitwuzla, --bv,
+    5-5-3 network, six seeds) at a median 0.22x -- roughly 4.5x SLOWER -- and
+    turned three of six instances that verified in ~5s into 10G memouts. The
+    128-bit form bit-blasts to a query bitwuzla handles far better. Do not
+    "fix" this without re-running that comparison.
+    """
+
+    @staticmethod
+    def _layer(accumulator_c_type: str) -> dict[str, object]:
+        return {
+            "input_size": 2,
+            "output_size": 2,
+            "total_bits": 16,
+            "fractional_bits": 4,
+            "input_fractional_bits": 4,
+            "weights_c_int": "{{1,2},{3,4}}",
+            "biases_c_int": "{0,0}",
+            "invariant_low_c_int": "{-1000,-1000}",
+            "invariant_high_c_int": "{1000,1000}",
+            "accumulator_c_type": accumulator_c_type,
+        }
+
+    def _forward_body(self, accumulator_c_type: str) -> str:
+        program = render_network_end_to_end_program(
+            input_size=2,
+            input_bounds_low_c_int="{0,0}",
+            input_bounds_high_c_int="{32,32}",
+            layers=[self._layer(accumulator_c_type)],
+            target_label=0,
+        )
+        body = program[program.index(f"{accumulator_c_type} acc = 0;"):]
+        return body[: body.index("buffer_b[out_idx]")]
+
+    def test_int64_accumulator_still_evaluates_through_int128(self) -> None:
+        body = self._forward_body("int64_t")
+        self.assertIn("mac_i128(", body)
+        self.assertIn("(__int128)acc", body)
+
+    def test_default_accumulator_is_int128(self) -> None:
+        self.assertIn("mac_i128(", self._forward_body("__int128"))
 
 
 if __name__ == "__main__":
