@@ -964,10 +964,14 @@ class GPEncoding:
             # integer formats; the generated harness proves the deployed
             # integer program itself.
             pass
-        elif self.config.no_gurobi:
-            self.load_cached_preimage()
         else:
-            self.backward_preimage_computation()
+            if self.config.no_gurobi:
+                self.load_cached_preimage()
+            else:
+                self.backward_preimage_computation()
+            # This guard applies to every path that produces layer preimages,
+            # cached or freshly solved. Running it only after a live solve let a
+            # cache supply forward DeepPoly bounds unchallenged.
             missing_preimages = [
                 layer
                 for layer in self.dense_layers
@@ -1094,6 +1098,9 @@ class GPEncoding:
                 "layer_size": int(layer.layer_size),
                 "relaxed_lb": np.asarray(layer.relaxed_lb, dtype=np.float64),
                 "relaxed_ub": np.asarray(layer.relaxed_ub, dtype=np.float64),
+                "preimage_source": str(
+                    getattr(layer, "preimage_source", "deeppoly_forward_FALLBACK")
+                ),
             }
             for layer in self.dense_layers
         ]
@@ -1107,6 +1114,29 @@ class GPEncoding:
         LOGGER.info("Saved MILP preimage cache to %s", cache_path)
         return cache_path
 
+    def _verify_cached_preimage_identity(self, metadata: dict[str, Any]) -> None:
+        """Reject a cache computed for a different model.
+
+        Shape agreement is not identity: two networks with the same layer sizes
+        accept each other's arrays silently. The cache records the weight digest
+        of the model it was solved for, so compare it against this model's.
+        """
+
+        expected = (self.config.preimage_cache_metadata or {}).get("weights_sha256")
+        cached = (metadata.get("metadata") or {}).get("weights_sha256")
+        if not expected:
+            return
+        if not cached:
+            raise ValueError(
+                "Preimage cache does not record the weights it was computed for; "
+                "refusing to load it against this model."
+            )
+        if str(cached) != str(expected):
+            raise ValueError(
+                "Preimage cache was computed for a different model: cache "
+                f"weights_sha256={cached}, current model weights_sha256={expected}."
+            )
+
     def load_cached_preimage(self) -> None:
         metadata, arrays = load_preimage_cache(
             cache_root=self._preimage_cache_root(),
@@ -1114,6 +1144,13 @@ class GPEncoding:
         )
         layer_indices = arrays["layer_indices"].astype(np.int64)
         layer_sizes = arrays["layer_sizes"].astype(np.int64)
+        cached_layers = list(metadata.get("layers") or [])
+        if len(cached_layers) != len(layer_indices):
+            raise ValueError(
+                "Preimage cache metadata does not describe every cached layer; "
+                "refusing to load a cache whose provenance cannot be established."
+            )
+        self._verify_cached_preimage_identity(metadata)
         if len(layer_indices) != len(self.dense_layers):
             raise ValueError(
                 f"Preimage cache has {len(layer_indices)} hidden layer(s), "
@@ -1131,7 +1168,15 @@ class GPEncoding:
                 )
             layer.relaxed_lb = arrays[f"relaxed_lb_{offset}"].astype(np.float32)
             layer.relaxed_ub = arrays[f"relaxed_ub_{offset}"].astype(np.float32)
-            layer.preimage_source = "milp_preimage"
+            # Restore recorded provenance. Never assume a MILP preimage: a
+            # cache written before provenance was persisted, or written from a
+            # run that fell back to forward DeepPoly bounds, must not be
+            # laundered into a property preimage by the round trip.
+            layer.preimage_source = str(
+                cached_layers[offset].get(
+                    "preimage_source", "cache_provenance_unavailable"
+                )
+            )
 
         self.scaleValueSet = arrays["scale_values"].astype(np.float64).tolist()
         LOGGER.info("Loaded MILP preimage cache %s (%s)", self._preimage_cache_key(), metadata.get("format"))

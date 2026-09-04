@@ -105,6 +105,10 @@ def save_preimage_cache(
             {
                 "layer_index": int(layer["layer_index"]),
                 "layer_size": int(layer["layer_size"]),
+                # Provenance must survive the cache round trip. A forward
+                # DeepPoly box and a property preimage are different objects,
+                # and a reload cannot re-derive which one these arrays are.
+                "preimage_source": str(layer["preimage_source"]),
             }
             for layer in layers
         ],

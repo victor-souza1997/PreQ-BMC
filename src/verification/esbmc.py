@@ -159,6 +159,13 @@ class ESBMCRunner:
             r"#define\s+NUM_VALID_CLASSES\s+(\d+)",
             r"static\s+const\s+int\s+LAYER_\d+_IN\s*=\s*(\d+)",
             r"static\s+const\s+int\s+LAYER_\d+_OUT\s*=\s*(\d+)",
+            # Cut and prefix loops bound iteration too. Omitting them does not
+            # weaken a proof (ESBMC's unwinding assertions turn an insufficient
+            # bound into VERIFICATION FAILED, not SUCCESSFUL) but it fabricates
+            # spurious refutations once a cut set outgrows the layer width.
+            r"#define\s+CONTRACT_CUT_COUNT\s+(\d+)",
+            r"#define\s+MARGIN_CUT_COUNT\s+(\d+)",
+            r"#define\s+PREFIX_OUTPUT_SIZE\s+(\d+)",
         ]
 
         for pattern in patterns:
