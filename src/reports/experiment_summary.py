@@ -805,6 +805,7 @@ def build_experiment_summary(
         ),
         "contract_harness_semantics": pipeline_summary.get("contract_harness_semantics", {}),
         "contract_tolerance": pipeline_summary.get("contract_tolerance", {}),
+        "chaining_ok": pipeline_summary.get("chaining_ok", {}),
         "source_region": pipeline_summary.get("source_region", {}),
         "output_margin_check": pipeline_summary.get("output_margin_check", {}),
         "margin_cuts": pipeline_summary.get("margin_cuts", {}),

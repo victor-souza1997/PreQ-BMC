@@ -26,7 +26,7 @@ def _signed_64_safe(low: int, high: int) -> bool:
     return -(1 << 63) <= int(low) and int(high) <= (1 << 63) - 1
 
 
-def _layer_interval(
+def exact_layer_interval(
     layer: Any,
     *,
     input_low: np.ndarray,
@@ -117,7 +117,7 @@ def propagate_exact_interval_details(
     results: list[ExactLayerIntervals] = []
 
     for index, (layer, fmt) in enumerate(zip(layers, fmts)):
-        result = _layer_interval(
+        result = exact_layer_interval(
             layer,
             input_low=current_low,
             input_high=current_high,

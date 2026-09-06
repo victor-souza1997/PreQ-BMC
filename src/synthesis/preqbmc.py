@@ -47,7 +47,7 @@ from verification.c_templates import (
     render_prefix_direction_cut_validation_program,
 )
 from verification.esbmc import ESBMCConfig, ESBMCRunner, ESBMCResult
-from verification.invariants import propagate_exact_interval_details
+from verification.invariants import exact_layer_interval, propagate_exact_interval_details
 from verification.properties import ClassificationProperty
 from verification.replay import LayerReplayFormat, replay_on_python, replay_on_so
 
@@ -87,6 +87,7 @@ class QuadapterConfig:
     unsound_contract_tolerance: bool = False
     propagate_contract_tolerance: bool = False
     enforce_contract_chaining: bool = True
+    tighten_verified_bounds: bool = False
     error_budget_mode: str = "heuristic"
     vacuity_check: bool | None = None
     cex_feedback: str = "off"
@@ -135,6 +136,7 @@ class QuadapterConfig:
             unsound_contract_tolerance=bool(getattr(args, "unsound_contract_tolerance", False)),
             propagate_contract_tolerance=bool(getattr(args, "propagate_contract_tolerance", False)),
             enforce_contract_chaining=bool(getattr(args, "enforce_contract_chaining", True)),
+            tighten_verified_bounds=bool(getattr(args, "tighten_verified_bounds", False)),
             error_budget_mode=str(getattr(args, "error_budget_mode", "heuristic")).lower(),
             vacuity_check=getattr(args, "vacuity_check", None),
             cex_feedback=str(getattr(args, "cex_feedback", "off")).lower(),
@@ -210,6 +212,9 @@ class LayerEncoding:
         self.verified_activation_lb: np.ndarray | None = None
         self.verified_activation_ub: np.ndarray | None = None
         self.verified_activation_source: str = "deeppoly_clipped"
+        self.verified_activation_lb_int: np.ndarray | None = None
+        self.verified_activation_ub_int: np.ndarray | None = None
+        self.verified_activation_frac: int | None = None
         self.error_budget_int: np.ndarray | None = None
 
         if layer_index > 0:
@@ -291,6 +296,7 @@ class GPEncoding:
     error_budget_mode = "zero"
     cex_feedback = "off"
     harness_scope = "layer"
+    tighten_verified_bounds = False
 
     def __init__(
         self,
@@ -341,6 +347,18 @@ class GPEncoding:
         self.harness_scope = str(self.config.harness_scope).lower()
         if self.harness_scope not in {"layer", "network"}:
             raise ValueError("harness_scope must be one of: layer, network")
+        self.tighten_verified_bounds = bool(self.config.tighten_verified_bounds)
+        if self.tighten_verified_bounds and (
+            self.error_budget_mode != "derived"
+            or self.harness_scope != "layer"
+            or self.verify_mode != "esbmc"
+            or not self.enforce_contract_chaining
+            or self.unsound_contract_tolerance
+        ):
+            raise ValueError(
+                "tighten_verified_bounds requires derived ESBMC layer contracts, "
+                "enforced chaining, and no unsound tolerance."
+            )
         self.e2e_invariants = bool(self.config.e2e_invariants)
         self.margin_cuts = (
             self.error_budget_mode == "derived"
@@ -1676,7 +1694,7 @@ class GPEncoding:
                     frac_bit += 1
                     continue
 
-                if margin_record is not None and margin_record["analytic_margin_ok"]:
+                if margin_record is not None and margin_record["analytic_margin_ok"] and not self.tighten_verified_bounds:
                     esbmc_result = self._analytic_output_margin_result()
                 else:
                     esbmc_result = self.verify_layer_with_esbmc(
@@ -1763,6 +1781,7 @@ class GPEncoding:
                         frac_bit=frac_bit,
                         in_layer=in_layer,
                         weights_int=qu_w_int,
+                        biases_int=qu_b_int,
                     )
                     if (
                         not chaining_record["chaining_ok"]
@@ -1895,7 +1914,7 @@ class GPEncoding:
                     frac_bit=f_bits,
                 )
 
-            if margin_record is not None and margin_record["analytic_margin_ok"]:
+            if margin_record is not None and margin_record["analytic_margin_ok"] and not self.tighten_verified_bounds:
                 contract_result = self._analytic_output_margin_result()
             else:
                 contract_result = self.verify_layer_with_esbmc(
@@ -1973,6 +1992,7 @@ class GPEncoding:
                     frac_bit=f_bits,
                     in_layer=in_layer,
                     weights_int=np.asarray(qu_w_int),
+                    biases_int=np.asarray(qu_b_int),
                 )
                 record["chaining_ok"] = bool(chaining_record["chaining_ok"])
                 record["chaining_enforced"] = bool(self.enforce_contract_chaining)
@@ -2185,6 +2205,15 @@ class GPEncoding:
         in_layer: LayerEncoding,
         scale: int,
     ) -> tuple[np.ndarray, np.ndarray]:
+        if self.tighten_verified_bounds and cur_layer.layer_index > 1:
+            low = getattr(in_layer, "verified_activation_lb_int", None)
+            high = getattr(in_layer, "verified_activation_ub_int", None)
+            frac = getattr(in_layer, "verified_activation_frac", None)
+            if low is None or high is None or frac is None:
+                raise RuntimeError("Missing ESBMC-verified predecessor bounds.")
+            if int(scale) != 1 << int(frac):
+                raise RuntimeError("Verified predecessor bounds have a different input scale.")
+            return np.array(low, dtype=np.int64), np.array(high, dtype=np.int64)
         if cur_layer.layer_index == 1:
             fallback_low = getattr(
                 in_layer,
@@ -2706,6 +2735,48 @@ class GPEncoding:
         violation_indices = np.flatnonzero(~(lower_ok & upper_ok))
         return lower_margin, upper_margin, ok, violation_indices
 
+    def _candidate_reachable_bounds(
+        self,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        weights_int: np.ndarray,
+        biases_int: np.ndarray,
+        frac_bit: int,
+        all_bit: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Propose clamped affine bounds; the hidden harness must prove them."""
+        low, high, frac_in = self._assumption_box_int(cur_layer, in_layer, frac_bit)
+        bounds = exact_layer_interval(
+            SimpleNamespace(weights_int=weights_int, biases_int=biases_int),
+            input_low=low,
+            input_high=high,
+            input_fractional_bits=frac_in,
+            total_bits=all_bit,
+            apply_relu=False,
+        )
+        return bounds.output_low, bounds.output_high
+
+    def _reachable_harness_arguments(
+        self,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        weights_int: np.ndarray,
+        biases_int: np.ndarray,
+        frac_bit: int,
+        all_bit: int,
+        start: int = 0,
+        end: int | None = None,
+    ) -> dict[str, str]:
+        if not self.tighten_verified_bounds:
+            return {}
+        low, high = self._candidate_reachable_bounds(
+            cur_layer, in_layer, weights_int, biases_int, frac_bit, all_bit,
+        )
+        return {
+            "reachable_low_c_int": self.numpy_to_c_int_array(low[start:end]),
+            "reachable_high_c_int": self.numpy_to_c_int_array(high[start:end]),
+        }
+
     def _store_verified_activation_bounds(
         self,
         cur_layer: LayerEncoding,
@@ -2718,6 +2789,10 @@ class GPEncoding:
         cur_layer.verified_activation_lb = np.asarray(guaranteed_low_int, dtype=np.float64) / float(scale)
         cur_layer.verified_activation_ub = np.asarray(guaranteed_high_int, dtype=np.float64) / float(scale)
         cur_layer.verified_activation_source = source
+        if self.tighten_verified_bounds:
+            cur_layer.verified_activation_lb_int = np.array(guaranteed_low_int, dtype=np.int64)
+            cur_layer.verified_activation_ub_int = np.array(guaranteed_high_int, dtype=np.int64)
+            cur_layer.verified_activation_frac = int(scale).bit_length() - 1
 
     def _record_hidden_chaining_check(
         self,
@@ -2727,6 +2802,7 @@ class GPEncoding:
         frac_bit: int,
         in_layer: LayerEncoding | None = None,
         weights_int: np.ndarray | None = None,
+        biases_int: np.ndarray | None = None,
     ) -> dict[str, Any]:
         """Check that a hidden contract guarantee composes with the next input box.
 
@@ -2762,6 +2838,30 @@ class GPEncoding:
             guaranteed_low = np.maximum(pre_lo_int - tolerance_int, 0)
             guaranteed_high = np.maximum(pre_hi_int + tolerance_int, 0)
 
+        tightening: dict[str, Any] | None = None
+        if self.tighten_verified_bounds:
+            if in_layer is None or weights_int is None or biases_int is None:
+                raise ValueError("Verified bound tightening requires the verified layer parameters.")
+            reachable_low, reachable_high = self._candidate_reachable_bounds(
+                cur_layer, in_layer, weights_int, biases_int, frac_bit, all_bit,
+            )
+            contract_low, contract_high = guaranteed_low.copy(), guaranteed_high.copy()
+            guaranteed_low = np.maximum(guaranteed_low, np.maximum(reachable_low, 0))
+            guaranteed_high = np.minimum(guaranteed_high, np.maximum(reachable_high, 0))
+            if np.any(guaranteed_low > guaranteed_high):
+                raise RuntimeError("Verified contract and reachable bounds have an empty intersection.")
+            tightening = {
+                "status": "VERIFIED",
+                "contract_low_int": contract_low.tolist(),
+                "contract_high_int": contract_high.tolist(),
+                "reachable_affine_low_int": reachable_low.tolist(),
+                "reachable_affine_high_int": reachable_high.tolist(),
+                "propagated_low_int": guaranteed_low.tolist(),
+                "propagated_high_int": guaranteed_high.tolist(),
+                "contract_total_width_int": sum(int(h) - int(l) for l, h in zip(contract_low, contract_high)),
+                "propagated_total_width_int": sum(int(h) - int(l) for l, h in zip(guaranteed_low, guaranteed_high)),
+            }
+
         legacy_assumed_low = np.floor(np.asarray(cur_layer.clipped_lb, dtype=np.float64) * scale).astype(np.int64)
         legacy_assumed_high = np.ceil(np.asarray(cur_layer.clipped_ub, dtype=np.float64) * scale).astype(np.int64)
         legacy_lower_margin, legacy_upper_margin, legacy_ok, legacy_violations = self._containment_margins_int(
@@ -2775,7 +2875,7 @@ class GPEncoding:
         if effective_propagation:
             assumed_low = guaranteed_low
             assumed_high = guaranteed_high
-            assumption_source = "verified_contract"
+            assumption_source = "verified_contract_intersect_reachable" if tightening else "verified_contract"
         else:
             assumed_low = legacy_assumed_low
             assumed_high = legacy_assumed_high
@@ -2853,6 +2953,8 @@ class GPEncoding:
             "violating_neurons": [int(index) for index in violation_indices[:20]],
             "violating_neuron_count": int(violation_indices.size),
         }
+        if tightening is not None:
+            record["verified_bound_tightening"] = tightening
         self.chaining_records.append(record)
         return record
 
@@ -4373,6 +4475,10 @@ class GPEncoding:
             for margin in class_margins
             if bool(margin.get("ok", False))
         ]
+        if self.tighten_verified_bounds:
+            # Retain an actual C proof at the output, even when its analytic guard passes.
+            unresolved = [int(margin["other_class"]) for margin in class_margins]
+            analytically_verified = []
         if not unresolved:
             return self._analytic_output_margin_result()
 
@@ -5136,6 +5242,9 @@ class GPEncoding:
                 else None
             ),
             contract_cut_count=len(contract_cuts or []),
+            **self._reachable_harness_arguments(
+                cur_layer, in_layer, qu_w_int, qu_b_int, frac_bit, all_bit,
+            ),
         )
 
     def generate_esbmc_hidden_block_verification_code(
@@ -5226,6 +5335,10 @@ class GPEncoding:
                 else None
             ),
             contract_cut_count=len(contract_cuts or []),
+            **self._reachable_harness_arguments(
+                cur_layer, in_layer, qu_w_int, qu_b_int, frac_bit, all_bit,
+                start_neuron, end_neuron,
+            ),
         )
 
     @staticmethod
@@ -5426,6 +5539,7 @@ class GPEncoding:
         failed = [record for record in records if not bool(record.get("chaining_ok", False))]
         soundness = self.soundness_label()
         return {
+            "tighten_verified_bounds": bool(self.tighten_verified_bounds),
             "enabled": bool(
                 self.verify_mode == "esbmc" and self.harness_scope == "layer"
             ),

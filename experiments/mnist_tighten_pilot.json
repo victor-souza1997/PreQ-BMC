@@ -1,0 +1,98 @@
+{
+  "metadata": {
+    "description": "MNIST pilot: verified reachable-bound propagation vs the reported baseline",
+    "output_root": "output/mnist_tighten_pilot",
+    "aggregate_output_root": "output/mnist_tighten_results",
+    "notes": [
+      "Identical to the layer-scope MNIST entries of preqbmc_reported_experiments.json except for tighten_verified_bounds.",
+      "Baseline for comparison is output/preqbmc_reported_runs (same names, same formats, same resource limits).",
+      "The network-scope rq4 entries are excluded: tighten_verified_bounds requires layer-scope contracts."
+    ]
+  },
+  "defaults": {
+    "bit_lb": 8,
+    "bit_ub": 8,
+    "preimg_mode": "milp",
+    "verify_mode": "esbmc",
+    "solver": "cbc",
+    "method": "both",
+    "mode": "derived_layer_contract_relational_cegar",
+    "compare_split": "test",
+    "compare_limit": 0,
+    "compile_c_backend": true,
+    "enable_diagnostics": true,
+    "export_paper_tables": true,
+    "error_budget_mode": "derived",
+    "cex_feedback": "filter+jump",
+    "harness_scope": "layer",
+    "e2e_invariants": true,
+    "margin_cuts": "on",
+    "cegar_max_rounds": 3,
+    "e2e_fallback": "off",
+    "vacuity_check": true,
+    "unsound_contract_tolerance": false,
+    "propagate_contract_tolerance": false,
+    "enforce_contract_chaining": true,
+    "quality_refinement": false,
+    "max_quality_refinement_steps": 0,
+    "formal_no_saturation": false,
+    "require_formal_no_saturation": false,
+    "empirical_saturation_check": true,
+    "accuracy_drop_threshold": 0.05,
+    "saturation_threshold": 0.01,
+    "mismatch_threshold": 0.05,
+    "esbmc_profile": "paper-z3",
+    "esbmc_timeout_seconds": 300,
+    "esbmc_memlimit": "20g",
+    "esbmc_jobs": 1,
+    "blockwise_fail_fast": false,
+    "blockwise_run_all_blocks_on_failure": true,
+    "no_saturation_continue_on_unknown": false,
+    "gurobi_threads": 4,
+    "allowed_failure": true,
+    "enabled": true,
+    "tighten_verified_bounds": true
+  },
+  "runs": [
+    {
+      "name": "mnist_1blk10_rq2_rq3_derived_decomposition",
+      "dataset": "mnist",
+      "arch": "1blk_10",
+      "sample_ids": [
+        1607,
+        2228,
+        3,
+        9389,
+        7753
+      ],
+      "eps": 0.25,
+      "esbmc_layer_block_sizes": [
+        0,
+        2
+      ],
+      "experiment_tier": "A",
+      "expected_difficulty": "high",
+      "notes": "Matched repaired derived-contract comparison; sample 3 preserves the previously verified feasibility anchor."
+    },
+    {
+      "name": "mnist_1blk25_rq3_block_size_sweep",
+      "dataset": "mnist",
+      "arch": "1blk_25",
+      "sample_ids": [
+        3,
+        2228,
+        9389
+      ],
+      "eps": 0.25,
+      "esbmc_layer_block_sizes": [
+        0,
+        5,
+        10,
+        20
+      ],
+      "experiment_tier": "A",
+      "expected_difficulty": "frontier",
+      "notes": "Derived-contract block sensitivity study. Blocks remain sequential and all blocks run after a failure to preserve the measured denominator."
+    }
+  ]
+}

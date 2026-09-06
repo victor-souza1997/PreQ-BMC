@@ -176,6 +176,16 @@ int main(void)
 }}
 """
 
+def _reachable_bound_assertion(low: str, high: str) -> str:
+    return f'''__ESBMC_assert(
+            reachable_low[i] <= reachable_high[i] &&
+            {low} <= {high} &&
+            {low} >= (__int128)reachable_low[i] &&
+            {high} <= (__int128)reachable_high[i],
+            "affine output outside proposed reachable bounds"
+        );'''
+
+
 def _render_hidden_affine_with_row_cuts(
     *,
     cur_layer_layer_size: int,
@@ -199,6 +209,7 @@ def _render_hidden_affine_with_row_cuts(
     contract_cut_high_c_int: str,
     contract_cut_output_indices_c_int: str,
     contract_cut_count: int,
+    reachable_declaration: str = "",
 ) -> str:
     """Render endpoint propagation tightened by bounds on selected affine rows.
 
@@ -208,6 +219,17 @@ def _render_hidden_affine_with_row_cuts(
     hidden vectors.
     """
 
+    cut_update = (
+        "if (lower_acc < contract_cut_low[cut]) lower_acc = contract_cut_low[cut];\n"
+        "                if (upper_acc > contract_cut_high[cut]) upper_acc = contract_cut_high[cut];"
+        if reachable_declaration
+        else "lower_acc = (__int128)contract_cut_low[cut];\n"
+        "                upper_acc = (__int128)contract_cut_high[cut];"
+    )
+    reachable_assertion = (
+        _reachable_bound_assertion("value_low", "value_high")
+        if reachable_declaration else ""
+    )
     return f"""\
 #include <stdint.h>
 #include <limits.h>
@@ -219,6 +241,7 @@ def _render_hidden_affine_with_row_cuts(
 #define TOTAL_BITS {total_bits}
 #define ACTIVATION_KIND {activation_id}
 #define CONTRACT_CUT_COUNT {contract_cut_count}
+{reachable_declaration}
 
 void __ESBMC_assert(_Bool, const char *);
 
@@ -285,8 +308,7 @@ int main(void)
         {{
             if (contract_cut_output_indices[cut] == i)
             {{
-                lower_acc = (__int128)contract_cut_low[cut];
-                upper_acc = (__int128)contract_cut_high[cut];
+                {cut_update}
             }}
         }}
 
@@ -320,6 +342,7 @@ int main(void)
             value_low >= accepted_low && value_high <= accepted_high,
             "affine output outside tolerated preimage under sound relational cuts"
         );
+        {reachable_assertion}
     }}
     return 0;
 }}
@@ -346,7 +369,20 @@ def innerlayer_fixed_int_bounds_only(
     contract_cut_high_c_int: str | None = None,
     contract_cut_output_indices_c_int: str | None = None,
     contract_cut_count: int = 0,
+    reachable_low_c_int: str | None = None,
+    reachable_high_c_int: str | None = None,
 ) -> str:
+    if (reachable_low_c_int is None) != (reachable_high_c_int is None):
+        raise ValueError("Reachable bounds require both lower and upper endpoints.")
+    reachable_declaration = (
+        f"long long reachable_low[LAYER_SIZE] = {reachable_low_c_int};\n"
+        f"long long reachable_high[LAYER_SIZE] = {reachable_high_c_int};"
+        if reachable_low_c_int is not None else ""
+    )
+    reachable_assertion = (
+        _reachable_bound_assertion("out_lb", "out_ub")
+        if reachable_declaration else ""
+    )
     if activation not in {"none", "relu", "relu6"}:
         raise ValueError(
             "activation must be one of: 'none', 'relu', 'relu6'"
@@ -405,6 +441,7 @@ def innerlayer_fixed_int_bounds_only(
             contract_cut_high_c_int=contract_cut_high_c_int,
             contract_cut_output_indices_c_int=contract_cut_output_indices_c_int,
             contract_cut_count=int(contract_cut_count),
+            reachable_declaration=reachable_declaration,
         )
 
     return f"""\
@@ -417,6 +454,7 @@ def innerlayer_fixed_int_bounds_only(
 #define INPUT_SCALE_FACTOR {input_scale}LL
 #define TOTAL_BITS {total_bits}
 #define ACTIVATION_KIND {activation_id}
+{reachable_declaration}
 
 /*
  * ACTIVATION_KIND:
@@ -633,6 +671,7 @@ static void check_affine_bounds_fixed_bounds_only(void)
             out_lb >= accepted_low && out_ub <= accepted_high,
             "affine bounds not within tolerated preimage"
         );
+        {reachable_assertion}
     }}
 }}
 
@@ -664,6 +703,8 @@ def innerlayer_fixed_int(
     contract_cut_high_c_int: str | None = None,
     contract_cut_output_indices_c_int: str | None = None,
     contract_cut_count: int = 0,
+    reachable_low_c_int: str | None = None,
+    reachable_high_c_int: str | None = None,
 ) -> str:
     return innerlayer_fixed_int_bounds_only(
         cur_layer_layer_size=cur_layer_layer_size,
@@ -685,6 +726,8 @@ def innerlayer_fixed_int(
         contract_cut_high_c_int=contract_cut_high_c_int,
         contract_cut_output_indices_c_int=contract_cut_output_indices_c_int,
         contract_cut_count=contract_cut_count,
+        reachable_low_c_int=reachable_low_c_int,
+        reachable_high_c_int=reachable_high_c_int,
     )
 
 
@@ -1009,6 +1052,8 @@ def render_hidden_affine_bounds_program(
     contract_cut_high_c_int: str | None = None,
     contract_cut_output_indices_c_int: str | None = None,
     contract_cut_count: int = 0,
+    reachable_low_c_int: str | None = None,
+    reachable_high_c_int: str | None = None,
 ) -> str:
     return innerlayer_fixed_int_bounds_only(
         cur_layer_layer_size=output_size,
@@ -1030,6 +1075,8 @@ def render_hidden_affine_bounds_program(
         contract_cut_high_c_int=contract_cut_high_c_int,
         contract_cut_output_indices_c_int=contract_cut_output_indices_c_int,
         contract_cut_count=contract_cut_count,
+        reachable_low_c_int=reachable_low_c_int,
+        reachable_high_c_int=reachable_high_c_int,
     )
 
 
@@ -1053,6 +1100,8 @@ def render_hidden_affine_bounds_block_program(
     contract_cut_high_c_int: str | None = None,
     contract_cut_output_indices_c_int: str | None = None,
     contract_cut_count: int = 0,
+    reachable_low_c_int: str | None = None,
+    reachable_high_c_int: str | None = None,
 ) -> str:
     """Render a hidden affine contract harness for a contiguous output-neuron block."""
 
@@ -1076,6 +1125,8 @@ def render_hidden_affine_bounds_block_program(
         contract_cut_high_c_int=contract_cut_high_c_int,
         contract_cut_output_indices_c_int=contract_cut_output_indices_c_int,
         contract_cut_count=contract_cut_count,
+        reachable_low_c_int=reachable_low_c_int,
+        reachable_high_c_int=reachable_high_c_int,
     )
 
 

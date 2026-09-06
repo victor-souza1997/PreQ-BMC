@@ -52,6 +52,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override the hidden-contract error budget mode for all selected runs.",
     )
+    parser.add_argument(
+        "--tighten-verified-bounds", action=argparse.BooleanOptionalAction, default=None,
+        help="Override verified reachable-bound propagation for the selected runs.",
+    )
     vacuity_group = parser.add_mutually_exclusive_group()
     vacuity_group.add_argument(
         "--vacuity-check",
@@ -351,6 +355,8 @@ def _expand_runs(config: dict[str, Any], args: argparse.Namespace) -> list[dict[
             base["enforce_contract_chaining"] = bool(args.enforce_contract_chaining)
         if getattr(args, "error_budget_mode", None) is not None:
             base["error_budget_mode"] = str(args.error_budget_mode)
+        if getattr(args, "tighten_verified_bounds", None) is not None:
+            base["tighten_verified_bounds"] = bool(args.tighten_verified_bounds)
         if getattr(args, "vacuity_check", None) is not None:
             base["vacuity_check"] = bool(args.vacuity_check)
         if getattr(args, "cex_feedback", None) is not None:
@@ -480,6 +486,7 @@ def _runtime_metadata(args: argparse.Namespace, run: dict[str, Any], command: li
         "e2e_fallback": str(run.get("e2e_fallback", "on" if str(run.get("error_budget_mode", "heuristic")) == "derived" else "off")),
         "cegar_max_rounds": int(run.get("cegar_max_rounds", 3)),
         "enforce_contract_chaining": bool(run.get("enforce_contract_chaining", True)),
+        "tighten_verified_bounds": bool(run.get("tighten_verified_bounds", False)),
         "dataset": run.get("dataset"),
         "architecture": run.get("arch"),
         "sample_id": run.get("sample_id"),
@@ -655,6 +662,8 @@ def _build_pipeline_command(
         _add_flag(command, supported_flags, "--unsound-contract-tolerance")
     if bool(run.get("propagate_contract_tolerance", False)):
         _add_flag(command, supported_flags, "--propagate-contract-tolerance")
+    if bool(run.get("tighten_verified_bounds", False)):
+        _add_flag(command, supported_flags, "--tighten-verified-bounds")
     if not bool(run.get("enforce_contract_chaining", True)):
         _add_flag(command, supported_flags, "--no-enforce-contract-chaining")
     _add_flag(

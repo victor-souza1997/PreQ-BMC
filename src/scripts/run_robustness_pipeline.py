@@ -193,6 +193,12 @@ def build_parser() -> argparse.ArgumentParser:
             "zero forces strict zero slack."
         ),
     )
+    parser.add_argument(
+        "--tighten-verified-bounds",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Prove tighter reachable bounds alongside derived preimage contracts and propagate their intersection.",
+    )
     vacuity_group = parser.add_mutually_exclusive_group()
     vacuity_group.add_argument(
         "--vacuity-check",
@@ -433,6 +439,7 @@ def main(argv: list[str] | None = None) -> None:
         unsound_contract_tolerance=bool(args.unsound_contract_tolerance),
         propagate_contract_tolerance=bool(args.propagate_contract_tolerance),
         enforce_contract_chaining=bool(args.enforce_contract_chaining),
+        tighten_verified_bounds=bool(args.tighten_verified_bounds),
         error_budget_mode=error_budget_mode,
         vacuity_check=args.vacuity_check,
         cex_feedback=str(args.cex_feedback),

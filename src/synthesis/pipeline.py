@@ -94,6 +94,7 @@ class RobustnessPipelineConfig:
     unsound_contract_tolerance: bool = False
     propagate_contract_tolerance: bool = False
     enforce_contract_chaining: bool = True
+    tighten_verified_bounds: bool = False
     error_budget_mode: str = "heuristic"
     vacuity_check: bool | None = None
     cex_feedback: str = "off"
@@ -238,6 +239,7 @@ def _quality_thresholds_payload(config: RobustnessPipelineConfig) -> dict[str, A
         "solver": str(config.solver),
         "gurobi_threads": int(config.gurobi_threads),
         "error_budget_mode": str(config.error_budget_mode),
+        "tighten_verified_bounds": bool(config.tighten_verified_bounds),
         "vacuity_check": config.vacuity_check,
         "cex_feedback": str(config.cex_feedback),
         "harness_scope": str(config.harness_scope),
@@ -379,6 +381,7 @@ def _refresh_article_metrics(
         "require_formal_no_saturation": bool(config.require_formal_no_saturation),
         "no_saturation_continue_on_unknown": bool(config.no_saturation_continue_on_unknown),
         "error_budget_mode": str(config.error_budget_mode),
+        "tighten_verified_bounds": bool(config.tighten_verified_bounds),
         "vacuity_check": config.vacuity_check,
         "cegar_max_rounds": int(config.cegar_max_rounds),
     }
@@ -1164,6 +1167,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         unsound_contract_tolerance=bool(config.unsound_contract_tolerance),
         propagate_contract_tolerance=bool(config.propagate_contract_tolerance),
         enforce_contract_chaining=bool(config.enforce_contract_chaining),
+        tighten_verified_bounds=bool(config.tighten_verified_bounds),
         error_budget_mode=str(config.error_budget_mode),
         vacuity_check=config.vacuity_check,
         cex_feedback=str(config.cex_feedback),
