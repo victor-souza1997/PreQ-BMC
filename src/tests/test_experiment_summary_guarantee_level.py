@@ -127,6 +127,42 @@ def _summary(
 
 
 class ExperimentSummaryGuaranteeLevelTest(unittest.TestCase):
+    def test_enabled_tightening_requires_complete_safe_proof(self) -> None:
+        complete = _summary(layers=[_layer()])
+        complete["verified_bound_tightening"] = {
+            "enabled": True,
+            "status": "VERIFIED",
+            "arithmetic_safety_status": "VERIFIED",
+            "shared_layer_qif": True,
+        }
+        incomplete = _summary(layers=[_layer()])
+        incomplete["verified_bound_tightening"] = {
+            "enabled": True,
+            "status": "NOT_VERIFIED",
+            "arithmetic_safety_status": "UNSAFE_OR_MISSING",
+            "shared_layer_qif": True,
+        }
+
+        from reports.experiment_summary import derive_guarantee_level
+
+        status = {
+            "contract_status": "VERIFIED",
+            "contract_verified": True,
+            "no_saturation_status": "SKIPPED",
+            "no_saturation_verified": False,
+            "deployment_quality_accepted": True,
+            "final_status": "VERIFIED",
+        }
+        self.assertEqual(
+            derive_guarantee_level(complete, status)["guarantee_level"],
+            "deployed-transfer",
+        )
+        result = derive_guarantee_level(incomplete, status)
+        self.assertEqual(result["guarantee_level"], "harness-verified")
+        self.assertFalse(
+            result["transfer_preconditions"]["verified_bound_tightening_ok"]
+        )
+
     def test_copies_esbmc_memory_metrics(self) -> None:
         summary = _summary(layers=[_layer()])
 

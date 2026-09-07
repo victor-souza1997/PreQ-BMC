@@ -1,0 +1,96 @@
+{
+  "metadata": {
+    "description": "Matched Iris and Seeds pilot for formally verified affine-box tightening",
+    "reproduce_command": "preqbmc reproduce --config experiments/iris_seeds_verified_bounds_pilot.json --aggregate",
+    "output_root": "output/iris_seeds_verified_bounds_runs",
+    "input_root": "output/iris_seeds_verified_bounds_runs",
+    "aggregate_output_root": "output/iris_seeds_verified_bounds_results",
+    "notes": [
+      "Each control/treatment pair uses the same sample, epsilon, fixed F=8 format search, neuron decomposition, and resource limits.",
+      "The treatment retains the MILP preimage contract and asks the same ESBMC harness to prove an additional affine-box bound before that bound is propagated.",
+      "One shared Q/I/F is retained per layer; verified bounds do not introduce block-specific or neuron-specific formats.",
+      "No end-to-end fallback, heuristic contract tolerance, or formal no-saturation requirement is enabled.",
+      "Only final_status=VERIFIED with guarantee_level=deployed-transfer is a certificate."
+    ]
+  },
+  "defaults": {
+    "bit_lb": 8,
+    "bit_ub": 8,
+    "preimg_mode": "milp",
+    "verify_mode": "esbmc",
+    "solver": "cbc",
+    "method": "both",
+    "compare_split": "test",
+    "compare_limit": 0,
+    "compile_c_backend": true,
+    "enable_diagnostics": true,
+    "export_paper_tables": true,
+    "error_budget_mode": "derived",
+    "cex_feedback": "filter+jump",
+    "harness_scope": "layer",
+    "margin_cuts": "on",
+    "cegar_max_rounds": 3,
+    "e2e_fallback": "off",
+    "vacuity_check": true,
+    "unsound_contract_tolerance": false,
+    "propagate_contract_tolerance": false,
+    "enforce_contract_chaining": true,
+    "quality_refinement": false,
+    "max_quality_refinement_steps": 0,
+    "formal_no_saturation": false,
+    "require_formal_no_saturation": false,
+    "empirical_saturation_check": true,
+    "esbmc_profile": "paper-z3",
+    "esbmc_timeout_seconds": 300,
+    "esbmc_memlimit": "6g",
+    "esbmc_jobs": 1,
+    "blockwise_fail_fast": true,
+    "blockwise_run_all_blocks_on_failure": false,
+    "no_saturation_continue_on_unknown": false,
+    "gurobi_threads": 4,
+    "allowed_failure": true,
+    "enabled": true
+  },
+  "runs": [
+    {
+      "name": "iris_verified_bounds_control",
+      "dataset": "iris",
+      "arch": "2blk_10_10",
+      "sample_id": 1,
+      "eps_sweep": [0.001, 0.005, 0.01],
+      "esbmc_layer_block_size": 5,
+      "mode": "derived_layer_contract_control",
+      "tighten_verified_bounds": false
+    },
+    {
+      "name": "iris_verified_bounds_treatment",
+      "dataset": "iris",
+      "arch": "2blk_10_10",
+      "sample_id": 1,
+      "eps_sweep": [0.001, 0.005, 0.01],
+      "esbmc_layer_block_size": 5,
+      "mode": "derived_layer_contract_verified_bounds",
+      "tighten_verified_bounds": true
+    },
+    {
+      "name": "seeds_verified_bounds_control",
+      "dataset": "seeds",
+      "arch": "1blk_10",
+      "sample_id": 13,
+      "eps_sweep": [0.001, 0.005, 0.01],
+      "esbmc_layer_block_size": 5,
+      "mode": "derived_layer_contract_control",
+      "tighten_verified_bounds": false
+    },
+    {
+      "name": "seeds_verified_bounds_treatment",
+      "dataset": "seeds",
+      "arch": "1blk_10",
+      "sample_id": 13,
+      "eps_sweep": [0.001, 0.005, 0.01],
+      "esbmc_layer_block_size": 5,
+      "mode": "derived_layer_contract_verified_bounds",
+      "tighten_verified_bounds": true
+    }
+  ]
+}

@@ -302,6 +302,62 @@ def _method_row(
     esbmc_memory = pipeline.get("esbmc_memory_metrics", {})
     esbmc_cpu = pipeline.get("esbmc_cpu_metrics", {})
     blockwise = pipeline.get("blockwise_verification", {})
+    tightening = _coalesce(
+        section.get("verified_bound_tightening"),
+        experiment.get("verified_bound_tightening"),
+        pipeline.get("verified_bound_tightening"),
+        default={},
+    )
+    if not isinstance(tightening, dict):
+        tightening = {}
+    if not tightening and bool(
+        run_config.get(
+            "tighten_verified_bounds",
+            _get(pipeline, "resource_controls", "tighten_verified_bounds", default=False),
+        )
+    ):
+        legacy_layers: list[dict[str, Any]] = []
+        for chaining_layer in _get(pipeline, "chaining_ok", "layers", default=[]):
+            if not isinstance(chaining_layer, dict):
+                continue
+            proof = chaining_layer.get("verified_bound_tightening")
+            if isinstance(proof, dict):
+                legacy_layers.append(
+                    {
+                        "layer_index": chaining_layer.get("layer_index"),
+                        "Q": chaining_layer.get("Q"),
+                        "I": chaining_layer.get("I"),
+                        "F": chaining_layer.get("F"),
+                        **dict(proof),
+                    }
+                )
+        contract_width = sum(
+            int(layer.get("contract_total_width_int", 0))
+            for layer in legacy_layers
+        )
+        propagated_width = sum(
+            int(layer.get("propagated_total_width_int", 0))
+            for layer in legacy_layers
+        )
+        tightening = {
+            "enabled": True,
+            "status": (
+                "VERIFIED"
+                if legacy_layers
+                and all(layer.get("status") == "VERIFIED" for layer in legacy_layers)
+                else "NOT_VERIFIED"
+            ),
+            "arithmetic_safety_status": "NOT_RECORDED",
+            "contract_total_width_int": contract_width,
+            "propagated_total_width_int": propagated_width,
+            "width_reduction_int": contract_width - propagated_width,
+            "width_reduction_fraction": (
+                float(contract_width - propagated_width) / float(contract_width)
+                if contract_width > 0
+                else 0.0
+            ),
+            "layers": legacy_layers,
+        }
     resource = section.get("resource_metrics", {})
     source_region = _coalesce(
         section.get("source_region"),
@@ -569,6 +625,32 @@ def _method_row(
         "memout_blocks": blockwise.get("memout_blocks"),
         "unknown_blocks": blockwise.get("unknown_blocks"),
         "skipped_blocks_due_to_fail_fast": blockwise.get("skipped_blocks_due_to_fail_fast"),
+        "tighten_verified_bounds": bool(
+            tightening.get(
+                "enabled",
+                run_config.get(
+                    "tighten_verified_bounds",
+                    _get(pipeline, "resource_controls", "tighten_verified_bounds", default=False),
+                ),
+            )
+        ),
+        "verified_bound_tightening_status": tightening.get("status", "SKIPPED"),
+        "verified_bound_arithmetic_safety_status": tightening.get(
+            "arithmetic_safety_status", "SKIPPED"
+        ),
+        "verified_bound_contract_width_int": tightening.get(
+            "contract_total_width_int"
+        ),
+        "verified_bound_propagated_width_int": tightening.get(
+            "propagated_total_width_int"
+        ),
+        "verified_bound_width_reduction_int": tightening.get(
+            "width_reduction_int"
+        ),
+        "verified_bound_width_reduction_fraction": tightening.get(
+            "width_reduction_fraction"
+        ),
+        "verified_bound_tightening_layers": tightening.get("layers", []),
         "largest_neurons_per_query": query_extent("largest_neurons_per_query", "neurons_per_query"),
         "largest_input_dim_per_query": query_extent("largest_input_dim_per_query", "input_dim"),
         "largest_estimated_macs_per_query": query_extent("largest_estimated_macs_per_query", "estimated_macs"),
@@ -614,6 +696,10 @@ ALL_FIELDS = [
     "max_query_cpu_utilization_percent",
     "block_size", "total_blocks", "verified_blocks", "failed_blocks", "timeout_blocks",
     "memout_blocks", "unknown_blocks", "skipped_blocks_due_to_fail_fast", "largest_neurons_per_query",
+    "tighten_verified_bounds", "verified_bound_tightening_status",
+    "verified_bound_arithmetic_safety_status", "verified_bound_contract_width_int",
+    "verified_bound_propagated_width_int", "verified_bound_width_reduction_int",
+    "verified_bound_width_reduction_fraction", "verified_bound_tightening_layers",
     "largest_input_dim_per_query", "largest_estimated_macs_per_query", "output_dir",
     "deployment_quality_accepted", "guarantee_level", "sample_label", "predicted_label", "clean_margin",
     "sample_selection", "sample_selection_stratum", "sample_selection_rank", "sample_selection_quantile",
@@ -655,6 +741,73 @@ def _bitwidth_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "total_bits": q,
                     "integer_bits": i,
                     "fractional_bits": f,
+                }
+            )
+    return output
+
+
+def _verified_bound_tightening_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        layers = row.get("verified_bound_tightening_layers", [])
+        if not isinstance(layers, list):
+            continue
+        for layer in layers:
+            if not isinstance(layer, dict):
+                continue
+            arithmetic = layer.get("arithmetic_safety", {})
+            if not isinstance(arithmetic, dict):
+                arithmetic = {}
+            contract_width = _num(layer.get("contract_total_width_int"))
+            propagated_width = _num(layer.get("propagated_total_width_int"))
+            reduction = (
+                contract_width - propagated_width
+                if contract_width is not None and propagated_width is not None
+                else None
+            )
+            output.append(
+                {
+                    "run_name": row.get("run_name"),
+                    "dataset": row.get("dataset"),
+                    "arch": row.get("arch"),
+                    "sample_id": row.get("sample_id"),
+                    "input_epsilon": row.get("input_epsilon"),
+                    "method": row.get("method"),
+                    "mode": row.get("mode"),
+                    "composition_path": row.get("composition_path"),
+                    "layer_index": layer.get("layer_index"),
+                    "Q": layer.get("Q"),
+                    "I": layer.get("I"),
+                    "F": layer.get("F"),
+                    "status": layer.get("status"),
+                    "arithmetic_safety_status": arithmetic.get("status"),
+                    "contract_total_width_int": contract_width,
+                    "propagated_total_width_int": propagated_width,
+                    "width_reduction_int": reduction,
+                    "width_reduction_fraction": (
+                        reduction / contract_width
+                        if reduction is not None and contract_width
+                        else 0.0
+                    ),
+                    "contract_low_int": layer.get("contract_low_int"),
+                    "contract_high_int": layer.get("contract_high_int"),
+                    "reachable_affine_low_int": layer.get(
+                        "reachable_affine_low_int"
+                    ),
+                    "reachable_affine_high_int": layer.get(
+                        "reachable_affine_high_int"
+                    ),
+                    "propagated_low_int": layer.get("propagated_low_int"),
+                    "propagated_high_int": layer.get("propagated_high_int"),
+                    "max_abs_mac_product": arithmetic.get(
+                        "max_abs_mac_product"
+                    ),
+                    "max_abs_accumulator": arithmetic.get(
+                        "max_abs_accumulator"
+                    ),
+                    "max_abs_preclamp": arithmetic.get("max_abs_preclamp"),
                 }
             )
     return output
@@ -1647,6 +1800,7 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
     runtime_summary_rows = _runtime_summary_rows(rows)
     delta_star_summary_rows = _delta_star_summary_rows(mrr_rows)
     harness_performance_summary_rows = _harness_performance_summary_rows(rows)
+    verified_bound_tightening_rows = _verified_bound_tightening_rows(rows)
 
     smt_path = output_root / "smt_complexity.csv"
     smt_rows = _read_csv(smt_path)
@@ -1675,6 +1829,7 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
                 "runtime": runtime_summary_rows,
                 "delta_star": delta_star_summary_rows,
                 "harness_performance": harness_performance_summary_rows,
+                "verified_bound_tightening": verified_bound_tightening_rows,
             },
         },
     )
@@ -1696,6 +1851,11 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
         output_root / "table_harness_performance_summary.csv",
         harness_performance_summary_rows,
         HARNESS_PERFORMANCE_SUMMARY_FIELDS,
+    )
+    _write_csv(
+        output_root / "table_verified_bound_tightening.csv",
+        verified_bound_tightening_rows,
+        VERIFIED_BOUND_TIGHTENING_FIELDS,
     )
     _write_csv(
         output_root / "table_region_certification_summary.csv",
@@ -1750,6 +1910,9 @@ def aggregate(input_root: Path, output_root: Path) -> dict[str, Any]:
         "table_harness_performance_csv": str(output_root / "table_harness_performance.csv"),
         "table_harness_performance_summary_csv": str(
             output_root / "table_harness_performance_summary.csv"
+        ),
+        "table_verified_bound_tightening_csv": str(
+            output_root / "table_verified_bound_tightening.csv"
         ),
         **(
             {"table_delta_star_summary_csv": str(output_root / "table_delta_star_summary.csv")}
@@ -1824,6 +1987,16 @@ HARNESS_PERFORMANCE_SUMMARY_FIELDS = [
     "peak_memory_usage_mb_median", "cpu_utilization_percent_mean",
     "cpu_utilization_percent_std", "accuracy_percent_mean", "accuracy_percent_std",
     "cpu_utilization_definition",
+]
+VERIFIED_BOUND_TIGHTENING_FIELDS = [
+    "run_name", "dataset", "arch", "sample_id", "input_epsilon", "method",
+    "mode", "composition_path", "layer_index", "Q", "I", "F", "status",
+    "arithmetic_safety_status", "contract_total_width_int",
+    "propagated_total_width_int", "width_reduction_int",
+    "width_reduction_fraction", "contract_low_int", "contract_high_int",
+    "reachable_affine_low_int", "reachable_affine_high_int",
+    "propagated_low_int", "propagated_high_int", "max_abs_mac_product",
+    "max_abs_accumulator", "max_abs_preclamp",
 ]
 FAILED_RUN_FIELDS = [
     "name", "dataset", "arch", "sample_id", "eps", "input_epsilon", "status", "return_code",

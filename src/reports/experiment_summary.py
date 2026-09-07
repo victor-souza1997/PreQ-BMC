@@ -272,6 +272,18 @@ def _fidelity_by_construction(pipeline_summary: dict[str, Any]) -> bool:
     return False
 
 
+def _verified_bound_tightening_ok(pipeline_summary: dict[str, Any]) -> bool:
+    tightening = pipeline_summary.get("verified_bound_tightening", {})
+    if not isinstance(tightening, dict) or not bool(tightening.get("enabled", False)):
+        return True
+    return (
+        str(tightening.get("status", "")).upper() == "VERIFIED"
+        and str(tightening.get("arithmetic_safety_status", "")).upper()
+        == "VERIFIED"
+        and bool(tightening.get("shared_layer_qif", False))
+    )
+
+
 def _derived_margin_verified(pipeline_summary: dict[str, Any]) -> bool:
     tolerance = pipeline_summary.get("contract_tolerance", {})
     mode = str(tolerance.get("error_budget_mode", "")).lower()
@@ -447,6 +459,9 @@ def _guarantee_level(
         "no_saturation_continue_on_unknown": _no_saturation_continue_on_unknown(pipeline_summary),
         "derived_margin_ok": _derived_margin_verified(pipeline_summary),
         "vacuity_guard_passed": _vacuity_guard_passed(pipeline_summary),
+        "verified_bound_tightening_ok": _verified_bound_tightening_ok(
+            pipeline_summary
+        ),
     }
     deployed_transfer = (
         all(
@@ -459,6 +474,7 @@ def _guarantee_level(
                 "no_saturation_verified_if_required",
                 "derived_margin_ok",
                 "vacuity_guard_passed",
+                "verified_bound_tightening_ok",
             )
         )
         and not preconditions["no_saturation_continue_on_unknown"]
@@ -744,6 +760,9 @@ def build_experiment_summary(
         **blockwise_controls,
         "composition_path": pipeline_summary.get("composition_path", "layer_contracts"),
         "source_region": pipeline_summary.get("source_region", {}),
+        "verified_bound_tightening": pipeline_summary.get(
+            "verified_bound_tightening", {}
+        ),
     }
 
     refined_section = {
@@ -769,6 +788,9 @@ def build_experiment_summary(
         **blockwise_controls,
         "composition_path": pipeline_summary.get("composition_path", "layer_contracts"),
         "source_region": pipeline_summary.get("source_region", {}),
+        "verified_bound_tightening": pipeline_summary.get(
+            "verified_bound_tightening", {}
+        ),
     }
 
     return {
@@ -806,6 +828,9 @@ def build_experiment_summary(
         "contract_harness_semantics": pipeline_summary.get("contract_harness_semantics", {}),
         "contract_tolerance": pipeline_summary.get("contract_tolerance", {}),
         "chaining_ok": pipeline_summary.get("chaining_ok", {}),
+        "verified_bound_tightening": pipeline_summary.get(
+            "verified_bound_tightening", {}
+        ),
         "source_region": pipeline_summary.get("source_region", {}),
         "output_margin_check": pipeline_summary.get("output_margin_check", {}),
         "margin_cuts": pipeline_summary.get("margin_cuts", {}),

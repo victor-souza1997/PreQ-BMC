@@ -47,7 +47,11 @@ from verification.c_templates import (
     render_prefix_direction_cut_validation_program,
 )
 from verification.esbmc import ESBMCConfig, ESBMCRunner, ESBMCResult
-from verification.invariants import exact_layer_interval, propagate_exact_interval_details
+from verification.invariants import (
+    FixedPointArithmeticRangeError,
+    exact_layer_interval,
+    propagate_exact_interval_details,
+)
 from verification.properties import ClassificationProperty
 from verification.replay import LayerReplayFormat, replay_on_python, replay_on_so
 
@@ -386,6 +390,7 @@ class GPEncoding:
         self.esbmc_block_records: list[dict[str, Any]] = []
         self.esbmc_no_saturation_block_records: list[dict[str, Any]] = []
         self.chaining_records: list[dict[str, Any]] = []
+        self.arithmetic_safety_records: list[dict[str, Any]] = []
         self.output_margin_records: list[dict[str, Any]] = []
         self.vacuity_records: list[dict[str, Any]] = []
         self.source_region_record: dict[str, Any] = {
@@ -2735,6 +2740,26 @@ class GPEncoding:
         violation_indices = np.flatnonzero(~(lower_ok & upper_ok))
         return lower_margin, upper_margin, ok, violation_indices
 
+    def _candidate_reachable_interval(
+        self,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        weights_int: np.ndarray,
+        biases_int: np.ndarray,
+        frac_bit: int,
+        all_bit: int,
+    ) -> Any:
+        """Compute affine-box bounds under the deployed integer arithmetic."""
+        low, high, frac_in = self._assumption_box_int(cur_layer, in_layer, frac_bit)
+        return exact_layer_interval(
+            SimpleNamespace(weights_int=weights_int, biases_int=biases_int),
+            input_low=low,
+            input_high=high,
+            input_fractional_bits=frac_in,
+            total_bits=all_bit,
+            apply_relu=False,
+        )
+
     def _candidate_reachable_bounds(
         self,
         cur_layer: LayerEncoding,
@@ -2744,17 +2769,48 @@ class GPEncoding:
         frac_bit: int,
         all_bit: int,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Propose clamped affine bounds; the hidden harness must prove them."""
-        low, high, frac_in = self._assumption_box_int(cur_layer, in_layer, frac_bit)
-        bounds = exact_layer_interval(
-            SimpleNamespace(weights_int=weights_int, biases_int=biases_int),
-            input_low=low,
-            input_high=high,
-            input_fractional_bits=frac_in,
-            total_bits=all_bit,
-            apply_relu=False,
+        """Propose clamped affine bounds; the harness must prove them."""
+        bounds = self._candidate_reachable_interval(
+            cur_layer, in_layer, weights_int, biases_int, frac_bit, all_bit,
         )
         return bounds.output_low, bounds.output_high
+
+    def _validate_candidate_arithmetic_safety(
+        self,
+        cur_layer: LayerEncoding,
+        in_layer: LayerEncoding,
+        weights_int: np.ndarray,
+        biases_int: np.ndarray,
+        frac_bit: int,
+        all_bit: int,
+        layer_index: int,
+    ) -> dict[str, Any]:
+        try:
+            interval = self._candidate_reachable_interval(
+                cur_layer,
+                in_layer,
+                weights_int,
+                biases_int,
+                frac_bit,
+                all_bit,
+            )
+            record = {
+                "layer_index": int(layer_index),
+                "Q": int(all_bit),
+                "I": int(max(all_bit - frac_bit - 1, 0)),
+                "F": int(frac_bit),
+                **dict(interval.arithmetic_safety),
+            }
+        except FixedPointArithmeticRangeError as exc:
+            record = {
+                "layer_index": int(layer_index),
+                "Q": int(all_bit),
+                "I": int(max(all_bit - frac_bit - 1, 0)),
+                "F": int(frac_bit),
+                **dict(exc.details),
+            }
+        self.arithmetic_safety_records.append(record)
+        return record
 
     def _reachable_harness_arguments(
         self,
@@ -2842,9 +2898,11 @@ class GPEncoding:
         if self.tighten_verified_bounds:
             if in_layer is None or weights_int is None or biases_int is None:
                 raise ValueError("Verified bound tightening requires the verified layer parameters.")
-            reachable_low, reachable_high = self._candidate_reachable_bounds(
+            reachable_interval = self._candidate_reachable_interval(
                 cur_layer, in_layer, weights_int, biases_int, frac_bit, all_bit,
             )
+            reachable_low = reachable_interval.output_low
+            reachable_high = reachable_interval.output_high
             contract_low, contract_high = guaranteed_low.copy(), guaranteed_high.copy()
             guaranteed_low = np.maximum(guaranteed_low, np.maximum(reachable_low, 0))
             guaranteed_high = np.minimum(guaranteed_high, np.maximum(reachable_high, 0))
@@ -2860,6 +2918,7 @@ class GPEncoding:
                 "propagated_high_int": guaranteed_high.tolist(),
                 "contract_total_width_int": sum(int(h) - int(l) for l, h in zip(contract_low, contract_high)),
                 "propagated_total_width_int": sum(int(h) - int(l) for l, h in zip(guaranteed_low, guaranteed_high)),
+                "arithmetic_safety": dict(reachable_interval.arithmetic_safety),
             }
 
         legacy_assumed_low = np.floor(np.asarray(cur_layer.clipped_lb, dtype=np.float64) * scale).astype(np.int64)
@@ -4226,6 +4285,35 @@ class GPEncoding:
                 cardinality=cardinality,
             )
 
+        arithmetic_safety: dict[str, Any] | None = None
+        if self.tighten_verified_bounds:
+            arithmetic_safety = self._validate_candidate_arithmetic_safety(
+                cur_layer,
+                in_layer,
+                qu_w_int,
+                qu_b_int,
+                frac_bit,
+                all_bit,
+                layer_index,
+            )
+            if arithmetic_safety.get("status") != "VERIFIED":
+                return ESBMCResult(
+                    status="UNKNOWN",
+                    command=(),
+                    stdout="",
+                    stderr=str(arithmetic_safety.get("reason", "unsafe fixed-point arithmetic")),
+                    return_code=1,
+                    elapsed_seconds=0.0,
+                    timeout_seconds=int(self.config.esbmc.timeout_seconds),
+                    memlimit=str(self.config.esbmc.memlimit),
+                    resource_control={
+                        "status": "UNKNOWN",
+                        "mode": "pre_esbmc_arithmetic_safety_gate",
+                        "reason": "generated_kernel_arithmetic_range_unproved",
+                        "arithmetic_safety": dict(arithmetic_safety),
+                    },
+                )
+
         is_last_hidden = (
             cur_layer.layer_index == len(self.dense_layers)
             and cur_layer.layer_index < len(self.dense_layers) + 1
@@ -4292,6 +4380,10 @@ class GPEncoding:
             self.output_margin_records[-1]["margin_cuts"] = [
                 dict(cut) for cut in margin_cuts
             ]
+            if arithmetic_safety is not None:
+                self.output_margin_records[-1]["arithmetic_safety"] = dict(
+                    arithmetic_safety
+                )
             return self._verify_output_margin_competitors_with_esbmc(
                 cur_layer=cur_layer,
                 in_layer=in_layer,
@@ -5555,6 +5647,85 @@ class GPEncoding:
             "all_ok": len(failed) == 0,
             "failed_count": int(len(failed)),
             "layers": records,
+        }
+
+    def verified_bound_tightening_summary(self) -> dict[str, Any]:
+        """Summarize the additional bound proofs selected by the final layer path."""
+        if not self.tighten_verified_bounds:
+            return {
+                "enabled": False,
+                "status": "SKIPPED",
+                "policy": "verified_affine_box_intersection_shared_layer_qif",
+                "arithmetic_safety_status": "SKIPPED",
+                "layers": [],
+            }
+
+        latest_by_layer: dict[int, dict[str, Any]] = {}
+        for chaining in self.chaining_records:
+            tightening = chaining.get("verified_bound_tightening")
+            if isinstance(tightening, dict):
+                latest_by_layer[int(chaining.get("layer_index", -1))] = {
+                    "layer_index": int(chaining.get("layer_index", -1)),
+                    "Q": chaining.get("Q"),
+                    "I": chaining.get("I"),
+                    "F": chaining.get("F"),
+                    **dict(tightening),
+                }
+        layers = [latest_by_layer[index] for index in sorted(latest_by_layer)]
+        output_record = self.output_margin_records[-1] if self.output_margin_records else {}
+        output_safety = output_record.get("arithmetic_safety", {})
+        hidden_complete = len(layers) == len(self.dense_layers)
+        hidden_safe = all(
+            layer.get("arithmetic_safety", {}).get("status") == "VERIFIED"
+            for layer in layers
+        )
+        output_safe = (
+            isinstance(output_safety, dict)
+            and output_safety.get("status") == "VERIFIED"
+        )
+        verified = bool(
+            hidden_complete
+            and hidden_safe
+            and output_safe
+            and output_record.get("status") == "VERIFIED"
+        )
+        contract_width = sum(
+            int(layer.get("contract_total_width_int", 0)) for layer in layers
+        )
+        propagated_width = sum(
+            int(layer.get("propagated_total_width_int", 0)) for layer in layers
+        )
+        reduction = contract_width - propagated_width
+        candidate_checks = [
+            dict(record) for record in self.arithmetic_safety_records
+        ]
+        return {
+            "enabled": True,
+            "status": "VERIFIED" if verified else "NOT_VERIFIED",
+            "policy": "verified_affine_box_intersection_shared_layer_qif",
+            "shared_layer_qif": True,
+            "hidden_layers_expected": int(len(self.dense_layers)),
+            "hidden_layers_verified": int(len(layers)),
+            "contract_total_width_int": int(contract_width),
+            "propagated_total_width_int": int(propagated_width),
+            "width_reduction_int": int(reduction),
+            "width_reduction_fraction": (
+                float(reduction) / float(contract_width)
+                if contract_width > 0
+                else 0.0
+            ),
+            "arithmetic_safety_status": (
+                "VERIFIED" if hidden_safe and output_safe else "UNSAFE_OR_MISSING"
+            ),
+            "unsafe_candidate_count": sum(
+                record.get("status") != "VERIFIED"
+                for record in candidate_checks
+            ),
+            "candidate_arithmetic_safety_checks": candidate_checks,
+            "output_arithmetic_safety": dict(output_safety)
+            if isinstance(output_safety, dict)
+            else {},
+            "layers": layers,
         }
 
     def soundness_label(self) -> str:

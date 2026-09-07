@@ -1214,6 +1214,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         "soundness": synthesizer.soundness_label(),
         "contract_tolerance": synthesizer.contract_tolerance_summary(),
         "chaining_ok": synthesizer.chaining_summary(),
+        "verified_bound_tightening": synthesizer.verified_bound_tightening_summary(),
         "output_margin_check": synthesizer.output_margin_summary(),
         "margin_cuts": synthesizer.margin_cut_summary(),
         "cegar": synthesizer.cegar_summary(),
@@ -1330,6 +1331,9 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         summary.update(synthesizer.no_saturation_block_summary())
         summary["contract_tolerance"] = synthesizer.contract_tolerance_summary()
         summary["chaining_ok"] = synthesizer.chaining_summary()
+        summary["verified_bound_tightening"] = (
+            synthesizer.verified_bound_tightening_summary()
+        )
         summary["soundness"] = synthesizer.soundness_label()
         summary["output_margin_check"] = synthesizer.output_margin_summary()
         summary["cegar"] = synthesizer.cegar_summary()
@@ -1401,6 +1405,9 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
     summary.update(synthesizer.no_saturation_block_summary())
     summary["contract_tolerance"] = synthesizer.contract_tolerance_summary()
     summary["chaining_ok"] = synthesizer.chaining_summary()
+    summary["verified_bound_tightening"] = (
+        synthesizer.verified_bound_tightening_summary()
+    )
     summary["soundness"] = synthesizer.soundness_label()
     summary["output_margin_check"] = synthesizer.output_margin_summary()
     summary["vacuity_check"] = synthesizer.vacuity_summary()
