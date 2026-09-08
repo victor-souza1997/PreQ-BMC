@@ -185,6 +185,14 @@ pass `--no-enforce-contract-chaining` for diagnostics), and
 `--propagate-contract-tolerance` gives a sound way to carry a non-zero budget
 downstream by widening the next layer's assumption to the verified widened contract.
 
+For difficult derived contracts, `--tighten-verified-bounds` asks the same ESBMC
+harness to prove an additional affine-box bound and propagates its intersection
+only after every block passes. It preserves MILP preimages and one shared Q/I/F
+per layer. See
+[docs/verified_bound_tightening.md](docs/verified_bound_tightening.md) and the
+matched Iris/Seeds pilot in
+[experiments/iris_seeds_verified_bounds_pilot.json](experiments/iris_seeds_verified_bounds_pilot.json).
+
 ## Guarantee levels
 
 Rather than a binary verified/failed, every run reports a transfer claim, derived
@@ -201,6 +209,8 @@ by `_guarantee_level` in
 Transfer preconditions: `contracts_verified`, `fidelity_by_construction`,
 `chaining_ok`, `soundness_not_degraded`, `no_saturation_verified_if_required`,
 `derived_margin_ok`, `vacuity_guard_passed`.
+When verified-bound tightening is enabled, `verified_bound_tightening_ok` is
+also required.
 
 `preqbmc demo` exposes this as `--contract-profile`: `paper-slack` (default,
 matches the bundled cache, can claim at most `harness-verified`) versus `strict`
