@@ -139,6 +139,17 @@ class DerivedErrorBudgetTest(unittest.TestCase):
         self.assertEqual(encoder.synthesis_final_status, "VACUOUS")
         self.assertEqual(encoder.vacuity_records[-1]["assumption_box_cardinality"], "0")
 
+    def test_huge_assumption_box_cardinality_does_not_raise(self) -> None:
+        # 2**15000 has more decimal digits than Python's default safe
+        # integer-to-string conversion limit.
+        cardinality, valid = GPEncoding._assumption_box_cardinality(
+            np.asarray([0], dtype=object),
+            np.asarray([(1 << 15000) - 1], dtype=object),
+        )
+
+        self.assertTrue(valid)
+        self.assertEqual(cardinality, ">=2^15000")
+
     def test_derived_tolerance_is_emitted_per_neuron(self) -> None:
         source = render_hidden_affine_bounds_program(
             output_size=2,

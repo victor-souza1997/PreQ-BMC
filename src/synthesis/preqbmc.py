@@ -2311,7 +2311,13 @@ class GPEncoding:
         cardinality = 1
         for lo, hi in zip(low, high):
             cardinality *= int(hi) - int(lo) + 1
-        return str(cardinality), True
+        try:
+            return str(cardinality), True
+        except ValueError:
+            # Python 3.11+ limits enormous integer-to-decimal conversions.  The
+            # value is diagnostic-only; retain a truthful lower bound instead of
+            # turning a completed ESBMC query into a runner exception.
+            return f">=2^{cardinality.bit_length() - 1}", True
 
     def _layer_preimage_bounds_int(
         self,
