@@ -83,6 +83,7 @@
       "eps_sweep": [0.25, 0.5, 1.0, 2.0, 4.0],
       "esbmc_layer_block_sizes": [0, 1, 2, 5, 10],
       "experiment_arm": "A",
+      "enabled": false,
       "expected_difficulty": "high",
       "notes": "Nested-radius and monolithic-versus-blockwise frontier."
     },
@@ -92,7 +93,7 @@
       "arch": "2blk_10_10",
       "sample_id": 3,
       "eps_sweep": [0.25, 0.5, 1.0, 2.0, 4.0],
-      "esbmc_layer_block_sizes": [0, 1, 2, 5, 10],
+      "esbmc_layer_block_sizes": [1, 2, 5],
       "experiment_arm": "A",
       "expected_difficulty": "frontier",
       "notes": "Depth-effect frontier under the same fixed region family."
@@ -103,7 +104,7 @@
       "arch": "1blk_25",
       "sample_ids": [3, 2228, 9389],
       "eps": 0.25,
-      "esbmc_layer_block_sizes": [0, 1, 2, 5, 10],
+      "esbmc_layer_block_sizes": [1, 2, 5],
       "experiment_arm": "A",
       "expected_difficulty": "frontier",
       "notes": "Width-effect cohort; beta=10 is deliberately retained because the layer has 25 output neurons."
