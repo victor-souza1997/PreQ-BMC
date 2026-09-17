@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -441,6 +442,42 @@ def cmd_aggregate(args: argparse.Namespace, extra: list[str]) -> int:
     return int(completed.returncode)
 
 
+def _gtsrb_environment() -> dict[str, str]:
+    env = dict(os.environ)
+    source_root = str(_tool_root())
+    current = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = source_root if not current else os.pathsep.join([source_root, current])
+    # The study pins a deterministic CPU training/verification path; an explicit
+    # CUDA_VISIBLE_DEVICES in the caller's environment still wins.
+    env.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+    return env
+
+
+def _run_gtsrb_module(module: str, arguments: list[str], extra: list[str]) -> int:
+    command = [sys.executable, "-m", module, *arguments, *extra]
+    print("Running: " + _command_text(command))
+    completed = subprocess.run(command, cwd=_repo_root(), env=_gtsrb_environment(), check=False)
+    return int(completed.returncode)
+
+
+def cmd_gtsrb_prepare(args: argparse.Namespace, extra: list[str]) -> int:
+    arguments = ["--config", str(args.config)]
+    if args.check_config:
+        arguments.append("--check-config")
+    if args.dataset_terms_record is not None:
+        arguments.extend(["--dataset-terms-record", args.dataset_terms_record])
+    return _run_gtsrb_module("scripts.prepare_ssv_gtsrb", arguments, extra)
+
+
+def cmd_gtsrb_run(args: argparse.Namespace, extra: list[str]) -> int:
+    arguments = ["--study", str(args.study), "--output", str(args.output)]
+    if args.only is not None:
+        arguments.extend(["--only", args.only])
+    if args.dry_run:
+        arguments.append("--dry-run")
+    return _run_gtsrb_module("scripts.run_ssv_gtsrb", arguments, extra)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="preqbmc", description="Public PreQ-BMC artifact CLI.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -551,6 +588,34 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate.add_argument("--output-root", type=Path, default=Path("output/article_results"))
     aggregate.add_argument("--plots", action="store_true")
     aggregate.set_defaults(func=cmd_aggregate)
+
+    gtsrb = subparsers.add_parser(
+        "gtsrb",
+        help="Prepare and run the restricted-CNN GTSRB study.",
+        description=(
+            "Restricted-CNN GTSRB study. This is a separate schema from `reproduce`: it shares the "
+            "MILP-preimage/ESBMC core but adds an input-bridge obligation, so its VERIFIED results "
+            "carry the narrower byte-crop-integer-C guarantee and are not article results."
+        ),
+    )
+    gtsrb_commands = gtsrb.add_subparsers(dest="gtsrb_command", required=True)
+
+    gtsrb_prepare = gtsrb_commands.add_parser("prepare", help="Train the CNN and freeze the study manifest.")
+    gtsrb_prepare.add_argument("--config", type=Path, default=Path("experiments/plate_experiments.json"))
+    gtsrb_prepare.add_argument(
+        "--dataset-terms-record",
+        default=None,
+        help="Source and applicable dataset terms reviewed by the experiment author.",
+    )
+    gtsrb_prepare.add_argument("--check-config", action="store_true", help="Validate the configuration only.")
+    gtsrb_prepare.set_defaults(func=cmd_gtsrb_prepare)
+
+    gtsrb_run = gtsrb_commands.add_parser("run", help="Run frozen regions through preimages and ESBMC.")
+    gtsrb_run.add_argument("--study", type=Path, default=Path("output/plate_experiments/study.json"))
+    gtsrb_run.add_argument("--output", type=Path, required=True, help="New output directory; must not exist.")
+    gtsrb_run.add_argument("--only", default=None, help="Exact frozen run ID, as printed by --dry-run.")
+    gtsrb_run.add_argument("--dry-run", action="store_true", help="Print the frozen matrix without verifying.")
+    gtsrb_run.set_defaults(func=cmd_gtsrb_run)
 
     verify = subparsers.add_parser("verify-environment", help="Report solver and Python package availability.")
     verify.add_argument(

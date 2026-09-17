@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "/home/joao/code/preqbmc/examples/ssv_android"
+    "cmake.sourceDirectory": "/home/joao/code/preqbmc/examples/ssv_android",
+    "C_Cpp.intelliSenseCacheSize": 0,
 }
