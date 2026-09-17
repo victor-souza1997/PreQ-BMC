@@ -295,6 +295,11 @@ solver-free modules via `python -m unittest`.
 
 ## Conventions worth preserving
 
+For the opt-in SSV cropped traffic-sign research prototype, see
+[the restricted-CNN study guide](docs/ssv2026/README.md). It includes a real
+tiny-CNN ESBMC feasibility gate and GTSRB preparation scripts. This is not
+general CNN/ONNX support or a completed Android/GTSRB evaluation.
+
 - Python and generated C must stay bit-identical. Any change to rounding, clamping,
   or accumulation must land in [src/backends/fixed_point.py](src/backends/fixed_point.py),
   [src/backends/c_qnn_generator.py](src/backends/c_qnn_generator.py),

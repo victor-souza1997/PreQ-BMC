@@ -1,0 +1,13 @@
+cmake_minimum_required(VERSION 3.22)
+project(preqbmc_ssv C)
+if(NOT ANDROID OR NOT ANDROID_ABI STREQUAL "arm64-v8a")
+  message(FATAL_ERROR "Use the Android NDK toolchain and ANDROID_ABI=arm64-v8a")
+endif()
+if(NOT EXISTS "${QNN_SOURCE}")
+  message(FATAL_ERROR "QNN_SOURCE must name the generated qnn.c including its byte encoder")
+endif()
+add_library(preqbmc_ssv SHARED "${QNN_SOURCE}" qnn_jni.c)
+# Q/I/F constants are retained in the shared exporter for audit/unwind metadata.
+set_source_files_properties("${QNN_SOURCE}" PROPERTIES COMPILE_OPTIONS "-Wno-unused-const-variable")
+target_compile_features(preqbmc_ssv PRIVATE c_std_11)
+target_compile_options(preqbmc_ssv PRIVATE -O2 -Wall -Wextra -Werror)

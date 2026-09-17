@@ -35,6 +35,12 @@ onnx = [
 plots = [
   "matplotlib"
 ]
+gtsrb = [
+  "tensorflow",
+  "mip",
+  "Pillow",
+  "matplotlib"
+]
 dev = [
   "pytest"
 ]
