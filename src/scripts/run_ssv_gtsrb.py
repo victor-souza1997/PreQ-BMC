@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 import time
-
+from typing import Any
+import os
+# Força o sistema a olhar para a primeira GPU física
+os.environ["CUDA_VISIBLE_DEVICES"] = "0" 
 import numpy as np
 
 from backends.c_qnn_generator import generate_c_qnn_source
@@ -14,16 +17,26 @@ from backends.fixed_point import LayerQuantizationSpec
 from backends.image_encoder import ByteImageEncoder
 from datasets.gtsrb_study import load_crop, sha256
 from models.restricted_conv import ConvGeometry, RestrictedCNN
+from models.ssv_artifact import load_artifact
 from scripts.prepare_ssv_gtsrb import validate_config
 from scripts.run_ssv_cnn_gate import write_new_json
 from verification.esbmc import ESBMCConfig
 
 
-def run_region(study, run, output):
+@dataclass
+class RegionContext:
+    synthesizer: Any
+    cnn: RestrictedCNN
+    geometry: ConvGeometry
+    image: np.ndarray
+    low: np.ndarray
+    high: np.ndarray
+
+
+def build_region_context(study, run, output):
+    """Construct the same source box and derived-preimage encoder for all GTSRB paths."""
     from synthesis.preqbmc import GPEncoding, QuadapterConfig
     from synthesis.forward import forward_dnn
-    output.mkdir(parents=True, exist_ok=False)
-    start = time.monotonic()
     geom = validate_config(study["config"])
     if sha256(study["model_path"]) != study["model_sha256"]:
         raise ValueError("Source model identity mismatch")
@@ -49,11 +62,27 @@ def run_region(study, run, output):
         blockwise_run_all_blocks_on_failure=run["blockwise_run_all_blocks_on_failure"])
     synth = GPEncoding([len(center), int(np.prod(geom.output_shape)), 43], model, cfg, target, low, high)
     forward_dnn(center, synth)
-    result = synth.run(low, high)
-    bridge, source_hash, qif = False, None, []
+    return RegionContext(synth, cnn, geom, image, low, high)
+
+
+def run_region(study, run, output, *, fixed_artifact=None):
+    artifact, fixed_qif = (None, None) if fixed_artifact is None else load_artifact(fixed_artifact, study)
+    if run.get("verification_mode") == "fixed_qif_check" and artifact is None:
+        raise ValueError("Fixed-check campaign requires its frozen artifact")
+    if fixed_qif is not None and run.get("fixed_qif", artifact["qif"]) != artifact["qif"]:
+        raise ValueError("Run Q/I/F differs from frozen artifact")
+    output.mkdir(parents=True, exist_ok=False)
+    start = time.monotonic()
+    context = build_region_context(study, run, output)
+    synth, cnn, geom, image = context.synthesizer, context.cnn, context.geometry, context.image
+    low, high = context.low, context.high
+    result = synth.run(low, high, fixed_qif=fixed_qif)
+    bridge, source_hash, qif = False, None, fixed_qif or []
     if result.success:
         qif = [LayerQuantizationSpec(q, i, f) for q, i, f in
                zip(result.total_bits, result.integer_bits, result.fractional_bits)]
+        if fixed_qif is not None and qif != fixed_qif:
+            raise ValueError("Fixed checking changed the requested formats")
         enc = ByteImageEncoder(geom.input_shape, qif[0].fractional_bits, qif[0].total_bits)
         e_low, e_high = enc.box(image, run["epsilon"])
         a_low, a_high = synth._layer_input_bounds_int(synth.dense_layers[0], synth.input_layer, 1 << qif[0].fractional_bits)
@@ -62,6 +91,8 @@ def run_region(study, run, output):
         path = output / "qnn.c"
         path.write_text(generate_c_qnn_source(network) + enc.render_c(), encoding="utf-8")
         source_hash = sha256(path)
+        if artifact is not None and source_hash != artifact["generated_source_sha256"]:
+            raise ValueError("Verified export differs from the frozen artifact")
         write_new_json(output / "input_bridge.json", {"checked": bridge, "E_low": e_low.tolist(),
                        "E_high": e_high.tolist(), "A0_low": a_low.tolist(), "A0_high": a_high.tolist(),
                        "encoder": asdict(enc), "domain": "uint8 raw cropped RGB images"})
@@ -79,6 +110,10 @@ def run_region(study, run, output):
               "deployment_quality_status": "NOT_MEASURED", "power_status": "NOT_MEASURED",
               "source_float32_test_accuracy": study["source_float32_test_accuracy"],
               "qif": [asdict(spec) for spec in qif], "generated_source_sha256": source_hash,
+              "verification_mode": "fixed_qif_check" if artifact else "region_synthesis",
+              "fixed_artifact_sha256": sha256(fixed_artifact) if artifact else None,
+              "fixed_artifact_source_sha256": artifact["generated_source_sha256"] if artifact else None,
+              "fixed_qif_checks": getattr(synth, "fixed_qif_records", []),
               "model_sha256": study["model_sha256"], "preimage": synth.preimage_provenance_summary(),
               "chaining": chaining, "vacuity": synth.vacuity_summary(),
               "cegar": synth.cegar_summary(), "calls": synth.esbmc_call_records,
@@ -91,23 +126,32 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--study", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--only", help="Exact frozen run ID")
+    parser.add_argument("--only", action="append", default=[], help="Exact frozen run ID; repeat to run a subset")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--fixed-artifact", type=Path, help="Frozen artifact.json; disables bit-width synthesis")
     args = parser.parse_args()
     study = json.loads(args.study.read_text())
     validate_config(study["config"])
-    runs = [r for r in study["runs"] if not args.only or r["run_id"] == args.only]
+    fixed_artifact = args.fixed_artifact or study.get("fixed_artifact")
+    if study.get("fixed_artifact_sha256") and (
+            fixed_artifact is None or sha256(fixed_artifact) != study["fixed_artifact_sha256"]):
+        parser.error("Frozen campaign artifact identity mismatch")
+    if fixed_artifact is not None:
+        load_artifact(fixed_artifact, study)
+    requested_ids = set(args.only)
+    runs = [r for r in study["runs"] if not requested_ids or r["run_id"] in requested_ids]
     if not runs:
         parser.error("No matching frozen region")
     if args.dry_run:
         print(json.dumps(runs, indent=2))
         return
     args.output.mkdir(parents=True, exist_ok=False)
-    write_new_json(args.output / "study_identity.json", {"study": str(args.study.resolve()), "sha256": sha256(args.study)})
+    write_new_json(args.output / "study_identity.json", {"study": str(args.study.resolve()), "sha256": sha256(args.study),
+                   "fixed_artifact_sha256": sha256(fixed_artifact) if fixed_artifact else None})
     for run in runs:
         destination = args.output / run["run_id"]
         try:
-            report = run_region(study, run, destination)
+            report = run_region(study, run, destination, fixed_artifact=fixed_artifact)
             print(run["run_id"], report["final_status"], flush=True)
         except Exception as exc:
             # A runner error is NOT an ESBMC failure or a source counterexample.

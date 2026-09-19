@@ -6,7 +6,7 @@ from unittest.mock import patch
 import numpy as np
 
 from datasets.gtsrb_study import split_tracks, select_regions
-from reports.ssv_measurements import integrate_power, missing_device_report
+from reports.ssv_measurements import integrate_power, missing_device_report, summarize_energy_trials
 from scripts.prepare_ssv_gtsrb import validate_config
 from scripts.report_ssv_regions import summarize
 from scripts.evaluate_ssv_host import evaluate
@@ -44,6 +44,8 @@ class SsvStudyTest(unittest.TestCase):
             self.assertTrue(result["all_host_parity_passed"])
             self.assertEqual(result["methods"][0]["host_c_accuracy"], 1.)
             self.assertEqual(result["android_parity"], "NOT_MEASURED")
+            for method in result["methods"]:
+                self.assertEqual(method["optimization_mismatches"], {"-O0": 0, "-O2": 0})
 
     def test_tracks_never_cross_validation_boundary(self):
         rows = [{"id": f"{c}/{t}/{i}", "class_id": c, "track_id": f"{c}:{t}"}
@@ -68,6 +70,19 @@ class SsvStudyTest(unittest.TestCase):
         for epsilon in (1, 2, 4):
             self.assertEqual({(r["id"], epsilon)[0] for r in selected}, {r["id"] for r in selected})
 
+    def test_selection_offset_is_deterministic_and_disjoint(self):
+        records = [{"id": str(i), "class_id": i % 5, "split": "test"} for i in range(90)]
+        logits = np.zeros((90, 5))
+        for i in range(90):
+            logits[i, i % 5] = i + 1
+        first = select_regions(records, logits, rank_offset_per_stratum=0)
+        second = select_regions(records, logits, rank_offset_per_stratum=3)
+        self.assertFalse({r["id"] for r in first} & {r["id"] for r in second})
+        self.assertEqual(second, select_regions(records, logits, rank_offset_per_stratum=3))
+        self.assertTrue(all(r["selection_rank_offset_per_stratum"] == 3 for r in second))
+        with self.assertRaises(ValueError):
+            select_regions(records, logits, rank_offset_per_stratum=-1)
+
     def test_energy_uses_synchronized_power_not_cpu(self):
         result = integrate_power([0, 1, 2], [2, 2, 2], .5, 1.5, 10, idle_watts=1)
         self.assertAlmostEqual(result["gross_joules_per_inference"], .2)
@@ -87,6 +102,17 @@ class SsvStudyTest(unittest.TestCase):
         config["verification"]["unsound_contract_tolerance"] = True
         with self.assertRaises(ValueError):
             validate_config(config)
+
+    def test_energy_interval_keeps_unresolved_and_negative_deltas(self):
+        trials = [integrate_power([0, 1], [p, p], 0, 1, 100000, idle_watts=2)
+                  for p in (1.9, 2., 2.1)]
+        result = summarize_energy_trials(trials)
+        self.assertFalse(result["positive_increment_resolved_statistically"])
+        self.assertLess(result["bootstrap_95_percent_ci"][0], 0)
+        self.assertGreater(result["bootstrap_95_percent_ci"][1], 0)
+        self.assertFalse(result["instrument_uncertainty_included"])
+        with self.assertRaises(ValueError):
+            summarize_energy_trials(trials[:2])
 
     def test_region_denominators_and_diagnostic_timeouts(self):
         common = {"epsilon": 1, "block_size": 2, "margin_cuts": True,

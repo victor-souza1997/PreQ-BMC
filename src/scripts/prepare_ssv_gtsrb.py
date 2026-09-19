@@ -43,6 +43,9 @@ def validate_config(config):
         raise ValueError("Study requires derived preimages, strict chaining and input F >= 8")
     if config["selection"]["type"] != "clean_margin_tertiles" or not config["selection"]["freeze_before_verification"]:
         raise ValueError("Outcome-blind fixed selection is required")
+    offset = config["selection"].get("rank_offset_per_stratum", 0)
+    if type(offset) is not int or offset < 0:
+        raise ValueError("Selection rank offset must be a nonnegative integer")
     if config["training"]["seed"] != 2026 or config["training"]["validation_fraction"] != 0.2:
         raise ValueError("This manifest schema pins the track split to seed=2026 and fraction=0.2")
     if any(type(b) is not int or b < 0 for b in config["block_sizes"]) or any(float(e) < 0 for e in config["epsilon_raw_bytes"]):
@@ -94,7 +97,11 @@ def prepare(config_path, terms_record):
     if not predictions_equal or not np.allclose(logits, lowered_logits, rtol=1e-5, atol=1e-5):
         write_new_json(output / "blocked.json", {"status": "FLOAT_LOWERING_PARITY_BLOCKED", "max_abs_gap": max_gap})
         raise ValueError("Float32 lowering parity gate failed; retain evidence and stop")
-    selected = select_regions(test_rows, logits, per_stratum=config["selection"]["per_stratum"])
+    selected = select_regions(
+        test_rows, logits,
+        per_stratum=config["selection"]["per_stratum"],
+        rank_offset_per_stratum=config["selection"].get("rank_offset_per_stratum", 0),
+    )
     runs = []
     for index, row in enumerate(selected):
         for eps in config["epsilon_raw_bytes"]:

@@ -1,0 +1,25 @@
+{
+  "schema": "ssv_fixed_qif_sweep_v1",
+  "purpose": "Select one immutable QIF from calibration before independent evaluation",
+  "calibration_study": "output/plate_experiments/study.json",
+  "evaluation_study": "output/sign_second_cohort_review/study.json",
+  "selection": {"rule": "first_ordered_candidate_all_source_eligible_calibration_regions_verified"},
+  "candidates": [
+    {"id": "h11_o13_f8", "qif": [
+      {"total_bits": 11, "integer_bits": 2, "fractional_bits": 8},
+      {"total_bits": 13, "integer_bits": 4, "fractional_bits": 8}
+    ]},
+    {"id": "h12_o14_f8", "qif": [
+      {"total_bits": 12, "integer_bits": 3, "fractional_bits": 8},
+      {"total_bits": 14, "integer_bits": 5, "fractional_bits": 8}
+    ]},
+    {"id": "h13_o15_f8", "qif": [
+      {"total_bits": 13, "integer_bits": 4, "fractional_bits": 8},
+      {"total_bits": 15, "integer_bits": 6, "fractional_bits": 8}
+    ]},
+    {"id": "h14_o16_f8", "qif": [
+      {"total_bits": 14, "integer_bits": 5, "fractional_bits": 8},
+      {"total_bits": 16, "integer_bits": 7, "fractional_bits": 8}
+    ]}
+  ]
+}

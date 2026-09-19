@@ -213,11 +213,15 @@ def write_c_qnn_source(network: FixedPointNetwork, destination: Path) -> Path:
     return destination
 
 
-def compile_c_qnn_shared_library(source_path: Path, output_path: Path, compiler: str = "gcc") -> Path:
+def compile_c_qnn_shared_library(
+    source_path: Path, output_path: Path, compiler: str = "gcc", *, optimization: str = "-O2",
+) -> Path:
     """Compile the generated C source into a shared library."""
 
+    if optimization not in {"-O0", "-O2"}:
+        raise ValueError("Supported parity builds use -O0 or -O2")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    command = [compiler, "-shared", "-fPIC", "-O2", str(source_path), "-o", str(output_path)]
+    command = [compiler, "-shared", "-fPIC", optimization, str(source_path), "-o", str(output_path)]
     subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     return output_path
 

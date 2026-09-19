@@ -34,3 +34,30 @@ def missing_device_report():
             "power": {"status": "NOT_MEASURED", "instrument": None,
                       "sampling_hz": None, "calibration": None, "uncertainty": None,
                       "gross_joules_per_inference": None, "idle_subtracted_joules_per_inference": None}}
+
+
+def summarize_energy_trials(trials, *, seed=2026, resamples=10000):
+    """Paired idle-subtracted trial means and a trial-level bootstrap interval.
+
+    Each trial uses its own measured idle baseline. Meter samples and repeated
+    inferences inside a batch are not independent timing/energy repetitions.
+    This statistical interval does not include instrument calibration error.
+    """
+    if len(trials) < 3 or type(resamples) is not int or resamples < 100:
+        raise ValueError("Need at least three independent paired trials and 100 resamples")
+    values = []
+    for trial in trials:
+        value = trial.get("idle_subtracted_joules_per_inference")
+        if trial.get("status") != "MEASURED" or value is None or not np.isfinite(value):
+            raise ValueError("Every trial needs measured, finite, paired idle-subtracted energy")
+        values.append(float(value))
+    values = np.asarray(values)
+    rng = np.random.default_rng(seed)
+    means = rng.choice(values, size=(resamples, len(values)), replace=True).mean(axis=1)
+    low, high = np.quantile(means, [.025, .975])
+    return {"n_independent_trials": len(values), "mean_idle_subtracted_j_per_inference": float(values.mean()),
+            "sample_sd_j_per_inference": float(values.std(ddof=1)),
+            "bootstrap_95_percent_ci": [float(low), float(high)], "bootstrap_seed": seed,
+            "resamples": resamples, "positive_increment_resolved_statistically": bool(low > 0),
+            "instrument_uncertainty_included": False,
+            "interpretation": "Exploratory paired-trial estimate, not a device safety or compiler proof"}

@@ -1,4 +1,49 @@
-# Local validation, 2026-09-14
+# Local validation
+
+## Fixed-artifact follow-up, 2026-09-18
+
+No model was retrained and no historical results were overwritten.
+
+- Frozen campaign: `output/sign_fixed_campaign_review/study.json`, 36 planned
+  configurations of the same nine previously selected images. Only the two
+  validation checks below were run, not the full campaign.
+- Artifact: Q/I/F = (11,2,8), (13,4,8), generated C SHA-256
+  `14b00fcd2dc81da0a265bc97b9a2ff87bac1c04e1e93019dcc42d4cdb31d9394`.
+- `output/sign_fixed_check_review/image8_eps1_beta1_cuts0/region_summary.json`:
+  VERIFIED, byte-crop integer-C guarantee, input bridge and chaining passed,
+  227.06 seconds in one run. 62 ESBMC calls: 60 VERIFIED and two expected
+  sentinel failures. Source hash exactly matches the frozen artifact and the
+  original image8 successful pilot. This is a format-check run, not synthesis.
+- `output/sign_fixed_source_gate_review/image0_eps1_beta1_cuts0/region_summary.json`:
+  SOURCE_PROPERTY_INCONCLUSIVE, zero ESBMC calls, same requested artifact hash
+  and Q/I/F retained. No source failure or source counterexample is claimed.
+- `output/sign_fixed_check_tables_review` contains additional CSVs and a ledger
+  for the image8 check only; its completed-only fraction is not a campaign result.
+- 77 focused tests passed, including format identity/drift, no-search checking,
+  source gate, generated C, fixed-point execution, block/no-saturation checks,
+  verified-bound tightening, -O0/-O2 host parity on synthetic data, and real
+  TFLite conversion/inference on a synthetic fixture.
+- `output/sign_tflite_baselines_review` contains actual float32 and PTQ int8
+  TFLite exports of the trained shared model, calibrated on 500 training images.
+  Full-test baseline accuracy and device execution were not measured in this
+  follow-up. All baseline artifacts are explicitly uncertified.
+- Android parity, latency and energy remain NOT_MEASURED. The exact source
+  MILP fallback remains unimplemented; see [review_response.md](review_response.md).
+- `output/sign_second_cohort_review/study.json` freezes a second nine-image
+  cohort with `rank_offset_per_stratum=3`; it has no image overlap with the
+  original selected cohort and reuses the same source-model hash. Its matching
+  36-run fixed-artifact campaign is
+  `output/sign_second_fixed_campaign_review/study.json`. Only `--dry-run` was
+  executed for this second cohort; it has no verification outcomes yet.
+- `output/sign_fixed_qif_sweep_review/sweep.json` materializes the four
+  candidate calibration studies for the 108+36 fixed-QIF protocol. It contains
+  four 27-region calibration manifests and no ESBMC result. The selector has
+  not run, and independent evaluation is intentionally not materialized yet.
+
+## Initial tiny gate, 2026-09-14
+
+The following records the environment and evidence **at that checkpoint**;
+the dataset availability statement is historical, not the current state.
 
 The authoritative tiny spatial-CNN run is
 `output/ssv2026_tiny_cnn/gate_summary.json`. Earlier uniquely named gate

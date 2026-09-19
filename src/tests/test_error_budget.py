@@ -101,6 +101,138 @@ class DerivedErrorBudgetTest(unittest.TestCase):
             )
         self.assertTrue(np.all(budget >= 1))
 
+    def test_structural_zero_weights_tighten_budget_and_stay_sound(self) -> None:
+        """A lowered convolution charges rounding error only on its support."""
+
+        encoder = GPEncoding.__new__(GPEncoding)
+        frac_in = 3
+        frac_out = 3
+        scale_in = 1 << frac_in
+        scale_out = 1 << frac_out
+
+        # Three neurons over six inputs, each touching two of them, as a
+        # lowered 1-D convolution with stride 2 does.
+        support = [(0, 1), (2, 3), (4, 5)]
+        numerators = [(5, -7), (11, 3), (-9, 6)]
+        real_weights = [[Fraction(0) for _ in range(6)] for _ in range(3)]
+        for neuron, (columns, values) in enumerate(zip(support, numerators)):
+            for column, value in zip(columns, values):
+                real_weights[neuron][column] = Fraction(value, 16)
+        real_biases = [Fraction(3, 32), Fraction(-5, 32), Fraction(1, 32)]
+
+        weights_int = np.asarray(
+            [
+                [_round_half_away(weight * scale_out) for weight in row]
+                for row in real_weights
+            ],
+            dtype=np.int64,
+        )
+        biases_int = [_round_half_away(bias * scale_out) for bias in real_biases]
+        weights_real = np.asarray(
+            [[float(weight) for weight in row] for row in real_weights],
+            dtype=np.float64,
+        )
+        # Every skipped weight must be exactly zero in the deployed program.
+        self.assertTrue(np.all(weights_int[weights_real == 0.0] == 0))
+
+        # Magnitudes large enough that the rounding term is not lost to the
+        # ceiling, with four values per input to keep the sweep exhaustive.
+        assumed_low = np.asarray([40, 44, 48, -43, 44, 48], dtype=np.int64)
+        assumed_high = np.asarray([43, 47, 51, -40, 47, 51], dtype=np.int64)
+        layer = SimpleNamespace(
+            layer_paras=[
+                weights_real,
+                np.asarray([float(bias) for bias in real_biases], dtype=np.float64),
+            ]
+        )
+        arguments = dict(
+            weights_int=weights_int,
+            assumed_lo_int=assumed_low,
+            assumed_hi_int=assumed_high,
+            frac_in=frac_in,
+            delta_in_int=0,
+            frac_out=frac_out,
+        )
+        budget = encoder._derived_error_budget_int(cur_layer=layer, **arguments)
+        dense = encoder._derived_error_budget_int(
+            cur_layer=SimpleNamespace(), **arguments
+        )
+
+        # Soundness: the budget still bounds the true deviation everywhere.
+        ranges = [
+            range(int(low), int(high) + 1)
+            for low, high in zip(assumed_low, assumed_high)
+        ]
+        maximum_error = [Fraction(0) for _ in range(3)]
+        for integer_input in product(*ranges):
+            for neuron, (weight_row, bias) in enumerate(
+                zip(real_weights, real_biases)
+            ):
+                accumulator = sum(
+                    int(weight) * int(value)
+                    for weight, value in zip(weights_int[neuron], integer_input)
+                )
+                implemented = _round_half_away(
+                    Fraction(accumulator, scale_in)
+                ) + biases_int[neuron]
+                real_output_ulps = sum(
+                    weight * Fraction(value, scale_in) * scale_out
+                    for weight, value in zip(weight_row, integer_input)
+                ) + bias * scale_out
+                maximum_error[neuron] = max(
+                    maximum_error[neuron],
+                    abs(Fraction(implemented) - real_output_ulps),
+                )
+        for neuron, error in enumerate(maximum_error):
+            self.assertLessEqual(
+                error,
+                int(budget[neuron]),
+                msg=f"neuron={neuron}, error={error}, budget={budget.tolist()}",
+            )
+
+        # Tightening: the sparse budget is strictly below the dense fallback,
+        # which charges every neuron for all six inputs.
+        self.assertTrue(np.all(budget < dense))
+        self.assertTrue(np.all(budget >= 1))
+
+    def test_weight_rounding_to_zero_is_still_charged(self) -> None:
+        """``W_int == 0`` does not imply zero rounding error."""
+
+        encoder = GPEncoding.__new__(GPEncoding)
+        frac_out = 3
+        scale_out = 1 << frac_out
+        # |W_real| < 0.5/S_out, so it quantizes to zero yet still deviates.
+        tiny = 1.0 / float(1 << (frac_out + 3))
+        self.assertEqual(_round_half_away(Fraction.from_float(tiny) * scale_out), 0)
+
+        arguments = dict(
+            weights_int=np.asarray([[0, 0]], dtype=np.int64),
+            assumed_lo_int=np.asarray([4, 4], dtype=np.int64),
+            assumed_hi_int=np.asarray([4, 4], dtype=np.int64),
+            frac_in=2,
+            delta_in_int=0,
+            frac_out=frac_out,
+        )
+        charged = encoder._derived_error_budget_int(
+            cur_layer=SimpleNamespace(
+                layer_paras=[
+                    np.asarray([[tiny, tiny]], dtype=np.float64),
+                    np.asarray([0.0], dtype=np.float64),
+                ]
+            ),
+            **arguments,
+        )
+        skipped = encoder._derived_error_budget_int(
+            cur_layer=SimpleNamespace(
+                layer_paras=[
+                    np.asarray([[0.0, 0.0]], dtype=np.float64),
+                    np.asarray([0.0], dtype=np.float64),
+                ]
+            ),
+            **arguments,
+        )
+        self.assertGreater(int(charged[0]), int(skipped[0]))
+
     def test_inherited_budget_is_amplified_with_integer_l1_gain(self) -> None:
         encoder = GPEncoding.__new__(GPEncoding)
         budget = encoder._derived_error_budget_int(

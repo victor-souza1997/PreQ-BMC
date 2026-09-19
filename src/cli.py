@@ -471,11 +471,36 @@ def cmd_gtsrb_prepare(args: argparse.Namespace, extra: list[str]) -> int:
 
 def cmd_gtsrb_run(args: argparse.Namespace, extra: list[str]) -> int:
     arguments = ["--study", str(args.study), "--output", str(args.output)]
-    if args.only is not None:
-        arguments.extend(["--only", args.only])
+    for run_id in args.only:
+        arguments.extend(["--only", run_id])
     if args.dry_run:
         arguments.append("--dry-run")
     return _run_gtsrb_module("scripts.run_ssv_gtsrb", arguments, extra)
+
+
+def cmd_gtsrb_prepare_sweep(args: argparse.Namespace, extra: list[str]) -> int:
+    return _run_gtsrb_module(
+        "scripts.prepare_ssv_fixed_qif_sweep",
+        ["--config", str(args.config), "--output", str(args.output)],
+        extra,
+    )
+
+
+def cmd_gtsrb_select_sweep(args: argparse.Namespace, extra: list[str]) -> int:
+    return _run_gtsrb_module(
+        "scripts.select_ssv_fixed_qif_sweep",
+        ["--sweep", str(args.sweep), "--runs-root", str(args.runs_root), "--output", str(args.output)],
+        extra,
+    )
+
+
+def cmd_gtsrb_search(args: argparse.Namespace, extra: list[str]) -> int:
+    arguments = ["--config", str(args.config), "--output", str(args.output)]
+    if args.resume:
+        arguments.append("--resume")
+    if args.prepare_only:
+        arguments.append("--prepare-only")
+    return _run_gtsrb_module("scripts.search_ssv_qif", arguments, extra)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -601,7 +626,7 @@ def build_parser() -> argparse.ArgumentParser:
     gtsrb_commands = gtsrb.add_subparsers(dest="gtsrb_command", required=True)
 
     gtsrb_prepare = gtsrb_commands.add_parser("prepare", help="Train the CNN and freeze the study manifest.")
-    gtsrb_prepare.add_argument("--config", type=Path, default=Path("experiments/plate_experiments.json"))
+    gtsrb_prepare.add_argument("--config", type=Path, default=Path("experiments/sign_experiments.json"))
     gtsrb_prepare.add_argument(
         "--dataset-terms-record",
         default=None,
@@ -611,11 +636,38 @@ def build_parser() -> argparse.ArgumentParser:
     gtsrb_prepare.set_defaults(func=cmd_gtsrb_prepare)
 
     gtsrb_run = gtsrb_commands.add_parser("run", help="Run frozen regions through preimages and ESBMC.")
-    gtsrb_run.add_argument("--study", type=Path, default=Path("output/plate_experiments/study.json"))
+    gtsrb_run.add_argument("--study", type=Path, default=Path("output/sign_experiments/study.json"))
     gtsrb_run.add_argument("--output", type=Path, required=True, help="New output directory; must not exist.")
-    gtsrb_run.add_argument("--only", default=None, help="Exact frozen run ID, as printed by --dry-run.")
+    gtsrb_run.add_argument(
+        "--only", action="append", default=[],
+        help="Exact frozen run ID, as printed by --dry-run; repeat to run a subset.",
+    )
     gtsrb_run.add_argument("--dry-run", action="store_true", help="Print the frozen matrix without verifying.")
     gtsrb_run.set_defaults(func=cmd_gtsrb_run)
+
+    gtsrb_prepare_sweep = gtsrb_commands.add_parser(
+        "prepare-sweep", help="Materialize calibration campaigns for ordered fixed-QIF candidates."
+    )
+    gtsrb_prepare_sweep.add_argument("--config", type=Path, default=Path("experiments/sign_fixed_qif_sweep.json"))
+    gtsrb_prepare_sweep.add_argument("--output", type=Path, required=True, help="New sweep directory; must not exist.")
+    gtsrb_prepare_sweep.set_defaults(func=cmd_gtsrb_prepare_sweep)
+
+    gtsrb_select_sweep = gtsrb_commands.add_parser(
+        "select-sweep", help="Select the first calibration-passing QIF and materialize independent evaluation."
+    )
+    gtsrb_select_sweep.add_argument("--sweep", type=Path, required=True)
+    gtsrb_select_sweep.add_argument("--runs-root", type=Path, required=True)
+    gtsrb_select_sweep.add_argument("--output", type=Path, required=True, help="New selection directory; must not exist.")
+    gtsrb_select_sweep.set_defaults(func=cmd_gtsrb_select_sweep)
+
+    gtsrb_search = gtsrb_commands.add_parser(
+        "search", help="Search shared layer Q/I/F over the calibration regions using preimages and ESBMC."
+    )
+    gtsrb_search.add_argument("--config", type=Path, default=Path("experiments/sign_qif_search.json"))
+    gtsrb_search.add_argument("--output", type=Path, required=True, help="New output directory, or an existing search with --resume.")
+    gtsrb_search.add_argument("--resume", action="store_true", help="Reuse completed exact-identity candidate reports.")
+    gtsrb_search.add_argument("--prepare-only", action="store_true", help="Compute source checks and live MILP preimages without ESBMC.")
+    gtsrb_search.set_defaults(func=cmd_gtsrb_search)
 
     verify = subparsers.add_parser("verify-environment", help="Report solver and Python package availability.")
     verify.add_argument(

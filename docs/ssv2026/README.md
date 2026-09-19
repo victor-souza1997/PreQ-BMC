@@ -1,7 +1,13 @@
-# Restricted CNN study: what is available
+# Traffic-sign affine-lowering study: what is available
 
 Read [feasibility.md](feasibility.md) first. This is an opt-in research prototype,
 not general CNN/ONNX support. Existing article configurations are unchanged.
+
+For the current traffic-sign campaign, use the
+[revised protocol and fixed-artifact instructions](review_response.md).
+The original per-region synthesis commands below remain useful as exploratory
+pilots, but do not by themselves certify multiple regions of one deployed
+artifact. Fixed F alone does not fix I or the C clamp semantics.
 
 ## Validated tiny gate
 
@@ -32,6 +38,11 @@ sharing is represented by repeated equal weights in a bounded dense lowering;
 this is intentionally not an efficient convolution backend.
 
 ## GTSRB preparation and execution
+
+For automatic format selection on the already trained model and frozen cohorts,
+use [`preqbmc gtsrb search`](quantization_search.md). It varies range and
+fractional precision together and freezes the first shared layer configuration
+certified over every source-eligible calibration region before independent evaluation.
 
 The [official dataset page](https://benchmark.ini.rub.de/gtsrb_dataset.html)
 describes cropped traffic signs. Download the official training images, final
@@ -84,7 +95,7 @@ the final region status. No missing device metric is replaced by zero.
 ## Android gate and remaining experiments
 
 After a region verifies, run the full-test host comparison. This evaluates
-ordinary uniform Q16/F8 quantization and the selected formats against the
+an internal uniform Q16/F8 arithmetic control and the selected formats against the
 same test split, including exact Python/C intermediate values, encoder parity,
 actual library/array sizes, and a streamed device-replay corpus:
 
@@ -95,8 +106,10 @@ PYTHONPATH=src python -m scripts.evaluate_ssv_host \
   --output output/ssv2026_gtsrb_host_quality
 ```
 
-The uniform baseline is explicitly uncertified. A local certificate never
-implies that all images used for accuracy evaluation are certified.
+The uniform control is explicitly uncertified. Use the named TFLite int8 and
+float32 baselines in the [revised protocol](review_response.md) for the device
+comparison. A local certificate never implies that all images used for accuracy
+evaluation are certified.
 
 `examples/ssv_android` provides JNI and CMake integration, **not a tested APK**.
 Use a successful run's `qnn.c`, including its encoder, with the NDK toolchain:
@@ -120,15 +133,18 @@ Host C parity does not certify the compiler or JNI wrapper.
 
 Still required before the proposed paper's deployment results exist:
 
-- Real GTSRB training/region runs and full-test Python/C accuracy and logit parity.
+- Completion of the fixed-artifact region campaign and full-test Python/C
+  accuracy and logit parity. Training and two pilot checks are now available;
+  see the dated [validation record](validation.md).
 - Physical arm64 device validation including encoder, intermediate values and
   final logits; no NDK/device validation is claimed by the current tests.
-- Matched ordinary quantization and float32 baselines. Their execution is not
+- Matched TFLite post-training int8 and float32 device baselines. Their execution is not
   automatically certified by the selected PreQ-BMC artifact.
 - Repeated device measurements and, when feasible, independent training seeds.
 - A named meter and synchronized external power traces.
 
-Use a fixed full-test sequence, warmup, five trials, and fixed screen,
+Use a fixed full-test sequence and the paired, batched trial protocol in
+[review_response.md](review_response.md), with fixed screen,
 brightness and network state. Record thermal/battery conditions, actual model
 and binary bytes, median/p95 latency, throughput, CPU-time/wall-time ratio
 (may exceed 100% for multiple cores), and sampled process peak RSS.

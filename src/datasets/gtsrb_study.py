@@ -72,12 +72,14 @@ def load_crop(root, row):
         return np.asarray(image, dtype=np.uint8)
 
 
-def select_regions(records, logits, *, per_stratum=3):
+def select_regions(records, logits, *, per_stratum=3, rank_offset_per_stratum=0):
     """Freeze distinct, correctly classified test images before any solver call."""
     logits = np.asarray(logits, dtype=np.float64)
     if logits.ndim != 2 or logits.shape[0] != len(records) or logits.shape[1] < 2 or not np.all(np.isfinite(logits)):
         raise ValueError("Invalid clean float logits")
-    if per_stratum <= 0 or any(row["split"] != "test" for row in records):
+    if (per_stratum <= 0 or type(rank_offset_per_stratum) is not int
+            or rank_offset_per_stratum < 0
+            or any(row["split"] != "test" for row in records)):
         raise ValueError("Selection must use the untouched test split")
     eligible = []
     for row, values in zip(records, logits):
@@ -91,7 +93,9 @@ def select_regions(records, logits, *, per_stratum=3):
     selected = []
     for name, indices in zip(("low", "median", "high"), np.array_split(np.arange(len(eligible)), 3)):
         # Within each tertile, prefer the lowest-margin distinct classes first.
-        candidates = [eligible[int(i)] for i in indices]
+        candidates = [eligible[int(i)] for i in indices][rank_offset_per_stratum:]
+        if len(candidates) < per_stratum:
+            raise ValueError("Selection offset leaves too few test images in a margin tertile")
         chosen, classes = [], set()
         for row in candidates:
             if row["class_id"] not in classes:
@@ -104,7 +108,9 @@ def select_regions(records, logits, *, per_stratum=3):
                 break
             if row not in chosen:
                 chosen.append(row)
-        selected.extend({**row, "stratum": name} for row in chosen)
+        selected.extend({**row, "stratum": name,
+                         "selection_rank_offset_per_stratum": rank_offset_per_stratum}
+                        for row in chosen)
     if len({row["class_id"] for row in selected}) < 2:
         raise ValueError("Selected regions must cover multiple classes")
     return selected

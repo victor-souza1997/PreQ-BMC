@@ -49,6 +49,14 @@ def evaluate(study, region, region_dir, output):
         prefix.write_text(generate_c_qnn_source(FixedPointNetwork(network.input_fractional_bits, network.input_total_bits, network.layers[:1])) + encoder.render_c())
         hidden_lib = ctypes.CDLL(str(compile_c_qnn_shared_library(prefix, directory / "hidden.so").resolve()))
         hidden_lib.qnn_forward_fixed.argtypes = [ptr, ptr]
+        o0_path = compile_c_qnn_shared_library(source, directory / "qnn_O0.so", optimization="-O0")
+        o0_lib = ctypes.CDLL(str(o0_path.resolve()))
+        o0_lib.qnn_forward_fixed.argtypes = [ptr, ptr]
+        o0_lib.qnn_encode_bytes.argtypes = [byte_ptr, ctypes.c_int, ctypes.c_int, ptr]
+        o0_hidden = ctypes.CDLL(str(compile_c_qnn_shared_library(
+            prefix, directory / "hidden_O0.so", optimization="-O0").resolve()))
+        o0_hidden.qnn_forward_fixed.argtypes = [ptr, ptr]
+        optimization_mismatches = {"-O0": 0, "-O2": 0}
         correct = mismatch = 0
         with (directory / "device_vectors.jsonl").open("x") as vectors:
             for row in rows:
@@ -62,7 +70,16 @@ def evaluate(study, region, region_dir, output):
                 hidden_c, logits = np.zeros_like(hidden), np.zeros_like(expected)
                 hidden_lib.qnn_forward_fixed(input_int.ctypes.data_as(ptr), hidden_c.ctypes.data_as(ptr))
                 lib.qnn_forward_fixed(input_int.ctypes.data_as(ptr), logits.ctypes.data_as(ptr))
-                mismatch += int(not np.array_equal(hidden_c, hidden) or not np.array_equal(logits, expected))
+                mismatch_o2 = not np.array_equal(hidden_c, hidden) or not np.array_equal(logits, expected)
+                input_o0, hidden_o0, logits_o0 = np.zeros_like(input_int), np.zeros_like(hidden), np.zeros_like(expected)
+                status_o0 = o0_lib.qnn_encode_bytes(image.ctypes.data_as(byte_ptr), image.shape[0], image.shape[1], input_o0.ctypes.data_as(ptr))
+                o0_hidden.qnn_forward_fixed(input_o0.ctypes.data_as(ptr), hidden_o0.ctypes.data_as(ptr))
+                o0_lib.qnn_forward_fixed(input_o0.ctypes.data_as(ptr), logits_o0.ctypes.data_as(ptr))
+                mismatch_o0 = bool(status_o0 or not np.array_equal(input_o0, expected_input)
+                                   or not np.array_equal(hidden_o0, hidden) or not np.array_equal(logits_o0, expected))
+                optimization_mismatches["-O0"] += int(mismatch_o0)
+                optimization_mismatches["-O2"] += int(mismatch_o2)
+                mismatch += int(mismatch_o0 or mismatch_o2)
                 correct += int(np.argmax(logits) == row["class_id"])
                 vectors.write(json.dumps({"image_id": row["id"], "image_sha256": row["sha256"],
                               "shape": list(image.shape), "encoded_input": input_int.tolist(),
@@ -73,9 +90,13 @@ def evaluate(study, region, region_dir, output):
                         "actual_library_size_bytes": library_path.stat().st_size,
                         "actual_parameter_array_bytes": sum(l.weights_int.nbytes + l.biases_int.nbytes for l in network.layers),
                         "nominal_packed_storage": "NOT_IMPLEMENTED", "mismatches": mismatch,
+                        "optimization_mismatches": optimization_mismatches,
+                        "O0_library_sha256": sha256(o0_path),
                         "certification_scope": region["run_id"] if name == "preqbmc_selected" else "UNCERTIFIED_BASELINE"})
     report = {"source_float32_test_accuracy": study["source_float32_test_accuracy"], "methods": results,
               "compile_flags": ["-shared", "-fPIC", "-O2"], "android_parity": "NOT_MEASURED",
+              "additional_parity_compile_flags": ["-shared", "-fPIC", "-O0"],
+              "compiler_correctness": "TRUST_ASSUMPTION_NOT_PROVED_BY_PARITY",
               "android_performance": "NOT_MEASURED", "power": "NOT_MEASURED",
               "all_host_parity_passed": all(r["mismatches"] == 0 for r in results)}
     write_new_json(output / "host_quality.json", report)

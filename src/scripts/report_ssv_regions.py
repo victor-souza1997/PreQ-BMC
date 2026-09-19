@@ -13,9 +13,14 @@ from datasets.gtsrb_study import sha256
 def summarize(reports):
     groups = defaultdict(list)
     for r in reports:
-        groups[(r["epsilon"], r["block_size"], r["margin_cuts"])].append(r)
+        mode = r.get("verification_mode", "region_synthesis")
+        identity = r.get("fixed_artifact_source_sha256") or ""
+        if mode == "fixed_qif_check" and (not identity or (
+                r["byte_crop_property_verified"] and r.get("generated_source_sha256") != identity)):
+            raise ValueError("Fixed-artifact certificate has missing or inconsistent C identity")
+        groups[(r["epsilon"], r["block_size"], r["margin_cuts"], mode, identity)].append(r)
     rows = []
-    for (eps, beta, cuts), group in sorted(groups.items()):
+    for (eps, beta, cuts, mode, artifact), group in sorted(groups.items()):
         identities = [r["sample"]["id"] for r in group]
         if len(set(identities)) != len(identities):
             raise ValueError("Duplicate region/variant: repetitions need a separate timing analysis")
@@ -25,6 +30,9 @@ def summarize(reports):
         runtime = np.array([r["total_runtime_seconds"] for r in group])
         memory = [c["peak_memory_bytes"] for c in calls if c.get("peak_memory_bytes") is not None]
         rows.append({"epsilon_raw_bytes": eps, "beta": beta, "margin_cuts": cuts,
+                     "verification_mode": mode, "fixed_artifact_source_sha256": artifact or None,
+                     "certified_artifact_count": len({r.get("generated_source_sha256") for r in group
+                                                       if r["byte_crop_property_verified"] and r.get("generated_source_sha256")}),
                      "n_images": len(set(identities)), "n_regions_completed": len(group),
                      "source_verified_count": eligible,
                      "source_inconclusive_count": sum(r["source_region"]["status"] == "INCONCLUSIVE" for r in group),
@@ -69,6 +77,9 @@ def main():
         raise ValueError("Duplicate or unexpected run identities")
     if any(r["model_sha256"] != study["model_sha256"] for r in reports):
         raise ValueError("Cannot mix model identities")
+    if study.get("fixed_artifact_sha256") and any(
+            r.get("fixed_artifact_sha256") != study["fixed_artifact_sha256"] for r in reports):
+        raise ValueError("Reports do not belong to this fixed-artifact campaign")
     args.output.mkdir(parents=True, exist_ok=False)
     summaries = summarize(reports)
     for row in summaries:
@@ -83,6 +94,9 @@ def main():
               "source_status": r["source_region"]["status"], "final_status": r["final_status"],
               "byte_crop_property_verified": r["byte_crop_property_verified"],
               "android_transfer_verified": r["android_transfer_verified"],
+              "verification_mode": r.get("verification_mode", "region_synthesis"),
+              "generated_source_sha256": r.get("generated_source_sha256"),
+              "fixed_artifact_source_sha256": r.get("fixed_artifact_source_sha256"),
               "runtime_seconds": r["total_runtime_seconds"]} for r in reports])
     write_new_json(args.output / "ledger.json", {"study_sha256": sha256(args.study),
                    "configured_runs": len(expected), "completed_runs": len(seen),

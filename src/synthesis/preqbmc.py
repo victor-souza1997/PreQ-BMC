@@ -932,42 +932,30 @@ class GPEncoding:
             )
         return result.status == "VERIFIED"
 
-    def run(self, lb: np.ndarray, ub: np.ndarray) -> SynthesisResult:
+    def run(
+        self, lb: np.ndarray, ub: np.ndarray, *,
+        fixed_qif: list[LayerQuantizationSpec] | None = None,
+    ) -> SynthesisResult:
+        """Synthesize formats, or check one supplied artifact without format search.
+
+        Fixed checking still constructs region-specific preimages. It may refine
+        proof obligations, but must not widen clamps or change the program.
+        """
+        if fixed_qif is not None:
+            if self.verify_mode != "esbmc" or self.harness_scope != "layer":
+                raise ValueError("Fixed-QIF checking requires ESBMC layer contracts")
+            if self.e2e_fallback:
+                raise ValueError("Disable E2E fallback for fixed-QIF layer checking")
+            if len(fixed_qif) != len(self.dense_layers) + 1:
+                raise ValueError("Expected one fixed Q/I/F per non-input layer")
+            for spec in fixed_qif:
+                if (not isinstance(spec, LayerQuantizationSpec)
+                        or any(type(v) is not int for v in
+                               (spec.total_bits, spec.integer_bits, spec.fractional_bits))
+                        or spec.total_bits > 62):
+                    raise ValueError("Fixed Q/I/F must use integer fields and Q <= 62")
         source_check_start = time.monotonic()
-        self.assert_input_box(lb, ub)
-        self.symbolic_propagate()
-
-        out_bounds_lb = self.output_layer.lb
-        other_max = -1000.0
-        for index, value in enumerate(self.output_layer.ub):
-            if index == self.targetCls:
-                continue
-            other_max = max(other_max, value)
-
-        target_lower = float(out_bounds_lb[self.targetCls])
-        certified_margin_lower = float(target_lower - other_max)
-        source_verified = target_lower >= other_max
-        self.source_region_record = {
-            "method": "deeppoly",
-            "status": "VERIFIED" if source_verified else "INCONCLUSIVE",
-            "eligible_for_transfer": bool(source_verified),
-            "quantized_pipeline_started": bool(source_verified),
-            "esbmc_attempted": False,
-            "target_class": int(self.targetCls),
-            "input_epsilon": float(self.eps),
-            "target_lower_bound": target_lower,
-            "maximum_competitor_upper_bound": float(other_max),
-            "certified_margin_lower_bound": certified_margin_lower,
-            "elapsed_seconds": float(time.monotonic() - source_check_start),
-            "interpretation": (
-                "The original floating-point robustness property is certified over the input region."
-                if source_verified
-                else "DeepPoly did not establish the original floating-point robustness property; this is not a counterexample."
-            ),
-        }
-        self._stats["source_property_time"] = float(
-            self.source_region_record["elapsed_seconds"]
-        )
+        source_verified = self.check_source_region(lb, ub)
         if not source_verified:
             self.synthesis_final_status = "SOURCE_PROPERTY_INCONCLUSIVE"
             self._stats["total_time"] = float(time.monotonic() - source_check_start)
@@ -1029,10 +1017,22 @@ class GPEncoding:
                 )
             if self.config.save_preimage_cache:
                 self.save_cached_preimage()
-        self._widen_internal_integer_bits_for_fixed_point_contracts()
+        if fixed_qif is None:
+            self._widen_internal_integer_bits_for_fixed_point_contracts()
         backward_end_time = time.time()
 
-        if self.verify_mode == "esbmc" and self.harness_scope == "network":
+        if fixed_qif is not None:
+            total_bits = [s.total_bits for s in fixed_qif]
+            fractional_bits = [s.fractional_bits for s in fixed_qif]
+            integer_bits = [s.integer_bits for s in fixed_qif]
+            if_success, self.fixed_qif_records = self.verify_exported_quantization_with_esbmc(
+                total_bits, fractional_bits, integer_bits,
+            )
+            self.synthesis_final_status = "VERIFIED" if if_success else str(
+                self.fixed_qif_records[-1].get("final_status", "UNKNOWN")
+                if self.fixed_qif_records else "UNKNOWN"
+            )
+        elif self.verify_mode == "esbmc" and self.harness_scope == "network":
             total_bits, fractional_bits, integer_bits = (
                 self._network_lower_bound_configuration()
             )
@@ -1069,6 +1069,45 @@ class GPEncoding:
             stats={key: float(value) for key, value in self._stats.items()},
             final_status="VERIFIED" if if_success else self.synthesis_final_status,
         )
+
+    def check_source_region(self, lb: np.ndarray, ub: np.ndarray) -> bool:
+        """Populate float symbolic bounds and the source prerequisite without quantization."""
+        source_check_start = time.monotonic()
+        self.assert_input_box(lb, ub)
+        self.symbolic_propagate()
+
+        out_bounds_lb = self.output_layer.lb
+        other_max = -1000.0
+        for index, value in enumerate(self.output_layer.ub):
+            if index == self.targetCls:
+                continue
+            other_max = max(other_max, value)
+
+        target_lower = float(out_bounds_lb[self.targetCls])
+        certified_margin_lower = float(target_lower - other_max)
+        source_verified = target_lower >= other_max
+        self.source_region_record = {
+            "method": "deeppoly",
+            "status": "VERIFIED" if source_verified else "INCONCLUSIVE",
+            "eligible_for_transfer": bool(source_verified),
+            "quantized_pipeline_started": bool(source_verified),
+            "esbmc_attempted": False,
+            "target_class": int(self.targetCls),
+            "input_epsilon": float(self.eps),
+            "target_lower_bound": target_lower,
+            "maximum_competitor_upper_bound": float(other_max),
+            "certified_margin_lower_bound": certified_margin_lower,
+            "elapsed_seconds": float(time.monotonic() - source_check_start),
+            "interpretation": (
+                "The original floating-point robustness property is certified over the input region."
+                if source_verified
+                else "DeepPoly did not establish the original floating-point robustness property; this is not a counterexample."
+            ),
+        }
+        self._stats["source_property_time"] = float(
+            self.source_region_record["elapsed_seconds"]
+        )
+        return bool(source_verified)
 
     def assert_input_box(self, x_lb: np.ndarray, x_ub: np.ndarray) -> None:
         low = np.array(x_lb, dtype=np.float32) * np.ones(self.input_layer.layer_size, dtype=np.float32)
@@ -1905,6 +1944,10 @@ class GPEncoding:
                 )
                 return False, records
 
+            # Input encoding and exact-prefix cut validation read these fields,
+            # not the explicit arguments below. Bind them to the checked artifact.
+            cur_layer.int_bit = i_bits + 1
+            cur_layer.frac_bit = f_bits
             qu_w_int = quantize_int(cur_layer.layer_paras[0], q_bits, f_bits)
             qu_b_int = quantize_int(cur_layer.layer_paras[1], q_bits, f_bits)
             is_output_layer = cur_layer.layer_index == len(self.dense_layers) + 1
@@ -1973,7 +2016,9 @@ class GPEncoding:
                     elif contract_result.status == "PREIMAGE_UNAVAILABLE":
                         record["failure_type"] = "property_preimage_unavailable"
                 record["final_status"] = (
-                    "FAILED"
+                    contract_result.status
+                    if contract_result.status in {"TIMEOUT", "MEMOUT"}
+                    else "FAILED"
                     if margin_record is None and contract_result.status == "FAILED"
                     else "MARGIN_INCONCLUSIVE"
                     if margin_record is not None and margin_record.get("status") != "MARGIN_REFUTED"
@@ -2507,6 +2552,15 @@ class GPEncoding:
         contributes ``0.5 * |A_j| / S_in`` output ULPs. Summing and taking the
         ceiling gives ``delta_weights``.
 
+        The sum runs over the neuron's weight support. A stored real weight of
+        exactly zero quantizes to exactly zero at every scale, so it carries no
+        rounding deviation and is excluded. The test must use the real weight:
+        ``W_int == 0`` also occurs when a small nonzero real weight rounds to
+        zero, and that case does carry the full ``0.5 / S_out``. Callers that
+        do not supply the real weights fall back to summing over every input.
+        Dense layers are unaffected; this only tightens structurally sparse
+        layers such as a lowered convolution.
+
         An inherited input error ``delta_in_j`` is measured in input ULPs.
         Its contribution is
         ``S_out * |W_real_ij| * delta_in_j / S_in`` output ULPs. Using
@@ -2543,22 +2597,30 @@ class GPEncoding:
             dtype=object,
         )
         max_abs_sum = sum(int(value) for value in max_abs_input)
-        delta_weights_scalar = (max_abs_sum + (2 * scale_in) - 1) // (2 * scale_in)
+        delta_weights_dense = (max_abs_sum + (2 * scale_in) - 1) // (2 * scale_in)
 
         real_weights: np.ndarray | None = None
         layer_parameters = getattr(cur_layer, "layer_paras", None)
-        if (
-            frac_out is not None
-            and layer_parameters is not None
-            and len(layer_parameters) >= 1
-        ):
+        if layer_parameters is not None and len(layer_parameters) >= 1:
             candidate = np.asarray(layer_parameters[0])
             if candidate.shape == weights.shape:
                 real_weights = candidate
 
+        delta_weights_values: list[int] = []
         delta_input_values: list[int] = []
         for neuron, row in enumerate(weights):
-            if real_weights is not None:
+            if real_weights is None:
+                delta_weights_values.append(int(delta_weights_dense))
+            else:
+                support_sum = sum(
+                    int(magnitude)
+                    for weight, magnitude in zip(real_weights[neuron], max_abs_input)
+                    if float(weight) != 0.0
+                )
+                delta_weights_values.append(
+                    int((support_sum + (2 * scale_in) - 1) // (2 * scale_in))
+                )
+            if real_weights is not None and frac_out is not None:
                 output_scale = 1 << int(frac_out)
                 amplified = sum(
                     abs(Fraction.from_float(float(weight)))
@@ -2580,15 +2642,15 @@ class GPEncoding:
 
         max_int64 = int(np.iinfo(np.int64).max)
         budget_values = [
-            int(delta_weights_scalar + 1 + delta_input)
-            for delta_input in delta_input_values
+            int(delta_weights + 1 + delta_input)
+            for delta_weights, delta_input in zip(
+                delta_weights_values, delta_input_values
+            )
         ]
         if any(value > max_int64 for value in budget_values):
             raise OverflowError("Derived error budget exceeds int64 reporting range.")
         return {
-            "dw": np.full(
-                weights.shape[0], int(delta_weights_scalar), dtype=np.int64
-            ),
+            "dw": np.asarray(delta_weights_values, dtype=np.int64),
             "dr": np.ones(weights.shape[0], dtype=np.int64),
             "dp": np.asarray(delta_input_values, dtype=np.int64),
             "total": np.asarray(budget_values, dtype=np.int64),

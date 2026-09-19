@@ -1,0 +1,48 @@
+{
+  "schema": "ssv_restricted_cnn_v1",
+  "runner": "preqbmc gtsrb prepare",
+  "status": "PREPARATION_REQUIRED",
+  "dataset": "gtsrb_official",
+  "dataset_root": "data/gtsrb",
+  "dataset_source_url": "https://benchmark.ini.rub.de/gtsrb_dataset.html",
+  "dataset_terms": "REVIEW_REQUIRED: record the terms distributed with the official archives",
+  "output_root": "output/sign_experiments",
+  "preprocessing": {
+    "input_domain": "uint8_RGB_cropped_sign",
+    "shape": [8, 8, 3],
+    "resize": "nearest_floor_top_left",
+    "normalization_divisor": 256,
+    "tie_break": "lowest_class_index"
+  },
+  "model": {
+    "type": "Conv2D_ReLU_Flatten_Dense",
+    "filters": 2,
+    "kernel_size": [3, 3],
+    "strides": [2, 2],
+    "padding": "VALID",
+    "classes": 43,
+    "max_affine_entries": 1000000
+  },
+  "training": {"seed": 2026, "epochs": 20, "batch_size": 64, "validation_fraction": 0.2},
+  "selection": {"type": "clean_margin_tertiles", "per_stratum": 3, "freeze_before_verification": true},
+  "epsilon_raw_bytes": [1, 2, 4],
+  "block_sizes": [0, 1, 2],
+  "margin_cuts": [false, true],
+  "verification": {
+    "solver": "cbc", "profile": "paper-z3", "timeout_seconds": 300,
+    "memlimit": "6g", "esbmc_jobs": 1,
+    "bit_lb": 8, "bit_ub": 8,
+    "preimg_mode": "milp", "harness_scope": "layer",
+    "error_budget_mode": "derived", "enforce_contract_chaining": true,
+    "tighten_verified_bounds": true, "unsound_contract_tolerance": false,
+    "e2e_fallback": false, "cegar_max_rounds": 3,
+    "blockwise_run_all_blocks_on_failure": true
+  },
+  "android": {
+    "abi": "arm64-v8a", "api": 26, "device": null, "meter": null,
+    "warmup_inferences": 1000, "trials": 10,
+    "initial_batch_inferences": 100000, "minimum_batch_seconds": 10,
+    "minimum_meter_samples_per_batch": 100,
+    "paired_idle_baseline": true, "power_status": "NOT_MEASURED"
+  }
+}

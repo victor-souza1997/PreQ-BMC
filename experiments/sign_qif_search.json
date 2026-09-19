@@ -1,0 +1,29 @@
+{
+  "schema": "ssv_qif_search_v1",
+  "purpose": "Synthesize one shared layer format over source-eligible calibration regions before independent evaluation",
+  "calibration_study": "output/plate_experiments/study.json",
+  "evaluation_study": "output/sign_second_cohort_review/study.json",
+  "search": {
+    "fractional_bits_min": 8,
+    "fractional_bits_max": 12,
+    "integer_bit_padding": [0, 1],
+    "max_candidates": 100,
+    "objective": "min_affine_parameter_bits"
+  },
+  "verification": {
+    "solver": "cbc",
+    "profile": "paper-z3",
+    "timeout_seconds": 300,
+    "memlimit": "6g",
+    "esbmc_jobs": 1,
+    "preimg_mode": "milp",
+    "harness_scope": "layer",
+    "error_budget_mode": "derived",
+    "enforce_contract_chaining": true,
+    "tighten_verified_bounds": true,
+    "unsound_contract_tolerance": false,
+    "e2e_fallback": false,
+    "cegar_max_rounds": 3,
+    "blockwise_run_all_blocks_on_failure": false
+  }
+}
