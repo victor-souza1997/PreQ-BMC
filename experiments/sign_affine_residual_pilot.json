@@ -1,0 +1,14 @@
+{
+  "schema": "ssv_output_refinement_study_v1",
+  "purpose": "Exploratory matched repair of image6 epsilon4; both variants verify the same frozen integer C artifact",
+  "base_study": "output/sign_milp_source_h12_pilot_20260920/study.json",
+  "run_ids": ["image6_eps4_beta1_cuts0"],
+  "variants": ["box", "affine_residual"],
+  "verification": {
+    "source_verification": "milp_exact",
+    "source_milp_timeout_seconds": 30,
+    "timeout_seconds": 300,
+    "memlimit": "6g",
+    "profile": "paper-z3"
+  }
+}

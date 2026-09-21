@@ -512,6 +512,11 @@ def cmd_gtsrb_audit_source(args: argparse.Namespace, extra: list[str]) -> int:
     return _run_gtsrb_module("scripts.audit_ssv_source_gate", arguments, extra)
 
 
+def cmd_gtsrb_prepare_refinement(args: argparse.Namespace, extra: list[str]) -> int:
+    return _run_gtsrb_module("scripts.prepare_ssv_refinement",
+                            ["--config", str(args.config), "--output", str(args.output)], extra)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="preqbmc", description="Public PreQ-BMC artifact CLI.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -686,6 +691,10 @@ def build_parser() -> argparse.ArgumentParser:
     gtsrb_audit_source.add_argument("--prior-calibration", type=Path)
     gtsrb_audit_source.add_argument("--prior-evaluation", type=Path)
     gtsrb_audit_source.set_defaults(func=cmd_gtsrb_audit_source)
+    gtsrb_refinement = gtsrb_commands.add_parser("prepare-refinement", help="Prepare matched variants of a frozen QIF study.")
+    gtsrb_refinement.add_argument("--config", type=Path, default=Path("experiments/sign_affine_residual_pilot.json"))
+    gtsrb_refinement.add_argument("--output", type=Path, required=True)
+    gtsrb_refinement.set_defaults(func=cmd_gtsrb_prepare_refinement)
 
     verify = subparsers.add_parser("verify-environment", help="Report solver and Python package availability.")
     verify.add_argument(

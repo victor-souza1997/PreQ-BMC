@@ -101,6 +101,7 @@ class RobustnessPipelineConfig:
     harness_scope: str = "layer"
     e2e_invariants: bool = True
     margin_cuts: bool | None = None
+    output_refinement: str = "none"
     e2e_fallback: bool | None = None
     cegar_max_rounds: int = 3
     export_paper_tables: bool = True
@@ -1174,6 +1175,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         harness_scope=str(config.harness_scope),
         e2e_invariants=bool(config.e2e_invariants),
         margin_cuts=config.margin_cuts,
+        output_refinement=config.output_refinement,
         e2e_fallback=config.e2e_fallback,
         cegar_max_rounds=max(0, int(config.cegar_max_rounds)),
         esbmc=ESBMCConfig(
@@ -1217,6 +1219,7 @@ def run_robustness_pipeline(repo_root: Path, config: RobustnessPipelineConfig) -
         "verified_bound_tightening": synthesizer.verified_bound_tightening_summary(),
         "output_margin_check": synthesizer.output_margin_summary(),
         "margin_cuts": synthesizer.margin_cut_summary(),
+        "affine_residual": synthesizer.affine_residual_summary(),
         "cegar": synthesizer.cegar_summary(),
         "preimage_provenance": synthesizer.preimage_provenance_summary(),
         "vacuity_check": synthesizer.vacuity_summary(),

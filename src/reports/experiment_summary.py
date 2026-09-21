@@ -834,6 +834,7 @@ def build_experiment_summary(
         "source_region": pipeline_summary.get("source_region", {}),
         "output_margin_check": pipeline_summary.get("output_margin_check", {}),
         "margin_cuts": pipeline_summary.get("margin_cuts", {}),
+        "affine_residual": pipeline_summary.get("affine_residual", {}),
         "preimage_provenance": pipeline_summary.get("preimage_provenance", {}),
         "composition_path": pipeline_summary.get("composition_path", "layer_contracts"),
         "vacuity_check": pipeline_summary.get("vacuity_check", {}),

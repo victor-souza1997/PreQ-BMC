@@ -18,9 +18,10 @@ def summarize(reports):
         if mode == "fixed_qif_check" and (not identity or (
                 r["byte_crop_property_verified"] and r.get("generated_source_sha256") != identity)):
             raise ValueError("Fixed-artifact certificate has missing or inconsistent C identity")
-        groups[(r["epsilon"], r["block_size"], r["margin_cuts"], mode, identity)].append(r)
+        groups[(r["epsilon"], r["block_size"], r["margin_cuts"], mode, identity,
+                r.get("output_refinement", "none"))].append(r)
     rows = []
-    for (eps, beta, cuts, mode, artifact), group in sorted(groups.items()):
+    for (eps, beta, cuts, mode, artifact, refinement), group in sorted(groups.items()):
         identities = [r["sample"]["id"] for r in group]
         if len(set(identities)) != len(identities):
             raise ValueError("Duplicate region/variant: repetitions need a separate timing analysis")
@@ -30,6 +31,7 @@ def summarize(reports):
         runtime = np.array([r["total_runtime_seconds"] for r in group])
         memory = [c["peak_memory_bytes"] for c in calls if c.get("peak_memory_bytes") is not None]
         rows.append({"epsilon_raw_bytes": eps, "beta": beta, "margin_cuts": cuts,
+                     "output_refinement": refinement,
                      "verification_mode": mode, "fixed_artifact_source_sha256": artifact or None,
                      "certified_artifact_count": len({r.get("generated_source_sha256") for r in group
                                                        if r["byte_crop_property_verified"] and r.get("generated_source_sha256")}),
@@ -46,6 +48,8 @@ def summarize(reports):
                      "timeout_regions": sum(r["final_status"] == "TIMEOUT" for r in group),
                      "memout_regions": sum(r["final_status"] == "MEMOUT" for r in group),
                      "total_calls_including_diagnostics": len(calls),
+                     "affine_residual_proof_calls": sum(c.get("property_type", "").startswith("affine_residual_") for c in calls),
+                     "comparisons_recovered_by_affine_residual": sum(r.get("affine_residual", {}).get("verified_comparisons", 0) for r in group),
                      "query_timeout_count_including_diagnostics": sum(c["status"] == "TIMEOUT" for c in calls),
                      "query_memout_count_including_diagnostics": sum(c["status"] == "MEMOUT" for c in calls),
                      "runtime_median_s": float(np.median(runtime)),
@@ -86,13 +90,16 @@ def main():
     summaries = summarize(reports)
     for row in summaries:
         configured = sum(r["epsilon"] == row["epsilon_raw_bytes"] and r["block_size"] == row["beta"]
-                         and r["margin_cuts"] == row["margin_cuts"] for r in study["runs"])
+                         and r["margin_cuts"] == row["margin_cuts"]
+                         and r.get("output_refinement", "none") == row["output_refinement"] for r in study["runs"])
         row["n_regions_configured"] = configured
         row["n_regions_without_final_report"] = configured - row["n_regions_completed"]
         row["certified_fraction_configured_regions"] = row["byte_crop_certified_count"] / configured
     write_csv(args.output / "region_certification_summary.csv", summaries)
     write_csv(args.output / "all_regions.csv", [{"run_id": r["run_id"], "sample_id": r["sample"]["id"],
               "epsilon": r["epsilon"], "beta": r["block_size"], "margin_cuts": r["margin_cuts"],
+              "output_refinement": r.get("output_refinement", "none"),
+              "refined_comparisons_verified": r.get("affine_residual", {}).get("verified_comparisons", 0),
               "source_status": r["source_region"]["status"],
               "source_method": r["source_region"].get("method"),
               "deeppoly_certified_margin_lower_bound": r["source_region"].get(

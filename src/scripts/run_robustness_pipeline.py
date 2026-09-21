@@ -241,6 +241,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable exact interval invariants for the end-to-end ablation.",
     )
     parser.set_defaults(e2e_invariants=True)
+    parser.add_argument("--output-refinement", choices=["none", "affine_residual"], default="none",
+                        help="Attempt compositional integer residual proofs after an output comparison fails.")
     parser.add_argument(
         "--margin-cuts",
         choices=["off", "on"],
@@ -446,6 +448,7 @@ def main(argv: list[str] | None = None) -> None:
         harness_scope=str(args.harness_scope),
         e2e_invariants=bool(args.e2e_invariants),
         margin_cuts=(None if args.margin_cuts is None else args.margin_cuts == "on"),
+        output_refinement=args.output_refinement,
         e2e_fallback=(None if args.e2e_fallback is None else args.e2e_fallback == "on"),
         cegar_max_rounds=max(0, int(args.cegar_max_rounds)),
         export_paper_tables=args.export_paper_tables,

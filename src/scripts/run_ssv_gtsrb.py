@@ -61,7 +61,8 @@ def build_region_context(study, run, output):
         margin_cuts=run["margin_cuts"], e2e_fallback=False, cegar_max_rounds=run["cegar_max_rounds"],
         blockwise_run_all_blocks_on_failure=run["blockwise_run_all_blocks_on_failure"],
         source_verification=run.get("source_verification", "deeppoly"),
-        source_milp_timeout_seconds=float(run.get("source_milp_timeout_seconds", 30.0)))
+        source_milp_timeout_seconds=float(run.get("source_milp_timeout_seconds", 30.0)),
+        output_refinement=run.get("output_refinement", "none"))
     synth = GPEncoding([len(center), int(np.prod(geom.output_shape)), 43], model, cfg, target, low, high)
     forward_dnn(center, synth)
     return RegionContext(synth, cnn, geom, image, low, high)
@@ -119,6 +120,9 @@ def run_region(study, run, output, *, fixed_artifact=None):
               "model_sha256": study["model_sha256"], "preimage": synth.preimage_provenance_summary(),
               "chaining": chaining, "vacuity": synth.vacuity_summary(),
               "cegar": synth.cegar_summary(), "calls": synth.esbmc_call_records,
+              "output_refinement": run.get("output_refinement", "none"),
+              "affine_residual": synth.affine_residual_summary(),
+              "composition_path": synth.composition_path,
               "total_runtime_seconds": time.monotonic() - start}
     write_new_json(output / "region_summary.json", report)
     return report

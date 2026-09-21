@@ -47,6 +47,12 @@ from verification.c_templates import (
     render_prefix_direction_cut_validation_program,
 )
 from verification.esbmc import ESBMCConfig, ESBMCRunner, ESBMCResult
+from verification.affine_residual import (
+    ResidualCertificateUnsupported,
+    build_certificate as build_affine_residual_certificate,
+    render_certificate as render_affine_residual_certificate,
+    render_kernel_lemma,
+)
 from verification.invariants import (
     FixedPointArithmeticRangeError,
     exact_layer_interval,
@@ -102,6 +108,7 @@ class QuadapterConfig:
     cegar_max_rounds: int = 3
     source_verification: str = "deeppoly"
     source_milp_timeout_seconds: float = 30.0
+    output_refinement: str = "none"
 
     @classmethod
     def from_namespace(cls, args: Any) -> "QuadapterConfig":
@@ -161,6 +168,7 @@ class QuadapterConfig:
             cegar_max_rounds=max(0, int(getattr(args, "cegar_max_rounds", 3))),
             source_verification=str(getattr(args, "source_verification", "deeppoly")),
             source_milp_timeout_seconds=float(getattr(args, "source_milp_timeout_seconds", 30.0)),
+            output_refinement=str(getattr(args, "output_refinement", "none")),
         )
 
 
@@ -319,6 +327,8 @@ class GPEncoding:
         self.config = config if isinstance(config, QuadapterConfig) else QuadapterConfig.from_namespace(config)
         if self.config.source_verification not in {"deeppoly", "milp_exact"}:
             raise ValueError("source_verification must be deeppoly or milp_exact")
+        if self.config.output_refinement not in {"none", "affine_residual"}:
+            raise ValueError("output_refinement must be none or affine_residual")
         if not math.isfinite(self.config.source_milp_timeout_seconds) or self.config.source_milp_timeout_seconds <= 0:
             raise ValueError("source_milp_timeout_seconds must be finite and positive")
         self.tole = 1e-6
@@ -400,6 +410,7 @@ class GPEncoding:
         self.chaining_records: list[dict[str, Any]] = []
         self.arithmetic_safety_records: list[dict[str, Any]] = []
         self.output_margin_records: list[dict[str, Any]] = []
+        self.affine_residual_records: list[dict[str, Any]] = []
         self.vacuity_records: list[dict[str, Any]] = []
         self.source_region_record: dict[str, Any] = {
             "method": self.config.source_verification,
@@ -4000,11 +4011,12 @@ class GPEncoding:
             else None
         )
         if result.status == "VERIFIED":
+            refined = (result.resource_control or {}).get("affine_residual_comparisons", [])
             record["margin_ok"] = True
-            record["output_margin"] = "exact_harness_pass"
+            record["output_margin"] = "affine_residual_composition_pass" if refined else "exact_harness_pass"
             record["status"] = "VERIFIED"
-            record["composition_path"] = "layer_exact_output"
-            self.composition_path = "layer_exact_output"
+            record["composition_path"] = "layer_affine_residual" if refined else "layer_exact_output"
+            self.composition_path = record["composition_path"]
             return
 
         record["margin_ok"] = False
@@ -4562,7 +4574,7 @@ class GPEncoding:
             and bool(self.output_margin_records)
         )
         if is_output_target_layer:
-            margin_cuts = self._margin_cut_bounds(
+            margin_cuts = [] if getattr(self.config, "output_refinement", "none") == "affine_residual" else self._margin_cut_bounds(
                 cur_layer,
                 in_layer,
                 frac_bit,
@@ -4821,6 +4833,26 @@ class GPEncoding:
             )
             records.append(record)
             self.esbmc_call_records.append(record)
+            if result.status != "VERIFIED" and getattr(self.config, "output_refinement", "none") == "affine_residual":
+                refined = self._verify_affine_residual_margin(
+                    qu_w_int=qu_w_int, qu_b_int=qu_b_int, all_bit=all_bit,
+                    frac_bit=frac_bit, layer_index=layer_index, competitor=competitor,
+                )
+                if refined is not None:
+                    elapsed_total += float(refined.elapsed_seconds)
+                    record["refinement_status"] = refined.status
+                    record["resolved_by_affine_residual"] = refined.status == "VERIFIED"
+                    # Keep the original ESBMC failure in the call ledger. The
+                    # conjunction uses the independently checked replacement proof.
+                    records[-1] = dict(
+                        layer_index=layer_index, competitor_class=int(competitor),
+                        status=refined.status, initial_status=result.status,
+                        original_harness=str(harness), mode="affine_residual_composition",
+                        certificate=self.affine_residual_records[-1]["certificate"],
+                        proofs=self.affine_residual_records[-1]["proofs"],
+                        elapsed_seconds=float(result.elapsed_seconds+refined.elapsed_seconds),
+                        shared_layer_qif=True)
+                    result = refined
             terminal_result = result
             LOGGER.info(
                 "ESBMC output competitor layer=%s class=%s bits(Q=%s,F=%s) status=%s",
@@ -4852,6 +4884,7 @@ class GPEncoding:
             "analytically_verified_competitors": analytically_verified,
             "formally_checked_competitors": sorted(checked),
             "skipped_competitors_due_to_fail_fast": skipped,
+            "affine_residual_comparisons": [r for r in records if r.get("mode") == "affine_residual_composition"],
         }
         return replace(
             terminal_result,
@@ -4862,6 +4895,97 @@ class GPEncoding:
             resource_control=resource_control,
             blocks=tuple(records),
         )
+
+    def _verify_affine_residual_margin(
+        self, *, qu_w_int, qu_b_int, all_bit, frac_bit, layer_index, competitor,
+    ) -> ESBMCResult | None:
+        """Discharge one failed output comparison using checked scalar lemmas."""
+        record: dict[str, Any] = dict(
+            competitor_class=int(competitor), target_class=int(self.targetCls),
+            status="NOT_APPLICABLE", proofs=[], policy="shared_layer_qif",
+            trigger="output_comparison_not_verified", Q=int(all_bit), F=int(frac_bit))
+        self.affine_residual_records.append(record)
+        if len(self.dense_layers) != 1 or self.property_spec.valid_labels:
+            record["reason"] = "requires_one_hidden_affine_relu_layer_and_single_target"
+            return None
+        hidden = self.dense_layers[0]
+        low, high, _, formats = self._deployed_prefix_cut_payload(1)
+        hidden_q, hidden_f = formats[0]
+        target = int(self.property_spec.target_label if self.property_spec.target_label is not None else self.targetCls)
+        record["target_class"] = target
+        try:
+            certificate = build_affine_residual_certificate(
+                input_low=low, input_high=high,
+                hidden_weights=quantize_int(hidden.layer_paras[0], hidden_q, hidden_f),
+                hidden_biases=quantize_int(hidden.layer_paras[1], hidden_q, hidden_f),
+                hidden_bits=hidden_q, input_fractional_bits=hidden_f,
+                hidden_fractional_bits=hidden_f, output_weights=qu_w_int,
+                output_biases=qu_b_int, output_bits=all_bit,
+                target=target, competitor=int(competitor))
+        except (ResidualCertificateUnsupported, FixedPointArithmeticRangeError) as exc:
+            record["reason"] = str(exc)
+            return None
+        directory = self.output_dir / "layers" / "affine_residual" / certificate["sha256"][:16]
+        directory.mkdir(parents=True, exist_ok=True)
+        certificate_path = directory / "certificate.json"
+        certificate_path.write_text(json.dumps(certificate, indent=2), encoding="utf-8")
+        record.update(certificate=str(certificate_path), certificate_sha256=certificate["sha256"],
+                      upper_numerator=certificate["upper_numerator"], denominator=certificate["denominator"],
+                      integer_difference_upper=certificate["integer_difference_upper"],
+                      status="BOUND_INCONCLUSIVE", required_kernel_lemmas=len(certificate["hidden_lemmas"])+2)
+        if not certificate["sufficient"]:
+            return None
+        cache = getattr(self, "_affine_residual_lemma_cache", None)
+        if cache is None:
+            cache = self._affine_residual_lemma_cache = {}
+        total_time = 0.0
+        sources = [(f"hidden_{i}", render_kernel_lemma(r), "affine_residual_kernel_lemma")
+                   for i, r in enumerate(certificate["hidden_lemmas"])]
+        sources += [(f"output_{j}", render_kernel_lemma(r), "affine_residual_kernel_lemma")
+                    for j, r in zip((target, competitor), certificate["output_lemmas"])]
+        sources.append(("composition", render_affine_residual_certificate(certificate), "affine_residual_composition"))
+        last_result = None
+        for name, source, kind in sources:
+            key = hashlib.sha256(source.encode()).hexdigest()
+            cached = cache.get(key) if kind == "affine_residual_kernel_lemma" else None
+            if cached is not None:
+                result, harness = cached
+                record["proofs"].append(dict(name=name, status=result.status, harness=str(harness), cache_hit=True))
+            else:
+                harness = directory / f"{name}.c"
+                harness.write_text(source, encoding="utf-8")
+                result = self._run_esbmc_file(harness, extract_counterexample=False)
+                total_time += result.elapsed_seconds
+                self._stats["esbmc_calls"] += 1.0
+                call = self._esbmc_call_record(
+                    result=result, layer_index=layer_index, block_index=None,
+                    start_neuron=None, end_neuron=None, all_bit=all_bit, frac_bit=frac_bit,
+                    harness=harness, property_type=kind, mode="affine_residual_composition",
+                    input_dim=1 if kind.endswith("kernel_lemma") else 3,
+                    output_neurons=1)
+                call.update(competitor_class=int(competitor), target_class=target,
+                            certificate_sha256=certificate["sha256"], shared_layer_qif=True,
+                            proof_role=name, original_input_dim=int(low.size),
+                            hidden_prefix_neurons=int(hidden.layer_size))
+                self.esbmc_call_records.append(call)
+                record["proofs"].append(dict(name=name, status=result.status, harness=str(harness), cache_hit=False))
+                if kind == "affine_residual_kernel_lemma":
+                    cache[key] = result, harness
+            last_result = result
+            if result.status != "VERIFIED":
+                break
+        assert last_result is not None
+        complete = len(record["proofs"]) == len(sources) and all(p["status"] == "VERIFIED" for p in record["proofs"])
+        record.update(status="VERIFIED" if complete else last_result.status,
+                      all_prerequisites_verified=complete, elapsed_seconds=total_time,
+                      proof_semantics="integer_affine_identity_and_esbmc_kernel_residual_lemmas")
+        return replace(last_result, status=record["status"], elapsed_seconds=total_time)
+
+    def affine_residual_summary(self) -> dict[str, Any]:
+        records = getattr(self, "affine_residual_records", [])
+        return {"enabled": getattr(self.config, "output_refinement", "none") == "affine_residual",
+                "strategy": "on_failure_affine_residual", "checks": records,
+                "verified_comparisons": sum(r["status"] == "VERIFIED" for r in records)}
 
     def verify_hidden_layer_blocks_with_esbmc(
         self,
@@ -5976,6 +6100,11 @@ class GPEncoding:
                     recovery["step_a_residual_recovery_int"] = 1 - worst
             if solver_status == "VERIFIED" and worst is not None:
                 recovery["combined_recovery_lower_bound_int"] = 1 - worst
+            refined = (latest.get("resource_control") or {}).get("affine_residual_comparisons", [])
+            if refined:
+                recovery["step_a_alone_status"] = refined[0]["initial_status"]
+                recovery["step_a_residual_recovery_int"] = None
+                recovery["affine_residual_status"] = solver_status
             fallback = latest.get("e2e_fallback") or {}
             if fallback:
                 recovery["e2e_fallback_status"] = fallback.get("status", "UNKNOWN")

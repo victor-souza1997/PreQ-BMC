@@ -483,6 +483,7 @@ def _runtime_metadata(args: argparse.Namespace, run: dict[str, Any], command: li
         "harness_scope": str(run.get("harness_scope", "layer")),
         "e2e_invariants": bool(run.get("e2e_invariants", True)),
         "margin_cuts": str(run.get("margin_cuts", "on" if str(run.get("error_budget_mode", "heuristic")) == "derived" else "off")),
+        "output_refinement": str(run.get("output_refinement", "none")),
         "e2e_fallback": str(run.get("e2e_fallback", "on" if str(run.get("error_budget_mode", "heuristic")) == "derived" else "off")),
         "cegar_max_rounds": int(run.get("cegar_max_rounds", 3)),
         "enforce_contract_chaining": bool(run.get("enforce_contract_chaining", True)),
@@ -683,6 +684,7 @@ def _build_pipeline_command(
             )
         ),
     )
+    _add_flag(command, supported_flags, "--output-refinement", str(run.get("output_refinement", "none")))
     _add_flag(
         command,
         supported_flags,

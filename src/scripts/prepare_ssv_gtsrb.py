@@ -43,6 +43,8 @@ def validate_config(config):
         raise ValueError("Study requires derived preimages, strict chaining and input F >= 8")
     if v.get("source_verification", "deeppoly") not in {"deeppoly", "milp_exact"}:
         raise ValueError("source_verification must be deeppoly or milp_exact")
+    if v.get("output_refinement", "none") not in {"none", "affine_residual"}:
+        raise ValueError("output_refinement must be none or affine_residual")
     source_limit = v.get("source_milp_timeout_seconds", 30)
     if type(source_limit) not in {int, float} or not np.isfinite(source_limit) or source_limit <= 0:
         raise ValueError("source_milp_timeout_seconds must be finite and positive")
