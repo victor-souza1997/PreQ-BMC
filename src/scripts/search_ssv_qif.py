@@ -157,7 +157,10 @@ def prepare(config_path, config, output, identity):
                 "evaluation_base_sha256": sha256(output / "evaluation_base.json")}
     write_new_json(output / "search_manifest.json", manifest)
     write_csv(output / "source_regions.csv", [{"run_id": s["run_id"], "sample_id": s["sample"]["id"],
-              "epsilon": s["epsilon"], "source_status": s["source_region"]["status"],
+              "epsilon": s["epsilon"], "source_method": s["source_region"].get("method"),
+              "source_status": s["source_region"]["status"],
+              "deeppoly_certified_margin_lower_bound": s["source_region"].get(
+                  "deeppoly_certified_margin_lower_bound", s["source_region"].get("certified_margin_lower_bound")),
               "certified_margin_lower_bound": s["source_region"]["certified_margin_lower_bound"],
               "preimage_status": s["preimage"]["status"] if s["preimage"] else "SKIPPED"} for s in sources])
     return manifest
@@ -260,7 +263,10 @@ def execute(manifest, output):
               "selected": selected, "candidate_outcomes": outcomes,
               "candidate_domain_size": len(manifest["candidates"]), "candidates_tested": len(outcomes),
               "n_calibration_regions": len(manifest["sources"]), "source_eligible_regions": n_eligible,
-              "source_inconclusive_regions": len(manifest["sources"]) - n_eligible,
+              "source_inconclusive_regions": sum(s["source_region"]["status"] in {"INCONCLUSIVE", "UNKNOWN"}
+                                                 for s in manifest["sources"]),
+              "source_refuted_regions": sum(s["source_region"]["status"] == "REFUTED"
+                                            for s in manifest["sources"]),
               "shared_integer_bit_floors": manifest["shared_integer_bit_floors"],
               "objective": "min_affine_parameter_bits", "optimality": "first_certified_in_bounded_cost_order",
               "budget_exhausted": exhausted, "search_elapsed_seconds_this_invocation": time.monotonic() - started,

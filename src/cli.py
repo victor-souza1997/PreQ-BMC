@@ -503,6 +503,15 @@ def cmd_gtsrb_search(args: argparse.Namespace, extra: list[str]) -> int:
     return _run_gtsrb_module("scripts.search_ssv_qif", arguments, extra)
 
 
+def cmd_gtsrb_audit_source(args: argparse.Namespace, extra: list[str]) -> int:
+    arguments = ["--config", str(args.config), "--output", str(args.output)]
+    if args.prior_calibration:
+        arguments.extend(["--prior-calibration", str(args.prior_calibration)])
+    if args.prior_evaluation:
+        arguments.extend(["--prior-evaluation", str(args.prior_evaluation)])
+    return _run_gtsrb_module("scripts.audit_ssv_source_gate", arguments, extra)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="preqbmc", description="Public PreQ-BMC artifact CLI.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -668,6 +677,15 @@ def build_parser() -> argparse.ArgumentParser:
     gtsrb_search.add_argument("--resume", action="store_true", help="Reuse completed exact-identity candidate reports.")
     gtsrb_search.add_argument("--prepare-only", action="store_true", help="Compute source checks and live MILP preimages without ESBMC.")
     gtsrb_search.set_defaults(func=cmd_gtsrb_search)
+
+    gtsrb_audit_source = gtsrb_commands.add_parser(
+        "audit-source", help="Compare the float source gate over both frozen GTSRB cohorts."
+    )
+    gtsrb_audit_source.add_argument("--config", type=Path, default=Path("experiments/sign_qif_search.json"))
+    gtsrb_audit_source.add_argument("--output", type=Path, required=True)
+    gtsrb_audit_source.add_argument("--prior-calibration", type=Path)
+    gtsrb_audit_source.add_argument("--prior-evaluation", type=Path)
+    gtsrb_audit_source.set_defaults(func=cmd_gtsrb_audit_source)
 
     verify = subparsers.add_parser("verify-environment", help="Report solver and Python package availability.")
     verify.add_argument(

@@ -1,5 +1,30 @@
 # Local validation
 
+## Exact source-gate audit, 2026-09-20
+
+`output/sign_source_gate_audit_20260920/source_audit.json` contains a source-only
+audit of the same 54 distinct image/radius pairs across the frozen calibration
+and evaluation cohorts. The configured DeepPoly-first MILP gate reported 22
+`VERIFIED` source regions and 32 `REFUTED` regions with float-model replayed
+counterexamples; no solve was `UNKNOWN`. All ten distinct regions with prior
+final `VERIFIED` reports retained a `VERIFIED` source prerequisite. This audit
+invoked **no ESBMC query** and does not establish new integer-C certificates.
+`output/sign_qif_source_gate_review_20260920/search_manifest.json` recorded
+11 source-eligible calibration regions with available MILP property preimages;
+the quantization/ESBMC search was prepared but not executed at this checkpoint.
+
+One newly eligible median-margin region, `image3_eps1_beta1_cuts0`, was then
+checked with the frozen `h12_o14_f8` artifact. Its DeepPoly margin lower bound
+was -0.23485, while the source MILP bound was +0.16526. The fixed-format run
+reported `final_status=VERIFIED`, `guarantee_level=byte-crop-integer-C`,
+successful chaining and input bridge, and 60 `VERIFIED` ESBMC calls plus two
+expected sentinel failures (`output/sign_milp_source_h12_image3_pilot_20260920`).
+This is one local image/radius certificate, not a cohort certification rate.
+An independently run low-margin smoke case, `image0_eps1_beta1_cuts0`, exited
+with `SOURCE_PROPERTY_REFUTED` and did not enter ESBMC
+(`output/sign_milp_source_h12_refuted_smoke_20260920`).
+
+
 ## Fixed-artifact follow-up, 2026-09-18
 
 No model was retrained and no historical results were overwritten.

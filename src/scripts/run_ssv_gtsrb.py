@@ -59,7 +59,9 @@ def build_region_context(study, run, output):
         esbmc_layer_block_size=run["block_size"], error_budget_mode="derived", harness_scope="layer",
         tighten_verified_bounds=True, enforce_contract_chaining=True, unsound_contract_tolerance=False,
         margin_cuts=run["margin_cuts"], e2e_fallback=False, cegar_max_rounds=run["cegar_max_rounds"],
-        blockwise_run_all_blocks_on_failure=run["blockwise_run_all_blocks_on_failure"])
+        blockwise_run_all_blocks_on_failure=run["blockwise_run_all_blocks_on_failure"],
+        source_verification=run.get("source_verification", "deeppoly"),
+        source_milp_timeout_seconds=float(run.get("source_milp_timeout_seconds", 30.0)))
     synth = GPEncoding([len(center), int(np.prod(geom.output_shape)), 43], model, cfg, target, low, high)
     forward_dnn(center, synth)
     return RegionContext(synth, cnn, geom, image, low, high)

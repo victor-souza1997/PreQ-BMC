@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 import unittest
+from pathlib import Path
+import tempfile
+from unittest.mock import patch
 
 import numpy as np
 
 from reports.experiment_summary import build_experiment_summary
 from synthesis.preqbmc import GPEncoding
+from synthesis.preqbmc import QuadapterConfig
+from synthesis.solver_backend import SolverStatus
+from models.deep_model import DeepModel
 
 
 def _encoder(output_low: list[float], output_high: list[float]) -> GPEncoding:
@@ -41,6 +47,91 @@ def _encoder(output_low: list[float], output_high: list[float]) -> GPEncoding:
 
 
 class SourceRegionGateTest(unittest.TestCase):
+    def _real_encoder(self, root: Path, *, robust: bool) -> GPEncoding:
+        import tensorflow as tf
+
+        model = DeepModel([2, 2], input_scale=1.0)
+        model.build((None, 1))
+        model(tf.zeros((1, 1)))
+        if robust:
+            model.dense_layers[0].set_weights((np.array([[1., 1.]], dtype=np.float32),
+                                               np.zeros(2, dtype=np.float32)))
+            model.dense_layers[1].set_weights((np.array([[1., 0.], [-1., 0.]], dtype=np.float32),
+                                               np.array([.25, 0.], dtype=np.float32)))
+        else:
+            model.dense_layers[0].set_weights((np.array([[1., -1.]], dtype=np.float32),
+                                               np.zeros(2, dtype=np.float32)))
+            model.dense_layers[1].set_weights((np.array([[1., 0.], [-1., 0.]], dtype=np.float32),
+                                               np.array([0., 0.], dtype=np.float32)))
+        cfg = QuadapterConfig(bit_lb=8, bit_ub=8, preimg_mode="milp", verify_mode="esbmc",
+                              sample_id=0, eps=1., output_dir=root, solver="cbc",
+                              source_verification="milp_exact", source_milp_timeout_seconds=5.)
+        low, high = np.array([-1.], dtype=np.float32), np.array([1.], dtype=np.float32)
+        return GPEncoding([1, 2, 2], model, cfg, 0, low, high)
+
+    def test_milp_recovers_robust_margin_lost_by_deeppoly(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            encoder = self._real_encoder(Path(temp), robust=True)
+            self.assertTrue(encoder.check_source_region(np.array([-1.]), np.array([1.])))
+            record = encoder.source_region_summary()
+            self.assertEqual(record["method"], "milp_exact")
+            self.assertEqual(record["status"], "VERIFIED")
+            self.assertLess(record["deeppoly_certified_margin_lower_bound"], 0.)
+            self.assertAlmostEqual(record["certified_margin_lower_bound"], .25, places=5)
+            self.assertEqual(len(record["competitors_checked"]), 1)
+            self.assertFalse(record["esbmc_attempted"])
+
+    def test_milp_refutation_requires_float_model_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            encoder = self._real_encoder(Path(temp), robust=False)
+            self.assertFalse(encoder.check_source_region(np.array([-1.]), np.array([1.])))
+            record = encoder.source_region_summary()
+            self.assertEqual(record["status"], "REFUTED")
+            witness = record["validated_counterexample"]
+            self.assertIsNotNone(witness)
+            self.assertGreaterEqual(witness["input"][0], -1.)
+            self.assertLessEqual(witness["input"][0], 1.)
+            self.assertEqual(witness["predicted_class"], 1)
+            self.assertLess(witness["logits"][0], witness["logits"][1])
+
+    def test_milp_timeout_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            encoder = self._real_encoder(Path(temp), robust=True)
+            original_build = encoder._build_exact_hidden_prefix_milp
+
+            def timed_out(prefix):
+                model, hidden, bounds, inputs = original_build(prefix)
+                model.optimize = lambda: SolverStatus.TIME_LIMIT
+                return model, hidden, bounds, inputs
+
+            with patch.object(encoder, "_build_exact_hidden_prefix_milp", side_effect=timed_out):
+                self.assertFalse(encoder.check_source_region(np.array([-1.]), np.array([1.])))
+            record = encoder.source_region_summary()
+            self.assertEqual(record["status"], "UNKNOWN")
+            self.assertFalse(record["eligible_for_transfer"])
+            self.assertIsNone(record["validated_counterexample"])
+
+    def test_milp_checks_multiple_unresolved_competitors(self) -> None:
+        import tensorflow as tf
+
+        with tempfile.TemporaryDirectory() as temp:
+            model = DeepModel([2, 3], input_scale=1.0)
+            model.build((None, 1))
+            model(tf.zeros((1, 1)))
+            model.dense_layers[0].set_weights((np.array([[1., 1.]], dtype=np.float32),
+                                               np.zeros(2, dtype=np.float32)))
+            model.dense_layers[1].set_weights((
+                np.array([[1., 0., 0.], [-1., 0., 0.]], dtype=np.float32),
+                np.array([.25, 0., .1], dtype=np.float32)))
+            cfg = QuadapterConfig(bit_lb=8, bit_ub=8, preimg_mode="milp", verify_mode="esbmc",
+                                  sample_id=0, eps=1., output_dir=Path(temp), solver="cbc",
+                                  source_verification="milp_exact", source_milp_timeout_seconds=5.)
+            encoder = GPEncoding([1, 2, 3], model, cfg, 0, np.array([-1.]), np.array([1.]))
+            self.assertTrue(encoder.check_source_region(np.array([-1.]), np.array([1.])))
+            record = encoder.source_region_summary()
+            self.assertEqual({r["competitor_class"] for r in record["competitors_checked"]}, {1, 2})
+            self.assertAlmostEqual(record["certified_margin_lower_bound"], .15, places=5)
+
     def test_inconclusive_source_region_stops_before_esbmc(self) -> None:
         encoder = _encoder([0.2, 0.0], [0.4, 0.5])
         esbmc_called = False

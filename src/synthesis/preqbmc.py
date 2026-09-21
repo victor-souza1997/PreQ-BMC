@@ -100,6 +100,8 @@ class QuadapterConfig:
     margin_cuts: bool | None = None
     e2e_fallback: bool | None = None
     cegar_max_rounds: int = 3
+    source_verification: str = "deeppoly"
+    source_milp_timeout_seconds: float = 30.0
 
     @classmethod
     def from_namespace(cls, args: Any) -> "QuadapterConfig":
@@ -157,6 +159,8 @@ class QuadapterConfig:
                 else str(getattr(args, "e2e_fallback")).lower() == "on"
             ),
             cegar_max_rounds=max(0, int(getattr(args, "cegar_max_rounds", 3))),
+            source_verification=str(getattr(args, "source_verification", "deeppoly")),
+            source_milp_timeout_seconds=float(getattr(args, "source_milp_timeout_seconds", 30.0)),
         )
 
 
@@ -313,6 +317,10 @@ class GPEncoding:
         property_spec: ClassificationProperty | None = None,
     ) -> None:
         self.config = config if isinstance(config, QuadapterConfig) else QuadapterConfig.from_namespace(config)
+        if self.config.source_verification not in {"deeppoly", "milp_exact"}:
+            raise ValueError("source_verification must be deeppoly or milp_exact")
+        if not math.isfinite(self.config.source_milp_timeout_seconds) or self.config.source_milp_timeout_seconds <= 0:
+            raise ValueError("source_milp_timeout_seconds must be finite and positive")
         self.tole = 1e-6
         self.bit_lb = self.config.bit_lb
         self.bit_ub = self.config.bit_ub
@@ -394,7 +402,7 @@ class GPEncoding:
         self.output_margin_records: list[dict[str, Any]] = []
         self.vacuity_records: list[dict[str, Any]] = []
         self.source_region_record: dict[str, Any] = {
-            "method": "deeppoly",
+            "method": self.config.source_verification,
             "status": "NOT_RUN",
             "eligible_for_transfer": False,
             "quantized_pipeline_started": False,
@@ -957,7 +965,10 @@ class GPEncoding:
         source_check_start = time.monotonic()
         source_verified = self.check_source_region(lb, ub)
         if not source_verified:
-            self.synthesis_final_status = "SOURCE_PROPERTY_INCONCLUSIVE"
+            self.synthesis_final_status = (
+                "SOURCE_PROPERTY_REFUTED" if self.source_region_record.get("status") == "REFUTED"
+                else "SOURCE_PROPERTY_INCONCLUSIVE"
+            )
             self._stats["total_time"] = float(time.monotonic() - source_check_start)
             return SynthesisResult(
                 success=False,
@@ -1104,9 +1115,16 @@ class GPEncoding:
                 else "DeepPoly did not establish the original floating-point robustness property; this is not a counterexample."
             ),
         }
+        if getattr(self.config, "source_verification", "deeppoly") == "milp_exact" and not source_verified:
+            self.source_region_record = self._check_source_region_milp(
+                target_lower=target_lower,
+                deep_poly_margin=certified_margin_lower,
+            )
+            source_verified = self.source_region_record["status"] == "VERIFIED"
         self._stats["source_property_time"] = float(
-            self.source_region_record["elapsed_seconds"]
+            time.monotonic() - source_check_start
         )
+        self.source_region_record["elapsed_seconds"] = self._stats["source_property_time"]
         return bool(source_verified)
 
     def assert_input_box(self, x_lb: np.ndarray, x_ub: np.ndarray) -> None:
@@ -3210,11 +3228,42 @@ class GPEncoding:
         if prefix_count < 1 or prefix_count > len(self.dense_layers):
             raise ValueError("Directional MILP requires a non-empty hidden prefix.")
         prefix = self.dense_layers[:prefix_count]
-        low = np.asarray(self.x_low_real, dtype=np.float64).reshape(-1)
-        high = np.asarray(self.x_high_real, dtype=np.float64).reshape(-1)
+        model, previous_values, previous_bounds, _ = self._build_exact_hidden_prefix_milp(prefix)
         if direction.shape != (prefix[-1].layer_size,):
             raise ValueError("Output direction does not match the last hidden layer.")
-        if not (np.all(np.isfinite(low)) and np.all(np.isfinite(high))):
+        direction_low, direction_high = self._interval_linear_combination(
+            direction,
+            previous_bounds,
+            0.0,
+        )
+        objective = model.add_var(
+            lb=float(direction_low),
+            ub=float(direction_high),
+            name="margin_direction_value",
+        )
+        model.add_constr(
+            objective == self._linear_combination(direction, previous_values, 0.0),
+            name="margin_direction_definition",
+        )
+        started = time.monotonic()
+        model.set_objective(objective, GRB.MINIMIZE)
+        if model.optimize() != GRB.OPTIMAL:
+            raise RuntimeError("Margin-cut MILP minimization did not reach OPTIMAL.")
+        lower = math.nextafter(float(model.objective_bound()), -math.inf)
+        model.set_objective(objective, GRB.MAXIMIZE)
+        if model.optimize() != GRB.OPTIMAL:
+            raise RuntimeError("Margin-cut MILP maximization did not reach OPTIMAL.")
+        upper = math.nextafter(float(model.objective_bound()), math.inf)
+        return lower, upper, float(time.monotonic() - started)
+
+    def _build_exact_hidden_prefix_milp(
+        self, prefix: list[LayerEncoding]
+    ) -> tuple[Any, list[Any], list[tuple[float, float]], list[Any]]:
+        """Encode the original input box, affine hidden prefix and exact ReLUs."""
+        low = np.asarray(self.x_low_real, dtype=np.float64).reshape(-1)
+        high = np.asarray(self.x_high_real, dtype=np.float64).reshape(-1)
+        if (not np.all(np.isfinite(low)) or not np.all(np.isfinite(high))
+                or np.any(low > high)):
             raise ValueError("Margin-cut MILP requires finite input and DeepPoly bounds.")
 
         model = build_model(
@@ -3223,10 +3272,11 @@ class GPEncoding:
             threads=max(1, int(getattr(self.config, "gurobi_threads", 4))),
             output_flag=0,
         )
-        previous_values = [
+        input_values = [
             model.add_var(lb=float(lo), ub=float(hi), name=f"margin_x_{index}")
             for index, (lo, hi) in enumerate(zip(low, high))
         ]
+        previous_values = input_values
         previous_bounds = [(float(lo), float(hi)) for lo, hi in zip(low, high)]
         for layer_offset, hidden in enumerate(prefix):
             weights = np.asarray(hidden.layer_paras[0], dtype=np.float64)
@@ -3280,30 +3330,103 @@ class GPEncoding:
             previous_values = hidden_values
             previous_bounds = hidden_bounds
 
-        direction_low, direction_high = self._interval_linear_combination(
-            direction,
-            previous_bounds,
-            0.0,
-        )
-        objective = model.add_var(
-            lb=float(direction_low),
-            ub=float(direction_high),
-            name="margin_direction_value",
-        )
-        model.add_constr(
-            objective == self._linear_combination(direction, previous_values, 0.0),
-            name="margin_direction_definition",
-        )
+        return model, previous_values, previous_bounds, input_values
+
+    def _check_source_region_milp(self, *, target_lower: float, deep_poly_margin: float) -> dict[str, Any]:
+        """Check each unresolved target-logit difference over the real input box."""
         started = time.monotonic()
-        model.set_objective(objective, GRB.MINIMIZE)
-        if model.optimize() != GRB.OPTIMAL:
-            raise RuntimeError("Margin-cut MILP minimization did not reach OPTIMAL.")
-        lower = math.nextafter(float(model.objective_bound()), -math.inf)
-        model.set_objective(objective, GRB.MAXIMIZE)
-        if model.optimize() != GRB.OPTIMAL:
-            raise RuntimeError("Margin-cut MILP maximization did not reach OPTIMAL.")
-        upper = math.nextafter(float(model.objective_bound()), math.inf)
-        return lower, upper, float(time.monotonic() - started)
+        target = int(self.targetCls)
+        competitors = [j for j, upper in enumerate(self.output_layer.ub)
+                       if j != target and float(upper) >= target_lower]
+        result: dict[str, Any] = {
+            "method": "milp_exact", "status": "UNKNOWN", "eligible_for_transfer": False,
+            "quantized_pipeline_started": False, "esbmc_attempted": False,
+            "target_class": target, "input_epsilon": float(self.eps),
+            "target_lower_bound": target_lower,
+            "maximum_competitor_upper_bound": float(max(
+                self.output_layer.ub[j] for j in range(self.output_layer.layer_size) if j != target)),
+            "deeppoly_certified_margin_lower_bound": deep_poly_margin,
+            "certified_margin_lower_bound": None,
+            "solver": self.solver, "solver_timeout_seconds": self.config.source_milp_timeout_seconds,
+            "proof_semantics": "real_affine_relu_milp_with_floating_point_solver_tolerances",
+            "competitors_checked": [], "competitors_pruned_by_deeppoly": self.output_layer.layer_size - 1 - len(competitors),
+            "validated_counterexample": None,
+        }
+        if not competitors:
+            result.update(status="VERIFIED", eligible_for_transfer=True, quantized_pipeline_started=True,
+                          certified_margin_lower_bound=deep_poly_margin)
+            return result
+
+        model, hidden, hidden_bounds, inputs = self._build_exact_hidden_prefix_milp(self.dense_layers)
+        model.setParam("TimeLimit", self.config.source_milp_timeout_seconds)
+        weights = np.asarray(self.output_layer.layer_paras[0], dtype=np.float64)
+        biases = np.asarray(self.output_layer.layer_paras[1], dtype=np.float64)
+        if weights.shape != (self.output_layer.layer_size, len(hidden)):
+            raise ValueError("Output weights are not row-per-neuron for source MILP")
+        lower_bounds = [target_lower - float(self.output_layer.ub[j])
+                        for j in range(self.output_layer.layer_size)
+                        if j != target and j not in competitors]
+        uncertain = False
+        for competitor in competitors:
+            direction = weights[target] - weights[competitor]
+            bias = float(biases[target] - biases[competitor])
+            interval_low, interval_high = self._interval_linear_combination(direction, hidden_bounds, bias)
+            objective = model.add_var(lb=interval_low, ub=interval_high,
+                                      name=f"source_margin_{competitor}")
+            definition = model.add_constr(
+                objective == self._linear_combination(direction, hidden, bias),
+                name=f"source_margin_definition_{competitor}",
+            )
+            model.set_objective(objective, GRB.MINIMIZE)
+            solve_start = time.monotonic()
+            status = model.optimize()
+            row = {"competitor_class": competitor, "solver_status": str(status.value),
+                   "elapsed_seconds": time.monotonic() - solve_start, "global_lower_bound": None}
+            if status == GRB.OPTIMAL:
+                bound = math.nextafter(float(model.objective_bound()), -math.inf)
+                if not math.isfinite(bound):
+                    uncertain = True
+                else:
+                    row["global_lower_bound"] = bound
+                    lower_bounds.append(bound)
+                    if bound <= 0.0:
+                        point = np.asarray([model.value(var) for var in inputs], dtype=np.float64)
+                        low = np.asarray(self.x_low_real, dtype=np.float64)
+                        high = np.asarray(self.x_high_real, dtype=np.float64)
+                        replay_point = point.astype(np.float32).astype(np.float64)
+                        if (np.all(np.isfinite(replay_point)) and np.all(replay_point >= low)
+                                and np.all(replay_point <= high)):
+                            logits = np.asarray(self.deep_model(replay_point.astype(np.float32)[None, :]),
+                                                dtype=np.float64).reshape(-1)
+                            prediction = int(np.argmax(logits))
+                            row["witness_predicted_class"] = prediction
+                            row["witness_margin"] = float(logits[target] - logits[competitor])
+                            if prediction != target:
+                                result["validated_counterexample"] = {
+                                    "input": replay_point.tolist(), "logits": logits.tolist(),
+                                    "predicted_class": prediction, "target_class": target,
+                                }
+                                result["status"] = "REFUTED"
+                        if result["status"] != "REFUTED":
+                            uncertain = True
+                    elif bound <= self.tole:
+                        # A positive global bound too close to solver feasibility
+                        # tolerance is not treated as a source certificate.
+                        uncertain = True
+            else:
+                uncertain = True
+            result["competitors_checked"].append(row)
+            model.set_objective(objective * 0.0, GRB.MINIMIZE)
+            model.remove([definition, objective])
+            model.update()
+            if result["status"] == "REFUTED":
+                break
+
+        if result["status"] != "REFUTED" and not uncertain and len(result["competitors_checked"]) == len(competitors):
+            result.update(status="VERIFIED", eligible_for_transfer=True, quantized_pipeline_started=True,
+                          certified_margin_lower_bound=float(min(lower_bounds)))
+        result["elapsed_seconds"] = time.monotonic() - started
+        return result
 
     def _deployed_prefix_cut_payload(
         self,

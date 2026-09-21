@@ -35,7 +35,9 @@ def summarize(reports):
                                                        if r["byte_crop_property_verified"] and r.get("generated_source_sha256")}),
                      "n_images": len(set(identities)), "n_regions_completed": len(group),
                      "source_verified_count": eligible,
-                     "source_inconclusive_count": sum(r["source_region"]["status"] == "INCONCLUSIVE" for r in group),
+                     "source_inconclusive_count": sum(r["source_region"]["status"] in {"INCONCLUSIVE", "UNKNOWN"}
+                                                      for r in group),
+                     "source_refuted_count": sum(r["source_region"]["status"] == "REFUTED" for r in group),
                      "encoded_verified_count": sum(bool(r["encoded_contract_verified"]) for r in group),
                      "byte_crop_certified_count": certified,
                      "certified_fraction_completed_regions": certified / len(group),
@@ -91,7 +93,12 @@ def main():
     write_csv(args.output / "region_certification_summary.csv", summaries)
     write_csv(args.output / "all_regions.csv", [{"run_id": r["run_id"], "sample_id": r["sample"]["id"],
               "epsilon": r["epsilon"], "beta": r["block_size"], "margin_cuts": r["margin_cuts"],
-              "source_status": r["source_region"]["status"], "final_status": r["final_status"],
+              "source_status": r["source_region"]["status"],
+              "source_method": r["source_region"].get("method"),
+              "deeppoly_certified_margin_lower_bound": r["source_region"].get(
+                  "deeppoly_certified_margin_lower_bound", r["source_region"].get("certified_margin_lower_bound")),
+              "source_certified_margin_lower_bound": r["source_region"].get("certified_margin_lower_bound"),
+              "final_status": r["final_status"],
               "byte_crop_property_verified": r["byte_crop_property_verified"],
               "android_transfer_verified": r["android_transfer_verified"],
               "verification_mode": r.get("verification_mode", "region_synthesis"),

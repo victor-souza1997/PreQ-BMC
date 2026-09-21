@@ -41,6 +41,11 @@ def validate_config(config):
                 "e2e_fallback": False}
     if any(v.get(key) != value for key, value in expected.items()) or not 8 <= v["bit_lb"] <= v["bit_ub"] <= 16:
         raise ValueError("Study requires derived preimages, strict chaining and input F >= 8")
+    if v.get("source_verification", "deeppoly") not in {"deeppoly", "milp_exact"}:
+        raise ValueError("source_verification must be deeppoly or milp_exact")
+    source_limit = v.get("source_milp_timeout_seconds", 30)
+    if type(source_limit) not in {int, float} or not np.isfinite(source_limit) or source_limit <= 0:
+        raise ValueError("source_milp_timeout_seconds must be finite and positive")
     if config["selection"]["type"] != "clean_margin_tertiles" or not config["selection"]["freeze_before_verification"]:
         raise ValueError("Outcome-blind fixed selection is required")
     offset = config["selection"].get("rank_offset_per_stratum", 0)

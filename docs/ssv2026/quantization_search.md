@@ -9,12 +9,25 @@ preqbmc gtsrb search \
   --output output/sign_qif_search
 ```
 
-The search first computes the original DeepPoly source prerequisite for all
-27 primary calibration regions. Source-inconclusive regions remain in
-`source_regions.csv` and `search_manifest.json`; they are not counterexamples,
-and changing quantization cannot change their eligibility. Every eligible
-region remains required. A missing MILP property preimage stops selection;
-it never removes a difficult region from the required set.
+The search first computes the float source prerequisite for all 27 primary
+calibration regions. With `source_verification: milp_exact`, DeepPoly prunes
+classes already separated by its bounds. The remaining target-minus-competitor
+logit margins are minimized in a MILP over the real input box, affine hidden
+layers, exact ReLUs and the output affine layer. A validated float-model
+misclassification is recorded as `REFUTED`; a solver timeout or unvalidated
+witness remains `UNKNOWN`. Both remain in `source_regions.csv` and
+`search_manifest.json`. Only `VERIFIED` regions enter quantization selection.
+Every eligible region remains required. A missing MILP property preimage stops
+selection; it never removes a difficult region from the required set.
+
+The source MILP uses the solver's global objective bound with outward
+`nextafter` rounding and accepts only a margin above the configured feasibility
+tolerance. This is an exact ReLU *formulation* solved numerically, not a
+bit-exact proof over IEEE float32. The original Conv2D-to-affine float lowering
+has empirical test-set parity, not a universal IEEE-equivalence proof. Source
+counterexamples are for the continuous normalized input box; they need not be
+realizable as a raw uint8 image. The deployed integer C claim still requires
+the separate preimage, ESBMC, chaining and input-bridge obligations.
 
 For each layer, integer-bit floors are derived from the extrema of weights,
 biases, source bounds and MILP preimages, taking the maximum across eligible
@@ -86,3 +99,17 @@ require inspection; they are not overwritten or silently marked failed.
 source records and ESBMC logs preserve the evidence and rejection reasons.
 The command returns code 2 for inconclusive or exhausted searches, with reports
 written normally; it does not claim the network is non-robust.
+
+To measure just the source-gate effect over the two fixed, disjoint cohorts:
+
+```sh
+preqbmc gtsrb audit-source \
+  --config experiments/sign_qif_search.json \
+  --output output/sign_source_gate_audit \
+  --prior-calibration output/sign_fixed_qif_sweep/runs/h12_o14_f8 \
+  --prior-evaluation output/sign_fixed_qif_selection/evaluation_runs
+```
+
+This writes 54 per-region float source outcomes and checks that prior
+`VERIFIED` reports have not lost their source prerequisite. It intentionally
+does not call ESBMC or count an eligible region as a fixed-point certificate.
