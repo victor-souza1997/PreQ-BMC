@@ -469,6 +469,20 @@ def cmd_gtsrb_prepare(args: argparse.Namespace, extra: list[str]) -> int:
     return _run_gtsrb_module("scripts.prepare_ssv_gtsrb", arguments, extra)
 
 
+def cmd_gtsrb_search_model(args: argparse.Namespace, extra: list[str]) -> int:
+    arguments = ["--config", str(args.config), "--output", str(args.output)]
+    if args.check_config:
+        arguments.append("--check-config")
+    return _run_gtsrb_module("scripts.search_ssv_source_model", arguments, extra)
+
+
+def cmd_gtsrb_search_deep_model(args: argparse.Namespace, extra: list[str]) -> int:
+    arguments = ["--config", str(args.config), "--output", str(args.output)]
+    if args.check_config:
+        arguments.append("--check-config")
+    return _run_gtsrb_module("scripts.search_ssv_deep_source_model", arguments, extra)
+
+
 def cmd_gtsrb_run(args: argparse.Namespace, extra: list[str]) -> int:
     arguments = ["--study", str(args.study), "--output", str(args.output)]
     for run_id in args.only:
@@ -677,6 +691,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gtsrb_prepare.add_argument("--check-config", action="store_true", help="Validate the configuration only.")
     gtsrb_prepare.set_defaults(func=cmd_gtsrb_prepare)
+
+    gtsrb_search_model = gtsrb_commands.add_parser(
+        "search-model",
+        help="Train and select verifier-compatible source models using validation data only.",
+    )
+    gtsrb_search_model.add_argument(
+        "--config", type=Path, default=Path("experiments/sign_source_model_search.json")
+    )
+    gtsrb_search_model.add_argument("--output", type=Path, required=True,
+                                    help="New search directory; must not exist.")
+    gtsrb_search_model.add_argument("--check-config", action="store_true")
+    gtsrb_search_model.set_defaults(func=cmd_gtsrb_search_model)
+
+    gtsrb_search_deep_model = gtsrb_commands.add_parser(
+        "search-deep-model",
+        help="Search multi-stage verifier-compatible GTSRB source models.",
+    )
+    gtsrb_search_deep_model.add_argument(
+        "--config", type=Path, default=Path("experiments/sign_deep_source_model_search.json")
+    )
+    gtsrb_search_deep_model.add_argument("--output", type=Path, required=True,
+                                         help="New search directory; must not exist.")
+    gtsrb_search_deep_model.add_argument("--check-config", action="store_true")
+    gtsrb_search_deep_model.set_defaults(func=cmd_gtsrb_search_deep_model)
 
     gtsrb_run = gtsrb_commands.add_parser("run", help="Run frozen regions through preimages and ESBMC.")
     gtsrb_run.add_argument("--study", type=Path, default=Path("output/sign_experiments/study.json"))

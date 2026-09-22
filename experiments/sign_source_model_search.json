@@ -1,0 +1,50 @@
+{
+  "schema": "ssv_source_model_search_v1",
+  "dataset": "gtsrb_official",
+  "base_study": "output/plate_experiments/study.json",
+  "preprocessing": {
+    "input_domain": "uint8_RGB_cropped_sign",
+    "shape": [16, 16, 3],
+    "resize": "nearest_floor_top_left",
+    "normalization_divisor": 256,
+    "tie_break": "lowest_class_index"
+  },
+  "classes": 43,
+  "max_affine_entries": 1000000,
+  "training": {
+    "seed": 2026,
+    "epochs": 100,
+    "batch_size": 128,
+    "validation_fraction": 0.2,
+    "learning_rate": 0.001,
+    "minimum_learning_rate": 0.00001,
+    "early_stopping_patience": 10,
+    "lr_plateau_patience": 3,
+    "augmentation": {
+      "translation_fraction": 0.1,
+      "contrast_factor": 0.15
+    },
+    "class_weighting": "inverse_frequency"
+  },
+  "selection": {
+    "minimum_validation_accuracy": 0.9,
+    "rule": "smallest_passing_then_highest_accuracy",
+    "test_set_policy": "evaluate_once_after_selection"
+  },
+  "candidates": [
+    {
+      "id": "conv4_k5_s4_same",
+      "filters": 4,
+      "kernel_size": [5, 5],
+      "strides": [4, 4],
+      "padding": "SAME"
+    },
+    {
+      "id": "conv8_k5_s4_same",
+      "filters": 8,
+      "kernel_size": [5, 5],
+      "strides": [4, 4],
+      "padding": "SAME"
+    }
+  ]
+}

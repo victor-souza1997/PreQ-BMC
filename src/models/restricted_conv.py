@@ -163,3 +163,109 @@ class RestrictedCNN:
             value = round_divide_half_away_from_zero(acc, 1 << hidden_spec.fractional_bits) + int(b[oc])
             outputs.append(min(output_spec.signed_range[1], max(output_spec.signed_range[0], value)))
         return hidden.reshape(-1), np.asarray(outputs, dtype=np.int64)
+
+
+@dataclass(frozen=True)
+class RestrictedSequentialCNN:
+    """Several Conv/ReLU stages followed by Dense/ReLU stages and logits.
+
+    Batch normalization is not an inference operation here. Training code must
+    fold it into the preceding affine kernel and bias before constructing this
+    object, leaving exactly the affine/ReLU semantics consumed by PreQ-BMC.
+    """
+
+    geometries: tuple[ConvGeometry, ...]
+    conv_kernels: tuple[np.ndarray, ...]
+    conv_biases: tuple[np.ndarray, ...]
+    dense_kernels: tuple[np.ndarray, ...]
+    dense_biases: tuple[np.ndarray, ...]
+    max_affine_entries: int = 2_000_000
+
+    def __post_init__(self):
+        if not self.geometries or len(self.geometries) != len(self.conv_kernels) \
+                or len(self.geometries) != len(self.conv_biases):
+            raise ValueError("Need matching nonempty convolution stages")
+        if not self.dense_kernels or len(self.dense_kernels) != len(self.dense_biases):
+            raise ValueError("Need matching nonempty dense stages")
+        for index, geometry in enumerate(self.geometries):
+            if index and geometry.input_shape != self.geometries[index - 1].output_shape:
+                raise ValueError("Convolution geometries do not compose")
+        conv_kernels = tuple(np.asarray(value, dtype=np.float32) for value in self.conv_kernels)
+        conv_biases = tuple(np.asarray(value, dtype=np.float32) for value in self.conv_biases)
+        dense_kernels = tuple(np.asarray(value, dtype=np.float32) for value in self.dense_kernels)
+        dense_biases = tuple(np.asarray(value, dtype=np.float32) for value in self.dense_biases)
+        object.__setattr__(self, "conv_kernels", conv_kernels)
+        object.__setattr__(self, "conv_biases", conv_biases)
+        object.__setattr__(self, "dense_kernels", dense_kernels)
+        object.__setattr__(self, "dense_biases", dense_biases)
+        for geometry, kernel, bias in zip(self.geometries, conv_kernels, conv_biases):
+            if kernel.shape != geometry.kernel_shape or bias.shape != (geometry.kernel_shape[-1],):
+                raise ValueError("Convolution parameter shape mismatch")
+        expected = math.prod(self.geometries[-1].output_shape)
+        for kernel, bias in zip(dense_kernels, dense_biases):
+            if kernel.ndim != 2 or bias.ndim != 1 or kernel.shape != (expected, len(bias)):
+                raise ValueError("Dense stages do not compose")
+            expected = len(bias)
+        if expected < 2:
+            raise ValueError("Output layer must contain at least two classes")
+        if not all(np.all(np.isfinite(value)) for value in
+                   (*conv_kernels, *conv_biases, *dense_kernels, *dense_biases)):
+            raise ValueError("Nonfinite parameters")
+
+    @property
+    def input_shape(self):
+        return self.geometries[0].input_shape
+
+    @property
+    def layer_sizes(self):
+        return [*(math.prod(geometry.output_shape) for geometry in self.geometries),
+                *(len(bias) for bias in self.dense_biases)]
+
+    def affine_parameters(self):
+        parameters = []
+        for geometry, kernel, bias in zip(self.geometries, self.conv_kernels, self.conv_biases):
+            weights, lowered_bias = lower_conv(
+                kernel, bias, geometry, max_affine_entries=self.max_affine_entries,
+            )
+            parameters.append((weights.T, lowered_bias))
+        parameters.extend((kernel, bias) for kernel, bias in zip(self.dense_kernels, self.dense_biases))
+        return parameters
+
+    def as_deep_model(self):
+        from models.deep_model import DeepModel
+        import tensorflow as tf
+
+        model = DeepModel(self.layer_sizes, input_scale=1.0)
+        model.build((None, math.prod(self.input_shape)))
+        model(tf.zeros((1, math.prod(self.input_shape))))
+        for layer, params in zip(model.dense_layers, self.affine_parameters()):
+            layer.set_weights(params)
+        return model
+
+    def float_reference(self, normalized_image):
+        value = np.asarray(normalized_image, dtype=np.float32)
+        if value.shape != self.input_shape:
+            raise ValueError("Input shape mismatch")
+        for geometry, kernel, bias in zip(self.geometries, self.conv_kernels, self.conv_biases):
+            value = np.maximum(direct_conv(value, kernel, geometry) + bias, 0)
+        value = value.reshape(-1)
+        for index, (kernel, bias) in enumerate(zip(self.dense_kernels, self.dense_biases)):
+            value = value @ kernel + bias
+            if index + 1 < len(self.dense_kernels):
+                value = np.maximum(value, 0)
+        return np.asarray(value)
+
+    def quantized(self, specs, *, input_fractional_bits=8, input_total_bits=16):
+        parameters = self.affine_parameters()
+        if len(specs) != len(parameters):
+            raise ValueError("One shared format is required per affine layer")
+        layers = []
+        for index, ((kernel, bias), spec) in enumerate(zip(parameters, specs)):
+            if spec.total_bits > 63:
+                raise ValueError("Prototype stores values in signed int64")
+            layers.append(QuantizedLayer(
+                np.asarray(quantize_int(kernel.T, spec.total_bits, spec.fractional_bits), dtype=np.int64),
+                np.asarray(quantize_int(bias, spec.total_bits, spec.fractional_bits), dtype=np.int64),
+                spec, index + 1 == len(parameters),
+            ))
+        return FixedPointNetwork(input_fractional_bits, input_total_bits, tuple(layers))

@@ -10,11 +10,13 @@ class ByteImageEncoder:
     output_shape: tuple[int, int, int]
     fractional_bits: int = 8
     total_bits: int = 16
+    resize_mode: str = "nearest_floor_top_left"
 
     def __post_init__(self):
         if (len(self.output_shape) != 3 or any(type(n) is not int or not 0 < n <= 4096 for n in self.output_shape)
                 or self.output_shape[-1] > 4 or math.prod(self.output_shape) > 1_000_000
-                or not 2 <= self.total_bits <= 63 or not 0 <= self.fractional_bits < self.total_bits):
+                or not 2 <= self.total_bits <= 63 or not 0 <= self.fractional_bits < self.total_bits
+                or self.resize_mode not in {"nearest_floor_top_left", "nearest_center"}):
             raise ValueError("Invalid image or signed fixed-point dimensions")
 
     def resize(self, image):
@@ -22,8 +24,12 @@ class ByteImageEncoder:
         if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != self.output_shape[2] or min(image.shape) <= 0 or max(image.shape[:2]) > 4096:
             raise ValueError("Input must be a nonempty HWC uint8 crop with matching channels")
         h, w, _ = self.output_shape
-        rows = np.arange(h) * image.shape[0] // h
-        cols = np.arange(w) * image.shape[1] // w
+        if self.resize_mode == "nearest_center":
+            rows = (2 * np.arange(h) + 1) * image.shape[0] // (2 * h)
+            cols = (2 * np.arange(w) + 1) * image.shape[1] // (2 * w)
+        else:
+            rows = np.arange(h) * image.shape[0] // h
+            cols = np.arange(w) * image.shape[1] // w
         return image[rows[:, None], cols[None, :], :]
 
     def encode(self, image):
@@ -44,8 +50,16 @@ class ByteImageEncoder:
 
     def render_c(self):
         h, w, c = self.output_shape
+        if self.resize_mode == "nearest_center":
+            source_y = f"((2 * y + 1) * height / {2 * h})"
+            source_x = f"((2 * x + 1) * width / {2 * w})"
+            resize_comment = "center-aligned nearest-neighbor"
+        else:
+            source_y = f"(y * height / {h})"
+            source_x = f"(x * width / {w})"
+            resize_comment = "top-left nearest-neighbor"
         return f"""
-/* uint8 crop, top-left nearest-neighbor, normalization /256, half-away rounding.
+/* uint8 crop, {resize_comment}, normalization /256, half-away rounding.
    Decoder and RGB conversion are outside this function's certificate. */
 int qnn_encoder_channels(void) {{ return {c}; }}
 int qnn_encoder_size(void) {{ return {h * w * c}; }}
@@ -54,7 +68,7 @@ int qnn_encode_bytes(const uint8_t *image, int height, int width, int64_t *out) 
     for (int y = 0; y < {h}; ++y)
         for (int x = 0; x < {w}; ++x)
             for (int c = 0; c < {c}; ++c) {{
-                int src = ((y * height / {h}) * width + x * width / {w}) * {c} + c;
+                int src = ({source_y} * width + {source_x}) * {c} + c;
                 __int128 v = div_round_half_away_from_zero_i128(
                     (__int128)image[src] * (((__int128)1) << {self.fractional_bits}), 256);
                 out[(y * {w} + x) * {c} + c] = (int64_t)clamp_to_signed_range_i128(v, {self.total_bits});

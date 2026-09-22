@@ -1,0 +1,62 @@
+{
+  "schema": "ssv_deep_source_model_search_v1",
+  "dataset": "gtsrb_official",
+  "base_study": "output/plate_experiments/study.json",
+  "preprocessing": {
+    "input_domain": "uint8_RGB_cropped_sign",
+    "shape": [24, 24, 3],
+    "resize": "nearest_floor_top_left",
+    "normalization_divisor": 256,
+    "tie_break": "lowest_class_index"
+  },
+  "classes": 43,
+  "max_affine_entries": 2000000,
+  "training": {
+    "seed": 2026,
+    "epochs": 100,
+    "batch_size": 128,
+    "validation_fraction": 0.2,
+    "learning_rate": 0.001,
+    "minimum_learning_rate": 0.00001,
+    "early_stopping_patience": 10,
+    "lr_plateau_patience": 3,
+    "class_weighting": "inverse_frequency",
+    "augmentation": {
+      "translation_fraction": 0.1,
+      "contrast_factor": 0.15,
+      "rotation_fraction": 0.03,
+      "zoom_fraction": 0.1
+    }
+  },
+  "selection": {
+    "minimum_validation_accuracy": 0.9,
+    "rule": "ordered_first_passing",
+    "test_set_policy": "evaluate_once_after_selection"
+  },
+  "candidates": [
+    {
+      "id": "conv8_16_dense128",
+      "conv_blocks": [
+        {"filters": 8, "kernel_size": [5, 5], "strides": [3, 3], "padding": "SAME"},
+        {"filters": 16, "kernel_size": [3, 3], "strides": [2, 2], "padding": "SAME"}
+      ],
+      "dense_hidden": [128]
+    },
+    {
+      "id": "conv12_24_dense192",
+      "conv_blocks": [
+        {"filters": 12, "kernel_size": [5, 5], "strides": [3, 3], "padding": "SAME"},
+        {"filters": 24, "kernel_size": [3, 3], "strides": [2, 2], "padding": "SAME"}
+      ],
+      "dense_hidden": [192]
+    },
+    {
+      "id": "conv16_32_dense256",
+      "conv_blocks": [
+        {"filters": 16, "kernel_size": [5, 5], "strides": [3, 3], "padding": "SAME"},
+        {"filters": 32, "kernel_size": [3, 3], "strides": [2, 2], "padding": "SAME"}
+      ],
+      "dense_hidden": [256]
+    }
+  ]
+}
