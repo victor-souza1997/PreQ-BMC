@@ -24,4 +24,5 @@ logs
 prominent_results/
 LADC_2026
 data/
-src/benchmark/platescratchpad/
+src/benchmark/plate
+scratchpad/
