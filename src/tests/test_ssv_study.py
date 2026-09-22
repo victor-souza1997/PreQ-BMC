@@ -36,7 +36,7 @@ class SsvStudyTest(unittest.TestCase):
             study = {"config": config, "dataset_root": "synthetic", "model_path": str(weights),
                      "model_sha256": sha256(weights), "source_float32_test_accuracy": 1.,
                      "records": [{"id": "synthetic", "sha256": "fixture", "class_id": 0, "split": "test"}]}
-            region = {"run_id": "synthetic_fixture_not_a_certificate", "byte_crop_property_verified": True,
+            region = {"run_id": "synthetic_fixture_not_a_certificate", "byte_crop_property_verified": False,
                       "model_sha256": sha256(weights), "generated_source_sha256": sha256(source),
                       "qif": [asdict(s) for s in specs]}
             with patch("scripts.evaluate_ssv_host.load_crop", return_value=np.full((10, 9, 3), 128, dtype=np.uint8)):
@@ -44,8 +44,18 @@ class SsvStudyTest(unittest.TestCase):
             self.assertTrue(result["all_host_parity_passed"])
             self.assertEqual(result["methods"][0]["host_c_accuracy"], 1.)
             self.assertEqual(result["android_parity"], "NOT_MEASURED")
+            self.assertFalse(result["formal_status_modified"])
+            self.assertTrue(result["selected_quality_accepted"])
+            self.assertEqual(result["source_float32_test_accuracy"], 1.)
+            self.assertTrue((root / "quality" / "table_host_quality.csv").is_file())
             for method in result["methods"]:
                 self.assertEqual(method["optimization_mismatches"], {"-O0": 0, "-O2": 0})
+                self.assertIn(method["certification_scope"], {"UNCERTIFIED_BASELINE", "UNVERIFIED_FIXED_ARTIFACT"})
+                self.assertEqual(method["c_vs_float"]["prediction_mismatch_rate"], 0)
+            with self.assertRaises(FileExistsError):
+                evaluate(study, region, root, root / "quality")
+            with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                evaluate(study, {**region, "generated_source_sha256": "tampered"}, root, root / "bad")
 
     def test_tracks_never_cross_validation_boundary(self):
         rows = [{"id": f"{c}/{t}/{i}", "class_id": c, "track_id": f"{c}:{t}"}

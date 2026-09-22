@@ -517,6 +517,16 @@ def cmd_gtsrb_prepare_refinement(args: argparse.Namespace, extra: list[str]) -> 
                             ["--config", str(args.config), "--output", str(args.output)], extra)
 
 
+def cmd_gtsrb_evaluate_host(args: argparse.Namespace, extra: list[str]) -> int:
+    arguments = ["--study", str(args.study), "--output", str(args.output),
+                 "--max-accuracy-drop-pp", str(args.max_accuracy_drop_pp)]
+    if args.artifact:
+        arguments.extend(["--artifact", str(args.artifact)])
+    else:
+        arguments.extend(["--region", str(args.region)])
+    return _run_gtsrb_module("scripts.evaluate_ssv_host", arguments, extra)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="preqbmc", description="Public PreQ-BMC artifact CLI.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -695,6 +705,15 @@ def build_parser() -> argparse.ArgumentParser:
     gtsrb_refinement.add_argument("--config", type=Path, default=Path("experiments/sign_affine_residual_pilot.json"))
     gtsrb_refinement.add_argument("--output", type=Path, required=True)
     gtsrb_refinement.set_defaults(func=cmd_gtsrb_prepare_refinement)
+
+    gtsrb_quality = gtsrb_commands.add_parser("evaluate-host", help="Measure full-test accuracy retention and host integer parity.")
+    gtsrb_quality.add_argument("--study", type=Path, required=True)
+    quality_identity = gtsrb_quality.add_mutually_exclusive_group(required=True)
+    quality_identity.add_argument("--region", type=Path)
+    quality_identity.add_argument("--artifact", type=Path)
+    gtsrb_quality.add_argument("--output", type=Path, required=True, help="New measurement directory; must not exist.")
+    gtsrb_quality.add_argument("--max-accuracy-drop-pp", type=float, default=0.0)
+    gtsrb_quality.set_defaults(func=cmd_gtsrb_evaluate_host)
 
     verify = subparsers.add_parser("verify-environment", help="Report solver and Python package availability.")
     verify.add_argument(

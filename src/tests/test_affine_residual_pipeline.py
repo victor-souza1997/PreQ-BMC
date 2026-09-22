@@ -72,6 +72,9 @@ class AffineResidualPipelineTest(unittest.TestCase):
             enc.dense_layers[0].int_bit = 9
             enc._verify_affine_residual_margin(**ARGS)
             self.assertFalse(enc.affine_residual_records[-1]['proofs'][0]['cache_hit'])
+            hidden_calls = [r for r in enc.esbmc_call_records if r['proof_role'].startswith('hidden_')]
+            self.assertTrue(all(r['layer_index'] == 0 for r in hidden_calls))
+            self.assertEqual(hidden_calls[-1]['Q'], 9)
 
     def test_output_recovery_preserves_failed_call_and_checks_remaining_classes(self):
         with tempfile.TemporaryDirectory() as temp:

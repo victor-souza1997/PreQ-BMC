@@ -3997,7 +3997,9 @@ class GPEncoding:
         kernel. Its nondeterministic input is constrained to the last hidden layer's
         verified activation box, which already contains the inherited derived budget;
         adding that budget again would be unsoundly pessimistic. A VERIFIED result is
-        therefore a sound box-level certificate. A failing hidden-box point is not
+        therefore a box-level certificate unless explicitly resolved by the opt-in
+        affine-residual proof, whose kernel lemmas and composition checker must all
+        verify over the original input box. A failing hidden-box point is not
         necessarily reachable from a common network input, so every non-VERIFIED
         solver outcome remains MARGIN_INCONCLUSIVE rather than a refutation.
         """
@@ -4957,9 +4959,12 @@ class GPEncoding:
                 result = self._run_esbmc_file(harness, extract_counterexample=False)
                 total_time += result.elapsed_seconds
                 self._stats["esbmc_calls"] += 1.0
+                hidden_lemma = kind == "affine_residual_kernel_lemma" and name.startswith("hidden_")
                 call = self._esbmc_call_record(
-                    result=result, layer_index=layer_index, block_index=None,
-                    start_neuron=None, end_neuron=None, all_bit=all_bit, frac_bit=frac_bit,
+                    result=result, layer_index=0 if hidden_lemma else layer_index, block_index=None,
+                    start_neuron=None, end_neuron=None,
+                    all_bit=hidden_q if hidden_lemma else all_bit,
+                    frac_bit=hidden_f if hidden_lemma else frac_bit,
                     harness=harness, property_type=kind, mode="affine_residual_composition",
                     input_dim=1 if kind.endswith("kernel_lemma") else 3,
                     output_neurons=1)

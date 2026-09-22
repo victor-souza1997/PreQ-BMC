@@ -94,17 +94,23 @@ the final region status. No missing device metric is replaced by zero.
 
 ## Android gate and remaining experiments
 
-After a region verifies, run the full-test host comparison. This evaluates
+Independently of whether a region verifies, run the full-test host comparison. This evaluates
 an internal uniform Q16/F8 arithmetic control and the selected formats against the
 same test split, including exact Python/C intermediate values, encoder parity,
 actual library/array sizes, and a streamed device-replay corpus:
 
 ```sh
-PYTHONPATH=src python -m scripts.evaluate_ssv_host \
+preqbmc gtsrb evaluate-host \
   --study output/ssv2026_gtsrb_pilot/study.json \
   --region output/ssv2026_gtsrb_runs/<run_id>/region_summary.json \
   --output output/ssv2026_gtsrb_host_quality
 ```
+
+Use `--artifact <artifact.json>` instead of `--region` to evaluate a frozen
+program independently of certification. Float32 and quantized-weight Keras
+comparisons, prediction regressions and accuracy loss are now measured as well.
+See [accuracy and refinement](accuracy_and_refinement.md) for denominators,
+acceptance criteria, output files and the distinct Android validation step.
 
 The uniform control is explicitly uncertified. Use the named TFLite int8 and
 float32 baselines in the [revised protocol](review_response.md) for the device
