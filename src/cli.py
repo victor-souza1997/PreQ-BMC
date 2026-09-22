@@ -483,6 +483,12 @@ def cmd_gtsrb_search_deep_model(args: argparse.Namespace, extra: list[str]) -> i
     return _run_gtsrb_module("scripts.search_ssv_deep_source_model", arguments, extra)
 
 
+def cmd_gtsrb_evaluate_deep_model(args: argparse.Namespace, extra: list[str]) -> int:
+    arguments = ["--search-output", str(args.search_output), "--output", str(args.output),
+                 "--batch-size", str(args.batch_size)]
+    return _run_gtsrb_module("scripts.evaluate_ssv_deep_source_model", arguments, extra)
+
+
 def cmd_gtsrb_run(args: argparse.Namespace, extra: list[str]) -> int:
     arguments = ["--study", str(args.study), "--output", str(args.output)]
     for run_id in args.only:
@@ -715,6 +721,17 @@ def build_parser() -> argparse.ArgumentParser:
                                          help="New search directory; must not exist.")
     gtsrb_search_deep_model.add_argument("--check-config", action="store_true")
     gtsrb_search_deep_model.set_defaults(func=cmd_gtsrb_search_deep_model)
+
+    gtsrb_evaluate_deep_model = gtsrb_commands.add_parser(
+        "evaluate-deep-model",
+        help="Consume the held-out test split once for a selected deep source model.",
+    )
+    gtsrb_evaluate_deep_model.add_argument("--search-output", type=Path, required=True,
+                                           help="Directory holding search_summary.json.")
+    gtsrb_evaluate_deep_model.add_argument("--output", type=Path, required=True,
+                                           help="Report directory; test_evaluation.json must not exist.")
+    gtsrb_evaluate_deep_model.add_argument("--batch-size", type=int, default=128)
+    gtsrb_evaluate_deep_model.set_defaults(func=cmd_gtsrb_evaluate_deep_model)
 
     gtsrb_run = gtsrb_commands.add_parser("run", help="Run frozen regions through preimages and ESBMC.")
     gtsrb_run.add_argument("--study", type=Path, default=Path("output/sign_experiments/study.json"))
