@@ -1,0 +1,77 @@
+% Evidence-aligned replacement for the original strategy text.
+\paragraph{Scope.}
+We investigate whether a neural-network implementation whose fixed-point
+semantics are checked by PreQ-BMC can be transferred to an Android Automotive
+OS (AAOS) target with measurable and reproducible deployment cost.  The case
+study is traffic-sign classification on GTSRB.  Our contribution is not a
+vehicle-level safety argument: it is a per-region local-robustness certificate
+for a generated integer C program, followed by identity-bound execution of that
+program on an automotive Android platform.
+
+\paragraph{Quantized implementation.}
+PreQ-BMC selects one shared format $\langle Q_\ell,I_\ell,F_\ell\rangle$ for
+each layer and freezes the generated C source before the evaluation cohort is
+examined.  We do not impose eight bits when the proof/quality constraints
+require a wider representation.  The current frozen artifact uses
+$\langle12,3,8\rangle$ in the hidden layer and
+$\langle14,5,8\rangle$ at the output.  Its reference backend stores values in
+\texttt{int64\_t} and accumulates in \texttt{\_\_int128}; consequently, int8
+and 32-bit-accumulator claims do not apply to this artifact.  TFLite float32 and
+post-training int8 are evaluated as uncertified deployment baselines.
+
+\paragraph{Formal property.}
+For a byte-valued crop $x\in\{0,\ldots,255\}^{d}$ and raw-byte radius
+$\varepsilon$, the verified region is
+\[
+  \mathcal R(x,\varepsilon)=
+  \{x'\in\{0,\ldots,255\}^{d}:\lVert x'-x\rVert_\infty\leq\varepsilon\}.
+\]
+The encoder, half-away-from-zero rounding, saturation, ReLU order, and
+lowest-index tie rule are explicit in the generated C.  A real-arithmetic MILP
+source gate first checks that a robustness property exists to transfer; its
+floating-point solver is part of the stated trust boundary.  MILP preimages then
+define layer contracts.  ESBMC checks the deployed integer arithmetic in neuron
+blocks, all using the same layer format, and the pipeline additionally checks
+contract chaining and containment of the byte-input set.  When a Cartesian
+hidden box loses decisive input correlation, an affine-residual refinement
+composes the shared-input coefficients before interval maximization and admits
+only bounds whose rounding/clamp lemmas and final composition obligation are
+all verified by ESBMC.
+
+Brightness, contrast, blur, patch, geometric, and physical-sign transformations
+are outside this property.  They may be empirical stress tests, but are not
+included in the formal claim without a separate encoding.
+
+\paragraph{Android Automotive evaluation.}
+The exact source hash certified for successful regions is cross-compiled for
+ARM64 with the Android NDK.  A device replay corpus contains the integer inputs
+and expected logits for all 12,630 frozen test images; it is bound to the model,
+generated source, and region-certificate hashes.  Zero replay mismatches are
+required before performance results are accepted.  We report whether the
+installed image declares \texttt{android.hardware.type.automotive}; otherwise
+the target is described as ordinary Android on an automotive-class board, not
+AAOS.  Native C measurements are kept separate from JNI/APK parity.
+
+On a Khadas VIM3, we measure the verified C backend on the measured Cortex-A53
+and Cortex-A73 core clusters and compare it with TFLite float32 CPU and TFLite
+PTQ-int8 CPU.  An NNAPI/NPU result is reported only when actual accelerator
+placement is observed rather than CPU fallback.  For each method and affinity
+we use at least ten independent process trials after warmup and report latency,
+throughput, jitter, process memory, and artifact bytes.  Energy is obtained from
+synchronized external-meter traces with paired idle windows; CPU utilization is
+not used as an energy proxy.  The TFLite/NNAPI arithmetic is measured but not
+covered by the PreQ-BMC certificate.
+
+\paragraph{Current evidence and remaining work.}
+The source model reaches $41.7498\%$ test accuracy, while the selected integer C
+artifact reaches $41.6627\%$ (a $0.0871$ percentage-point decrease) and matches
+the independent Python integer implementation on every test image at host
+\texttt{-O0} and \texttt{-O2}.  In one paired pilot, the interval-box output
+query was inconclusive whereas affine-residual refinement certified the same
+image, radius, QIF, and generated program.  These results validate the mechanism
+but not its cohort-level effectiveness.  Before the end-to-end claim is made,
+we must complete the prepared 27-region paired formal campaign, replay the full
+corpus on the AAOS target, execute all device baselines, and collect repeated
+power/performance measurements.  The present classifier accuracy supports a
+proof-of-concept claim only; practical ADAS relevance requires a stronger source
+model followed by a new frozen-format, formal, and device evaluation.

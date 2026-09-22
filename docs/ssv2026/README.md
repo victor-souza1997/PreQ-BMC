@@ -128,6 +128,26 @@ cmake -S examples/ssv_android -B output/android_build \
 cmake --build output/android_build
 ```
 
+The same build also creates `preqbmc_ssv_benchmark`. Freeze the all-test replay
+corpus and collect an identity-bound device report with:
+
+```sh
+preqbmc gtsrb prepare-android \
+  --host-quality output/sign_host_quality_final_20260921 \
+  --certificate output/sign_milp_tightest_20260920/image7_eps2_beta1_cuts0/region_summary.json \
+  --output output/sign_android_bundle_new
+preqbmc gtsrb run-android \
+  --bundle output/sign_android_bundle_new \
+  --binary output/android_build/preqbmc_ssv_benchmark \
+  --output output/sign_android_device_new --trials 10
+```
+
+This is native-C replay and inference-only timing. It explicitly does not mark
+JNI, APK, NNAPI/NPU or power as measured. It also distinguishes an AAOS image
+from ordinary Android using the declared automotive system feature. The
+corrected paper positioning and minimum experiment set are in
+[the Android Automotive paper strategy](paper_strategy_android_automotive.md).
+
 Channels and dimensions are read from the generated encoder. The NDK setup follows the
 [official CMake toolchain documentation](https://developer.android.com/ndk/guides/cmake).
 Include `Qnn.java` and the library in a device test app. Feed exact decoded HWC

@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read",
+      "Edit(//home/joao/code/preqbmc/**)",
+      "Edit(//tmp/claude-1000/**)"
+    ],
+    "deny": [
+      "Bash(git checkout -- *)",
+      "Bash(git checkout .)",
+      "Bash(git restore *)",
+      "Bash(git reset --hard*)",
+      "Bash(git clean -*)",
+      "Bash(rm -rf /*)"
+    ]
+  }
+}

@@ -527,6 +527,25 @@ def cmd_gtsrb_evaluate_host(args: argparse.Namespace, extra: list[str]) -> int:
     return _run_gtsrb_module("scripts.evaluate_ssv_host", arguments, extra)
 
 
+def cmd_gtsrb_prepare_android(args: argparse.Namespace, extra: list[str]) -> int:
+    arguments = ["--host-quality", str(args.host_quality), "--output", str(args.output)]
+    for certificate in args.certificate:
+        arguments += ["--certificate", str(certificate)]
+    return _run_gtsrb_module("scripts.prepare_ssv_android_bundle", arguments, extra)
+
+
+def cmd_gtsrb_run_android(args: argparse.Namespace, extra: list[str]) -> int:
+    arguments = ["--bundle", str(args.bundle), "--binary", str(args.binary),
+                 "--output", str(args.output), "--trials", str(args.trials),
+                 "--warmup", str(args.warmup), "--latency-samples", str(args.latency_samples),
+                 "--throughput-iterations", str(args.throughput_iterations)]
+    if args.serial:
+        arguments += ["--serial", args.serial]
+    if args.core_mask:
+        arguments += ["--core-mask", args.core_mask]
+    return _run_gtsrb_module("scripts.run_ssv_android_device", arguments, extra)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="preqbmc", description="Public PreQ-BMC artifact CLI.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -714,6 +733,25 @@ def build_parser() -> argparse.ArgumentParser:
     gtsrb_quality.add_argument("--output", type=Path, required=True, help="New measurement directory; must not exist.")
     gtsrb_quality.add_argument("--max-accuracy-drop-pp", type=float, default=0.0)
     gtsrb_quality.set_defaults(func=cmd_gtsrb_evaluate_host)
+
+    gtsrb_android = gtsrb_commands.add_parser("prepare-android", help="Freeze an Android parity and benchmark bundle.")
+    gtsrb_android.add_argument("--host-quality", type=Path, required=True)
+    gtsrb_android.add_argument("--output", type=Path, required=True, help="New bundle directory; must not exist.")
+    gtsrb_android.add_argument("--certificate", type=Path, action="append", default=[],
+                               help="Bind a VERIFIED region summary for the exact generated C; repeat as needed.")
+    gtsrb_android.set_defaults(func=cmd_gtsrb_prepare_android)
+
+    gtsrb_android_run = gtsrb_commands.add_parser("run-android", help="Replay and benchmark the native C artifact through adb.")
+    gtsrb_android_run.add_argument("--bundle", type=Path, required=True)
+    gtsrb_android_run.add_argument("--binary", type=Path, required=True)
+    gtsrb_android_run.add_argument("--output", type=Path, required=True, help="New device report directory")
+    gtsrb_android_run.add_argument("--serial")
+    gtsrb_android_run.add_argument("--core-mask")
+    gtsrb_android_run.add_argument("--trials", type=int, default=10)
+    gtsrb_android_run.add_argument("--warmup", type=int, default=10000)
+    gtsrb_android_run.add_argument("--latency-samples", type=int, default=10000)
+    gtsrb_android_run.add_argument("--throughput-iterations", type=int, default=100000)
+    gtsrb_android_run.set_defaults(func=cmd_gtsrb_run_android)
 
     verify = subparsers.add_parser("verify-environment", help="Report solver and Python package availability.")
     verify.add_argument(

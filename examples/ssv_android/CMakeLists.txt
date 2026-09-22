@@ -7,7 +7,19 @@ if(NOT EXISTS "${QNN_SOURCE}")
   message(FATAL_ERROR "QNN_SOURCE must name the generated qnn.c including its byte encoder")
 endif()
 add_library(preqbmc_ssv SHARED "${QNN_SOURCE}" qnn_jni.c)
+add_executable(preqbmc_ssv_benchmark "${QNN_SOURCE}" qnn_benchmark.c)
+if(NOT DEFINED CMAKE_ANDROID_NDK_VERSION)
+  set(CMAKE_ANDROID_NDK_VERSION "unknown")
+endif()
+target_compile_definitions(preqbmc_ssv_benchmark PRIVATE
+  PREQBMC_COMPILER_ID="${CMAKE_C_COMPILER_ID}"
+  PREQBMC_COMPILER_VERSION="${CMAKE_C_COMPILER_VERSION}"
+  PREQBMC_NDK_VERSION="${CMAKE_ANDROID_NDK_VERSION}"
+  PREQBMC_ANDROID_ABI="${ANDROID_ABI}"
+  PREQBMC_ANDROID_PLATFORM="${ANDROID_PLATFORM}")
 # Q/I/F constants are retained in the shared exporter for audit/unwind metadata.
 set_source_files_properties("${QNN_SOURCE}" PROPERTIES COMPILE_OPTIONS "-Wno-unused-const-variable")
 target_compile_features(preqbmc_ssv PRIVATE c_std_11)
 target_compile_options(preqbmc_ssv PRIVATE -O2 -Wall -Wextra -Werror)
+target_compile_features(preqbmc_ssv_benchmark PRIVATE c_std_11)
+target_compile_options(preqbmc_ssv_benchmark PRIVATE -O2 -Wall -Wextra -Werror)
