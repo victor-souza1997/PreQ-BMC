@@ -489,6 +489,22 @@ def cmd_gtsrb_evaluate_deep_model(args: argparse.Namespace, extra: list[str]) ->
     return _run_gtsrb_module("scripts.evaluate_ssv_deep_source_model", arguments, extra)
 
 
+def cmd_gtsrb_evaluate_conv(args: argparse.Namespace, extra: list[str]) -> int:
+    return _run_gtsrb_module(
+        "scripts.evaluate_ssv_conv_quantization",
+        ["--config", str(args.config), "--output", str(args.output),
+         "--split", args.split, "--batch-size", str(args.batch_size)],
+        extra,
+    )
+
+
+def cmd_gtsrb_conv_pilot(args: argparse.Namespace, extra: list[str]) -> int:
+    arguments = ["--config", str(args.config), "--output", str(args.output)]
+    if args.check_config:
+        arguments.append("--check-config")
+    return _run_gtsrb_module("scripts.run_ssv_conv_native_pilot", arguments, extra)
+
+
 def cmd_gtsrb_run(args: argparse.Namespace, extra: list[str]) -> int:
     arguments = ["--study", str(args.study), "--output", str(args.output)]
     for run_id in args.only:
@@ -732,6 +748,44 @@ def build_parser() -> argparse.ArgumentParser:
                                            help="Report directory; test_evaluation.json must not exist.")
     gtsrb_evaluate_deep_model.add_argument("--batch-size", type=int, default=128)
     gtsrb_evaluate_deep_model.set_defaults(func=cmd_gtsrb_evaluate_deep_model)
+
+    gtsrb_evaluate_conv = gtsrb_commands.add_parser(
+        "evaluate-conv",
+        help="Measure compact convolution fixed-point quality before formal runs.",
+    )
+    gtsrb_evaluate_conv.add_argument(
+        "--config", type=Path, default=Path("experiments/sign_conv_native_pilot.json")
+    )
+    gtsrb_evaluate_conv.add_argument("--output", type=Path, required=True)
+    gtsrb_evaluate_conv.add_argument("--split", choices=("validation", "test"), default="test")
+    gtsrb_evaluate_conv.add_argument("--batch-size", type=int, default=128)
+    gtsrb_evaluate_conv.set_defaults(func=cmd_gtsrb_evaluate_conv)
+
+    gtsrb_conv_pilot = gtsrb_commands.add_parser(
+        "conv-pilot",
+        help="Run a convolution-native ESBMC proof campaign.",
+    )
+    gtsrb_conv_pilot.add_argument(
+        "--config", type=Path, default=Path("experiments/sign_conv_native_pilot.json")
+    )
+    gtsrb_conv_pilot.add_argument("--output", type=Path, required=True,
+                                  help="New pilot output directory; must not exist.")
+    gtsrb_conv_pilot.add_argument("--check-config", action="store_true")
+    gtsrb_conv_pilot.set_defaults(func=cmd_gtsrb_conv_pilot)
+
+    gtsrb_conv_verify = gtsrb_commands.add_parser(
+        "conv-verify",
+        help="Run a complete or bounded proof-carrying convolution campaign.",
+    )
+    gtsrb_conv_verify.add_argument(
+        "--config", type=Path, default=Path("experiments/sign_conv_native_complete_proof.json")
+    )
+    gtsrb_conv_verify.add_argument(
+        "--output", type=Path, required=True,
+        help="New proof output directory; must not exist.",
+    )
+    gtsrb_conv_verify.add_argument("--check-config", action="store_true")
+    gtsrb_conv_verify.set_defaults(func=cmd_gtsrb_conv_pilot)
 
     gtsrb_run = gtsrb_commands.add_parser("run", help="Run frozen regions through preimages and ESBMC.")
     gtsrb_run.add_argument("--study", type=Path, default=Path("output/sign_experiments/study.json"))

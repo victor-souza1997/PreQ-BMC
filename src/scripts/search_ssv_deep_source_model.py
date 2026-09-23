@@ -22,18 +22,38 @@ from scripts.search_ssv_source_model import (
     _sha256,
 )
 
-
 @dataclass(frozen=True)
 class DeepCandidatePlan:
     candidate_id: str
     geometries: tuple[ConvGeometry, ...]
     dense_hidden: tuple[int, ...]
+    global_average_pooling: bool
+    average_pool_size: tuple[int, int] | None
     classes: int
     max_affine_entries: int
     shared_parameter_count: int
     affine_entries_per_layer: tuple[int, ...]
     relus_per_layer: tuple[int, ...]
     dropout_rates: tuple[float, ...]
+
+
+def _available_memory_mib() -> int | None:
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _write_progress(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+class SearchResourcePause(RuntimeError):
+    """Training paused after an epoch checkpoint because memory became scarce."""
 
 
 def _positive_int(value, name):
@@ -76,11 +96,40 @@ def deep_candidate_plan(config: dict[str, Any], candidate: dict[str, Any]) -> De
         relus.append(math.prod(geometry.output_shape))
         geometries.append(geometry)
         current = geometry.output_shape
+    dense_hidden_values = candidate.get("dense_hidden", ())
+    if not isinstance(dense_hidden_values, (list, tuple)):
+        raise ValueError("dense_hidden must be a list; it may be empty for a direct head")
     dense_hidden = tuple(_positive_int(value, "dense_hidden")
-                         for value in candidate.get("dense_hidden", ()))
-    if not dense_hidden:
-        raise ValueError("A deep candidate needs at least one hidden dense layer")
+                         for value in dense_hidden_values)
     previous = math.prod(current)
+    global_average_pooling = candidate.get("global_average_pooling", False)
+    if type(global_average_pooling) is not bool:
+        raise ValueError("global_average_pooling must be boolean")
+    if global_average_pooling and dense_hidden:
+        raise ValueError("global_average_pooling and dense_hidden are mutually exclusive")
+    pool_values = candidate.get("average_pool_size")
+    if global_average_pooling and pool_values is not None:
+        raise ValueError("Choose global_average_pooling or average_pool_size, not both")
+    if global_average_pooling:
+        average_pool_size = current[:2]
+    elif pool_values is None:
+        average_pool_size = None
+    else:
+        if not isinstance(pool_values, (list, tuple)) or len(pool_values) != 2:
+            raise ValueError("average_pool_size must contain two positive integers")
+        average_pool_size = tuple(_positive_int(value, "average_pool_size") for value in pool_values)
+    if average_pool_size is not None:
+        ph, pw = average_pool_size
+        height, width, channels = current
+        if height % ph or width % pw:
+            raise ValueError("average_pool_size must divide the final feature map")
+        pooled_units = (height // ph) * (width // pw) * channels
+        entries = previous * pooled_units
+        if entries > config["max_affine_entries"]:
+            raise ValueError(f"{candidate_id} pooling layer needs {entries} affine entries")
+        affine_entries.append(entries)
+        relus.append(pooled_units)
+        previous = pooled_units
     for width in (*dense_hidden, config["classes"]):
         entries = previous * width
         if entries > config["max_affine_entries"]:
@@ -97,7 +146,8 @@ def deep_candidate_plan(config: dict[str, Any], candidate: dict[str, Any]) -> De
             or any(not np.isfinite(value) or not 0 <= value < 1 for value in dropout_rates)):
         raise ValueError("Need one dropout rate in [0,1) per hidden stage")
     return DeepCandidatePlan(
-        candidate_id, tuple(geometries), dense_hidden, config["classes"],
+        candidate_id, tuple(geometries), dense_hidden, global_average_pooling,
+        average_pool_size, config["classes"],
         config["max_affine_entries"], parameter_count,
         tuple(affine_entries), tuple(relus), dropout_rates,
     )
@@ -118,6 +168,9 @@ def validate_config(config: dict[str, Any]) -> list[DeepCandidatePlan]:
     if type(config.get("max_affine_entries")) is not int or config["max_affine_entries"] <= 0:
         raise ValueError("max_affine_entries must be positive")
     training = config.get("training", {})
+    minimum_memory = config.get("minimum_available_memory_mib", 4096)
+    if type(minimum_memory) is not int or minimum_memory < 0:
+        raise ValueError("minimum_available_memory_mib must be a nonnegative integer")
     for key in ("seed", "epochs", "batch_size", "early_stopping_patience", "lr_plateau_patience"):
         if type(training.get(key)) is not int or training[key] <= 0:
             raise ValueError(f"training.{key} must be positive")
@@ -176,7 +229,16 @@ def _build_clean_model(tf, plan: DeepCandidatePlan):
         value = tf.keras.layers.ReLU(name=f"relu_conv_{index}")(value)
         if plan.dropout_rates[index]:
             value = tf.keras.layers.Dropout(plan.dropout_rates[index], name=f"dropout_conv_{index}")(value)
-    value = tf.keras.layers.Flatten(name="flatten")(value)
+    if plan.average_pool_size is not None:
+        value = tf.keras.layers.AveragePooling2D(
+            pool_size=plan.average_pool_size,
+            strides=plan.average_pool_size,
+            padding="valid",
+            name="average_pooling",
+        )(value)
+        value = tf.keras.layers.Flatten(name="pool_flatten")(value)
+    else:
+        value = tf.keras.layers.Flatten(name="flatten")(value)
     for index, width in enumerate(plan.dense_hidden):
         value = tf.keras.layers.Dense(width, use_bias=False, name=f"dense_{index}")(value)
         value = tf.keras.layers.BatchNormalization(name=f"bn_dense_{index}")(value)
@@ -217,6 +279,22 @@ def _fold_model(clean, plan: DeepCandidatePlan):
         conv_kernels.append(folded[0])
         conv_biases.append(folded[1])
     dense_kernels, dense_biases = [], []
+    if plan.average_pool_size is not None:
+        height, width, channels = plan.geometries[-1].output_shape
+        ph, pw = plan.average_pool_size
+        output_shape = (height // ph, width // pw, channels)
+        pool_kernel = np.zeros((height * width * channels, math.prod(output_shape)), dtype=np.float32)
+        scale = np.float32(1.0 / (ph * pw))
+        for oy, ox, channel in np.ndindex(output_shape):
+            output_index = np.ravel_multi_index((oy, ox, channel), output_shape)
+            for ky, kx in np.ndindex((ph, pw)):
+                input_index = np.ravel_multi_index(
+                    (oy * ph + ky, ox * pw + kx, channel), (height, width, channels),
+                )
+                pool_kernel[input_index, output_index] = scale
+        dense_kernels.append(pool_kernel)
+        dense_biases.append(np.zeros(math.prod(output_shape), dtype=np.float32))
+
     for index in range(len(plan.dense_hidden)):
         kernel = clean.get_layer(f"dense_{index}").get_weights()[0]
         bn = clean.get_layer(f"bn_dense_{index}")
@@ -269,6 +347,23 @@ def train_candidate(tf, plan, arrays, config, output):
             min_lr=training["minimum_learning_rate"],
         ),
     ]
+    backup_dir = output.parent / ".training_backups" / plan.candidate_id
+    callbacks.append(tf.keras.callbacks.BackupAndRestore(
+        backup_dir=str(backup_dir), save_freq="epoch", delete_checkpoint=False,
+    ))
+
+    class AvailableMemoryGuard(tf.keras.callbacks.Callback):
+        paused = False
+
+        def on_epoch_end(self, epoch, logs=None):
+            available = _available_memory_mib()
+            minimum = config.get("minimum_available_memory_mib", 4096)
+            if available is not None and available < minimum:
+                self.paused = True
+                self.model.stop_training = True
+
+    memory_guard = AvailableMemoryGuard()
+    callbacks.append(memory_guard)
     started = time.monotonic()
     history = model.fit(
         *arrays["train"], validation_data=arrays["validation"],
@@ -278,6 +373,10 @@ def train_candidate(tf, plan, arrays, config, output):
         callbacks=callbacks, verbose=2,
     )
     elapsed = time.monotonic() - started
+    if memory_guard.paused:
+        raise SearchResourcePause(
+            f"Available memory fell below {config.get('minimum_available_memory_mib', 4096)} MiB"
+        )
     logits = np.asarray(clean.predict(
         arrays["validation"][0], batch_size=training["batch_size"], verbose=0,
     ))
@@ -317,7 +416,11 @@ def train_candidate(tf, plan, arrays, config, output):
         "best_validation_accuracy_observed": float(max(serial_history["val_accuracy"])),
         "training_elapsed_seconds": float(elapsed),
         "geometries": [asdict(geometry) for geometry in plan.geometries],
-        "dense_hidden": list(plan.dense_hidden),
+        # The fixed pooling map remains an ordinary non-output affine layer.
+        "dense_hidden": ([plan.relus_per_layer[-1]]
+                         if plan.average_pool_size is not None else list(plan.dense_hidden)),
+        "global_average_pooling": plan.global_average_pooling,
+        "average_pool_size": list(plan.average_pool_size) if plan.average_pool_size else None,
         "shared_parameter_count": plan.shared_parameter_count,
         "affine_entries_per_layer": list(plan.affine_entries_per_layer),
         "relus_per_layer": list(plan.relus_per_layer),
@@ -340,8 +443,6 @@ def train_candidate(tf, plan, arrays, config, output):
 
 
 def search(config_path: Path, output: Path):
-    import tensorflow as tf
-
     config_path = Path(config_path).resolve()
     config = json.loads(config_path.read_text(encoding="utf-8"))
     plans = validate_config(config)
@@ -352,31 +453,77 @@ def search(config_path: Path, output: Path):
     if base.get("schema") != "ssv_restricted_cnn_v1":
         raise ValueError("Invalid frozen base study")
     output = Path(output).resolve()
-    output.mkdir(parents=True, exist_ok=False)
-    geometry = plans[0].geometries[0]
-    if config["preprocessing"]["resize"] == "nearest_floor_top_left":
-        arrays = _load_search_arrays(base, geometry)
-    else:
-        encoder = ByteImageEncoder(geometry.input_shape, resize_mode=config["preprocessing"]["resize"])
-        root = Path(base["dataset_root"])
-        arrays = {}
-        for split in ("train", "validation"):
-            rows = [row for row in base["records"] if row["split"] == split]
-            x = np.stack([encoder.resize(load_crop(root, row)) for row in rows])
-            arrays[split] = (x.astype(np.float32) / np.float32(256),
-                             np.asarray([row["class_id"] for row in rows], dtype=np.int64))
+    output.mkdir(parents=True, exist_ok=True)
+    final_summary = output / "search_summary.json"
+    if final_summary.exists():
+        existing = json.loads(final_summary.read_text(encoding="utf-8"))
+        if existing.get("config_sha256") != _sha256(config_path):
+            raise ValueError("Existing search output belongs to a different configuration")
+        return existing
+
     results, selected = [], None
     threshold = config["selection"]["minimum_validation_accuracy"]
-    for plan in plans:
-        result = train_candidate(tf, plan, arrays, config, output / plan.candidate_id)
+    next_plan_index = 0
+    for index, plan in enumerate(plans):
+        candidate_summary = output / plan.candidate_id / "candidate_summary.json"
+        if not candidate_summary.exists():
+            next_plan_index = index
+            break
+        result = json.loads(candidate_summary.read_text(encoding="utf-8"))
+        if result.get("candidate_id") != plan.candidate_id:
+            raise ValueError(f"Existing candidate output mismatch: {candidate_summary}")
         results.append(result)
+        next_plan_index = index + 1
         if result["validation_accuracy"] >= threshold:
             selected = result
             break
+
+    minimum_memory = config.get("minimum_available_memory_mib", 4096)
+    available_memory = _available_memory_mib()
+    paused = (selected is None and next_plan_index < len(plans)
+              and available_memory is not None and available_memory < minimum_memory)
+    tf = None
+    geometry = plans[0].geometries[0]
+    if not paused and selected is None and next_plan_index < len(plans):
+        import tensorflow as tf_module
+        tf = tf_module
+        if config["preprocessing"]["resize"] == "nearest_floor_top_left":
+            arrays = _load_search_arrays(base, geometry)
+        else:
+            encoder = ByteImageEncoder(
+                geometry.input_shape, resize_mode=config["preprocessing"]["resize"]
+            )
+            root = Path(base["dataset_root"])
+            arrays = {}
+            for split in ("train", "validation"):
+                rows = [row for row in base["records"] if row["split"] == split]
+                x = np.stack([encoder.resize(load_crop(root, row)) for row in rows])
+                arrays[split] = (
+                    x.astype(np.float32) / np.float32(256),
+                    np.asarray([row["class_id"] for row in rows], dtype=np.int64),
+                )
+        for plan in plans[next_plan_index:]:
+            available_memory = _available_memory_mib()
+            if available_memory is not None and available_memory < minimum_memory:
+                paused = True
+                break
+            try:
+                result = train_candidate(tf, plan, arrays, config, output / plan.candidate_id)
+            except SearchResourcePause:
+                paused = True
+                break
+            results.append(result)
+            if result["validation_accuracy"] >= threshold:
+                selected = result
+                break
+
     summary = {
         "schema": config["schema"],
-        "status": "SELECTED" if selected else "NO_CANDIDATE_MET_THRESHOLD",
+        "status": ("SELECTED" if selected else
+                   "RESOURCE_PAUSED" if paused else "NO_CANDIDATE_MET_THRESHOLD"),
         "minimum_validation_accuracy": threshold,
+        "minimum_available_memory_mib": minimum_memory,
+        "available_memory_mib_at_stop": _available_memory_mib(),
         "selected_candidate_id": selected["candidate_id"] if selected else None,
         "selected_candidate_summary": selected,
         "candidates": results,
@@ -392,9 +539,12 @@ def search(config_path: Path, output: Path):
         "proof_status": "NOT_RUN",
         "android_status": "NOT_MEASURED",
         "python_version": platform.python_version(),
-        "tensorflow_version": tf.__version__,
+        "tensorflow_version": tf.__version__ if tf is not None else None,
     }
-    write_new_json(output / "search_summary.json", summary)
+    if paused:
+        _write_progress(output / "search_progress.json", summary)
+    else:
+        write_new_json(final_summary, summary)
     return summary
 
 
@@ -414,7 +564,9 @@ def main():
     result = search(args.config, args.output)
     print(json.dumps({"status": result["status"],
                       "selected_candidate_id": result["selected_candidate_id"],
-                      "summary": str((args.output / "search_summary.json").resolve())}, indent=2))
+                      "summary": str((args.output / (
+                          "search_progress.json" if result["status"] == "RESOURCE_PAUSED"
+                          else "search_summary.json")).resolve())}, indent=2))
 
 
 if __name__ == "__main__":

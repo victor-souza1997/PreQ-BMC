@@ -1,0 +1,15 @@
+{
+  "schema": "ssv_conv_ibp_finetune_v1",
+  "source_search_output": "output/sign_conv_verification_aware_search_20260923",
+  "resize_mode": "nearest_center",
+  "epsilon_raw_bytes": 1,
+  "epochs": 30,
+  "warmup_epochs": 15,
+  "batch_size": 128,
+  "seed": 2031,
+  "learning_rate": 0.00002,
+  "maximum_robust_weight": 0.05,
+  "robust_logit_temperature": 100.0,
+  "minimum_validation_accuracy": 0.9,
+  "early_stopping_patience": 8
+}

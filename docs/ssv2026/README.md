@@ -3,6 +3,11 @@
 Read [feasibility.md](feasibility.md) first. This is an opt-in research prototype,
 not general CNN/ONNX support. Existing article configurations are unchanged.
 
+The new [convolution-native proof-carrying path](conv_native_verification.md)
+preserves compact kernels in Python, generated C, and ESBMC certificates.  It
+coexists with the older affine-lowering experiments documented below; results
+from the two paths must be identified by their proof mode.
+
 For the current traffic-sign campaign, use the
 [revised protocol and fixed-artifact instructions](review_response.md).
 The original per-region synthesis commands below remain useful as exploratory

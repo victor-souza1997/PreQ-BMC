@@ -1,0 +1,35 @@
+{
+  "schema": "ssv_conv_native_pilot_v1",
+  "source_search_output": "output/sign_deep_source_model_search_4stage_20260922",
+  "test_evaluation": "output/sign_deep_source_model_test_20260922/test_evaluation.json",
+  "sample_id": "Final_Test/Images/06330.ppm",
+  "epsilon_raw_bytes": 1,
+  "resize_mode": "nearest_center",
+  "input_format": {
+    "total_bits": 16,
+    "integer_bits": 7,
+    "fractional_bits": 8
+  },
+  "qif": [
+    {"total_bits": 16, "integer_bits": 7, "fractional_bits": 8},
+    {"total_bits": 16, "integer_bits": 7, "fractional_bits": 8},
+    {"total_bits": 16, "integer_bits": 7, "fractional_bits": 8},
+    {"total_bits": 16, "integer_bits": 7, "fractional_bits": 8},
+    {"total_bits": 16, "integer_bits": 7, "fractional_bits": 8},
+    {"total_bits": 16, "integer_bits": 7, "fractional_bits": 8}
+  ],
+  "proof": {
+    "proof_mode": "proof_carrying_interval",
+    "block_size": 24,
+    "max_blocks_per_layer": 1,
+    "profile": "paper-z3",
+    "timeout_seconds": 60,
+    "memlimit": "6g",
+    "fail_fast": true
+  },
+  "claim_boundary": {
+    "purpose": "first-layer proof-carrying interval feasibility",
+    "network_certificate": false,
+    "required_for_verified": "all blocks, all bridges, and final margin must be ESBMC VERIFIED"
+  }
+}

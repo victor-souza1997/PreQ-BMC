@@ -38,14 +38,21 @@ class ByteImageEncoder:
         return np.array([min(high, (int(v) * (1 << self.fractional_bits) + 128) // 256)
                          for v in resized.flat], dtype=np.int64)
 
-    def box(self, image, epsilon):
-        """Exact image of the byte-domain box, including all resize repetitions."""
+    def byte_box(self, image, epsilon):
+        """Return the exact resized uint8 perturbation box before encoding."""
         eps = Fraction(str(epsilon))
         if eps < 0:
             raise ValueError("epsilon must be nonnegative and finite")
         resized = self.resize(image)
-        low = np.array([max(0, math.ceil(Fraction(int(v)) - eps)) for v in resized.flat], dtype=np.uint8).reshape(resized.shape)
-        high = np.array([min(255, math.floor(Fraction(int(v)) + eps)) for v in resized.flat], dtype=np.uint8).reshape(resized.shape)
+        low = np.array([max(0, math.ceil(Fraction(int(v)) - eps))
+                        for v in resized.flat], dtype=np.uint8).reshape(resized.shape)
+        high = np.array([min(255, math.floor(Fraction(int(v)) + eps))
+                         for v in resized.flat], dtype=np.uint8).reshape(resized.shape)
+        return low, high
+
+    def box(self, image, epsilon):
+        """Exact image of the byte-domain box, including all resize repetitions."""
+        low, high = self.byte_box(image, epsilon)
         return self.encode(low), self.encode(high)
 
     def render_c(self):

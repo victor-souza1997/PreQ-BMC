@@ -1,0 +1,31 @@
+{
+  "schema": "ssv_conv_native_pilot_v1",
+  "source_search_output": "output/sign_conv_verification_aware_search_20260923",
+  "test_evaluation": "output/sign_conv_verification_aware_test_20260923/test_evaluation.json",
+  "sample_id": "Final_Test/Images/06330.ppm",
+  "epsilon_raw_bytes": 1,
+  "resize_mode": "nearest_center",
+  "input_format": {"total_bits": 16, "integer_bits": 7, "fractional_bits": 8},
+  "qif": [
+    {"total_bits": 16, "integer_bits": 7, "fractional_bits": 8},
+    {"total_bits": 16, "integer_bits": 7, "fractional_bits": 8},
+    {"total_bits": 16, "integer_bits": 7, "fractional_bits": 8},
+    {"total_bits": 16, "integer_bits": 7, "fractional_bits": 8},
+    {"total_bits": 16, "integer_bits": 7, "fractional_bits": 8}
+  ],
+  "proof": {
+    "proof_mode": "proof_carrying_interval",
+    "exact_margin_refinement": true,
+    "block_size": 24,
+    "max_blocks_per_layer": null,
+    "profile": "paper-z3",
+    "timeout_seconds": 120,
+    "memlimit": "6g",
+    "fail_fast": true
+  },
+  "claim_boundary": {
+    "purpose": "complete proof attempt for verification-aware direct-head convolution model",
+    "network_certificate": "result_dependent",
+    "required_for_verified": "all transition certificates, bridges, input obligations, and final margins must be ESBMC VERIFIED"
+  }
+}

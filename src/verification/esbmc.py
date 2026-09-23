@@ -166,6 +166,11 @@ class ESBMCRunner:
             r"#define\s+CONTRACT_CUT_COUNT\s+(\d+)",
             r"#define\s+MARGIN_CUT_COUNT\s+(\d+)",
             r"#define\s+PREFIX_OUTPUT_SIZE\s+(\d+)",
+            # Convolution-native proof obligations use compact receptive fields.
+            r"#define\s+BLOCK_SIZE\s+(\d+)",
+            r"#define\s+LOCAL_INPUT_SIZE\s+(\d+)",
+            r"#define\s+MAX_TERMS\s+(\d+)",
+            r"#define\s+INVARIANT_SIZE\s+(\d+)",
         ]
 
         for pattern in patterns:

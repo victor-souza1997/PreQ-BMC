@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -9,7 +10,13 @@ from backends.fixed_point import LayerQuantizationSpec
 from backends.image_encoder import ByteImageEncoder
 from cli import main
 from models.restricted_conv import ConvGeometry, RestrictedSequentialCNN
-from scripts.search_ssv_deep_source_model import fold_batch_norm, validate_config
+from scripts.search_ssv_deep_source_model import (
+    _build_clean_model,
+    _fold_model,
+    fold_batch_norm,
+    search,
+    validate_config,
+)
 
 
 class DeepSourceModelTest(unittest.TestCase):
@@ -68,6 +75,10 @@ class DeepSourceModelTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "affine entries"):
             validate_config(config)
         config = json.loads(json.dumps(self.config))
+        config["minimum_available_memory_mib"] = -1
+        with self.assertRaisesRegex(ValueError, "minimum_available_memory_mib"):
+            validate_config(config)
+        config = json.loads(json.dumps(self.config))
         config["candidates"] = list(reversed(config["candidates"]))
         with self.assertRaisesRegex(ValueError, "increasing parameter"):
             validate_config(config)
@@ -78,6 +89,28 @@ class DeepSourceModelTest(unittest.TestCase):
                            "--output", "new-output"])
         self.assertEqual(result, 0)
         self.assertEqual(run.call_args.args[0], "scripts.search_ssv_deep_source_model")
+
+    def test_search_pauses_before_loading_training_data_when_memory_is_low(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "study.json"
+            base.write_text(json.dumps({"schema": "ssv_restricted_cnn_v1"}), encoding="utf-8")
+            config = json.loads(json.dumps(self.config))
+            config["base_study"] = str(base)
+            config["minimum_available_memory_mib"] = 10**9
+            config["candidates"] = [config["candidates"][0]]
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            output = root / "output"
+
+            result = search(config_path, output)
+
+            self.assertEqual(result["status"], "RESOURCE_PAUSED")
+            self.assertEqual(result["candidates"], [])
+            self.assertIsNone(result["tensorflow_version"])
+            self.assertTrue((output / "search_progress.json").exists())
+            self.assertFalse((output / "search_summary.json").exists())
+
 
     def test_center_nearest_resize_has_matching_c_mapping(self):
         image = np.arange(5 * 7 * 3, dtype=np.uint8).reshape(5, 7, 3)
@@ -102,6 +135,75 @@ class DeepSourceModelTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "physical-track split"):
             validate_config(config)
 
+    def test_direct_head_candidate_has_no_dense_relu(self):
+        config = json.loads(json.dumps(self.config))
+        config["candidates"] = [{
+            "id": "conv8_16_direct43",
+            "conv_blocks": config["candidates"][0]["conv_blocks"],
+            "dense_hidden": [],
+            "dropout_rates": [0.0, 0.0],
+        }]
+        plan = validate_config(config)[0]
+        self.assertEqual(plan.dense_hidden, ())
+        self.assertEqual(plan.relus_per_layer, (512, 256))
+        self.assertEqual(plan.affine_entries_per_layer[-1], 256 * 43)
+
+    def test_global_average_pooling_plan_is_sparse_and_has_no_trainable_dense_hidden(self):
+        config = json.loads(json.dumps(self.config))
+        config["candidates"] = [{
+            "id": "conv8_16_gap43",
+            "conv_blocks": config["candidates"][0]["conv_blocks"],
+            "dense_hidden": [],
+            "global_average_pooling": True,
+            "dropout_rates": [0.0, 0.0],
+        }]
+        plan = validate_config(config)[0]
+        flattened = int(np.prod(plan.geometries[-1].output_shape))
+        channels = plan.geometries[-1].output_shape[-1]
+        self.assertTrue(plan.global_average_pooling)
+        self.assertEqual(plan.dense_hidden, ())
+        self.assertEqual(plan.affine_entries_per_layer[-2], flattened * channels)
+        self.assertEqual(plan.affine_entries_per_layer[-1], channels * 43)
+        self.assertEqual(plan.relus_per_layer[-1], channels)
+
+    def test_spatial_average_pooling_retains_quadrants(self):
+        config = json.loads(json.dumps(self.config))
+        config["candidates"] = [{
+            "id": "conv8_16_avg2_43",
+            "conv_blocks": config["candidates"][0]["conv_blocks"],
+            "dense_hidden": [],
+            "average_pool_size": [2, 2],
+            "dropout_rates": [0.0, 0.0],
+        }]
+        plan = validate_config(config)[0]
+        height, width, channels = plan.geometries[-1].output_shape
+        expected_units = (height // 2) * (width // 2) * channels
+        self.assertEqual(plan.average_pool_size, (2, 2))
+        self.assertFalse(plan.global_average_pooling)
+        self.assertEqual(plan.relus_per_layer[-1], expected_units)
+        self.assertEqual(plan.affine_entries_per_layer[-2],
+                         height * width * channels * expected_units)
+        self.assertEqual(plan.affine_entries_per_layer[-1], expected_units * 43)
+
+    def test_global_average_pooling_lowers_to_same_float_function(self):
+        import tensorflow as tf
+
+        config = json.loads(json.dumps(self.config))
+        config["candidates"] = [{
+            "id": "conv8_16_gap43",
+            "conv_blocks": config["candidates"][0]["conv_blocks"],
+            "dense_hidden": [],
+            "global_average_pooling": True,
+            "dropout_rates": [0.0, 0.0],
+        }]
+        plan = validate_config(config)[0]
+        tf.keras.utils.set_random_seed(17)
+        clean = _build_clean_model(tf, plan)
+        image = np.random.default_rng(17).uniform(
+            0, 1, size=(1, *plan.geometries[0].input_shape),
+        ).astype(np.float32)
+        expected = np.asarray(clean(image, training=False))[0]
+        actual = _fold_model(clean, plan).float_reference(image[0])
     def test_four_stage_candidate_reduces_dense_input(self):
         path = Path(__file__).resolve().parents[2] / "experiments/sign_deep_source_model_search_4stage.json"
         config = json.loads(path.read_text(encoding="utf-8"))

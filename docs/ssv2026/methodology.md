@@ -1,5 +1,10 @@
 # Restricted prototype: proof scope and limitations
 
+The convolution-native extension and its proof basis are specified in
+[conv_native_verification.md](conv_native_verification.md).  The affine-lowering
+statements below describe the legacy/preimage adapter and remain applicable only
+when that path is selected.
+
 Let a crop x be an HWC array of unsigned bytes, D={0,...,255}^(HWC), and
 R(x,e)={x' in D : max_j |x'_j-x_j| <= e}. Image decoding and sign detection
 are outside this domain. E first selects nearest-neighbor coordinates using

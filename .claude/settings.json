@@ -1,18 +1,16 @@
 {
   "permissions": {
+    "defaultMode": "dontAsk",
     "allow": [
-      "Bash(*)",
+      "Bash",
       "Read",
-      "Edit(//home/joao/code/preqbmc/**)",
-      "Edit(//tmp/claude-1000/**)"
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch"
     ],
-    "deny": [
-      "Bash(git checkout -- *)",
-      "Bash(git checkout .)",
-      "Bash(git restore *)",
-      "Bash(git reset --hard*)",
-      "Bash(git clean -*)",
-      "Bash(rm -rf /*)"
-    ]
+    "deny": []
   }
 }
