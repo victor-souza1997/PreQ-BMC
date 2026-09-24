@@ -84,6 +84,7 @@ def benchmark(paths: list[Path], output: Path, *, timeout: int, memlimit: str,
         "memlimit": memlimit,
         "profile": profile,
         "options": list(options),
+        "neurons_per_harness": neurons_per_harness,
         "records": records,
     }
     (output / "benchmark_summary.json").write_text(
