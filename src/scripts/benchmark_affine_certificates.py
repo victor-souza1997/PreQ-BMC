@@ -10,7 +10,7 @@ from verification.conv_affine_certificate import (
     render_affine_rounding_error_lemma,
     render_bounded_relu_hull_lemma,
     render_unrolled_recomputed_affine_block,
-    render_symbolic_affine_block,
+    render_scalarized_symbolic_affine_block,
     slice_affine_certificate,
 )
 from verification.esbmc import ESBMCConfig, ESBMCRunner
@@ -76,7 +76,7 @@ def benchmark(paths: list[Path], output: Path, *, timeout: int, memlimit: str,
             if "option_b" in options:
                 sources.append((f"option_b_recomputation{suffix}", render_unrolled_recomputed_affine_block(selected)))
             if "option_a" in options:
-                sources.append((f"option_a_symbolic{suffix}", render_symbolic_affine_block(selected)))
+                sources.append((f"option_a_symbolic{suffix}", render_scalarized_symbolic_affine_block(selected)))
         for kind, source in sources:
             source_path = output / f"{stem}_{kind}.c"
             source_path.write_text(source, encoding="utf-8")

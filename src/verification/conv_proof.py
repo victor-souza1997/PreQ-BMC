@@ -22,6 +22,7 @@ from backends.conv_fixed_point import (
     QuantizedOperator,
     generate_conv_qnn_source,
 )
+from scripts.benchmark_esbmc_concurrency import benchmark
 from scripts.run_ssv_cnn_gate import write_new_json
 from verification.arith_kernel import render_arith_kernel
 from verification.conv_cegar import SparseRelationalCut
@@ -54,6 +55,8 @@ class ConvProofConfig:
     profile: str = "paper-z3"
     fail_fast: bool = True
     max_blocks_per_layer: int | None = None
+    jobs: int = 1
+    min_available_gib: float = 6.0
 
     def __post_init__(self) -> None:
         if self.block_size <= 0:
@@ -64,6 +67,10 @@ class ConvProofConfig:
             raise ValueError("Unsupported convolution proof mode")
         if self.max_blocks_per_layer is not None and self.max_blocks_per_layer <= 0:
             raise ValueError("max_blocks_per_layer must be positive when set")
+        if self.jobs <= 0:
+            raise ValueError("jobs must be positive")
+        if self.min_available_gib < 0:
+            raise ValueError("min_available_gib must be nonnegative")
 
 
 def _c_array(values: Iterable[int]) -> str:
@@ -451,6 +458,7 @@ class ESBMCProofStore:
         self.cache.mkdir(parents=True, exist_ok=True)
         self.runner = runner
         self.profile = profile
+        self._parallel_batch = 0
         executable = resolve_esbmc_executable(runner.config.executable) or runner.config.executable
         try:
             version = subprocess.run(
@@ -461,7 +469,7 @@ class ESBMCProofStore:
             version = "UNKNOWN"
         self.checker_identity = {"executable": executable, "version": version}
 
-    def check(self, source: str, name: str, metadata: dict[str, Any]):
+    def _prepare(self, source: str, name: str, metadata: dict[str, Any]):
         identity = {
             **metadata,
             "profile": self.profile,
@@ -477,22 +485,120 @@ class ESBMCProofStore:
         if cache_path.exists():
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
             if cached.get("digest") == digest and cached.get("status") == "VERIFIED":
-                return {**cached, "cache_reused": True, "harness": str(harness)}
-        result = self.runner.run_file(harness, profile=self.profile)
-        record = {
+                return ({**cached, "cache_reused": True, "harness": str(harness)}, None)
+        return (None, {
             "digest": digest,
-            "status": result.status,
-            "harness": str(harness),
-            "cache_reused": False,
+            "harness": harness,
+            "cache_path": cache_path,
             "identity": identity,
+        })
+
+    def check(self, source: str, name: str, metadata: dict[str, Any]):
+        cached, pending = self._prepare(source, name, metadata)
+        if cached is not None:
+            return cached
+        assert pending is not None
+        result = self.runner.run_file(pending["harness"], profile=self.profile)
+        record = {
+            "digest": pending["digest"],
+            "status": result.status,
+            "harness": str(pending["harness"]),
+            "cache_reused": False,
+            "identity": pending["identity"],
             "command": list(result.command),
             "elapsed_seconds": result.elapsed_seconds,
             "return_code": result.return_code,
             "resource_control": result.resource_control,
         }
         if result.status == "VERIFIED":
-            write_new_json(cache_path, record)
+            write_new_json(pending["cache_path"], record)
         return record
+
+    def check_many(
+        self,
+        obligations: list[tuple[str, str, dict[str, Any]]],
+        *,
+        jobs: int,
+        min_available_gib: float,
+    ) -> list[dict[str, Any]]:
+        """Check independent obligations with bounded workers and a RAM guard."""
+
+        records: list[dict[str, Any] | None] = [None] * len(obligations)
+        pending_by_path: dict[str, tuple[int, dict[str, Any]]] = {}
+        for index, (source, name, metadata) in enumerate(obligations):
+            cached, pending = self._prepare(source, name, metadata)
+            if cached is not None:
+                records[index] = cached
+            else:
+                assert pending is not None
+                pending_by_path[str(pending["harness"].resolve())] = (index, pending)
+        if pending_by_path:
+            batch_output = self.output / "parallel_batches" / f"batch_{self._parallel_batch:04d}"
+            self._parallel_batch += 1
+            result = benchmark(
+                [entry[1]["harness"] for entry in pending_by_path.values()],
+                batch_output,
+                jobs=jobs,
+                timeout=self.runner.config.timeout_seconds,
+                memlimit=self.runner.config.memlimit,
+                profile=self.profile,
+                min_available_gib=min_available_gib,
+            )
+            completed = set()
+            for row in result["records"]:
+                key = str(Path(row["harness"]).resolve())
+                index, pending = pending_by_path[key]
+                completed.add(key)
+                resource_control = {
+                    "command": list(row["command"]),
+                    "timeout": f"{self.runner.config.timeout_seconds}s",
+                    "memlimit": self.runner.config.memlimit,
+                    "elapsed_seconds": row["elapsed_seconds"],
+                    "return_code": row["return_code"],
+                    "status": row["status"],
+                    "stdout_log_path": row["stdout_log_path"],
+                    "stderr_log_path": row["stderr_log_path"],
+                    "peak_memory_bytes": row["peak_memory_bytes"],
+                    "peak_memory_mib": row["peak_memory_mib"],
+                    "memory_measurement": "linux_procfs_process_tree_rss",
+                }
+                record = {
+                    "digest": pending["digest"],
+                    "status": row["status"],
+                    "harness": str(pending["harness"]),
+                    "cache_reused": False,
+                    "identity": pending["identity"],
+                    "command": list(row["command"]),
+                    "elapsed_seconds": row["elapsed_seconds"],
+                    "return_code": row["return_code"],
+                    "resource_control": resource_control,
+                }
+                records[index] = record
+                if record["status"] == "VERIFIED":
+                    write_new_json(pending["cache_path"], record)
+            for key, (index, pending) in pending_by_path.items():
+                if key in completed:
+                    continue
+                records[index] = {
+                    "digest": pending["digest"],
+                    "status": "UNKNOWN",
+                    "harness": str(pending["harness"]),
+                    "cache_reused": False,
+                    "identity": pending["identity"],
+                    "command": [],
+                    "elapsed_seconds": 0.0,
+                    "return_code": None,
+                    "skipped_due_to_low_memory_guard": bool(result["aborted_low_memory"]),
+                    "resource_control": {
+                        "timeout": f"{self.runner.config.timeout_seconds}s",
+                        "memlimit": self.runner.config.memlimit,
+                        "status": "UNKNOWN",
+                        "min_available_stop_gib": min_available_gib,
+                    },
+                }
+        if any(record is None for record in records):
+            raise RuntimeError("Parallel proof scheduler lost an obligation")
+        return [record for record in records if record is not None]
 
 
 class ConvProofCoordinator:
@@ -634,10 +740,10 @@ class ConvProofCoordinator:
             if self.config.max_blocks_per_layer is not None:
                 selected = blocks[: self.config.max_blocks_per_layer]
                 partial = partial or len(selected) < len(blocks)
+            block_obligations = []
             for block_index, indices in enumerate(selected):
-                source = self._block_source(layer, certificate, indices)
-                record = self.store.check(
-                    source,
+                block_obligations.append((
+                    self._block_source(layer, certificate, indices),
                     f"layer_{layer_index}_block_{block_index}",
                     {
                         "property_type": (
@@ -651,7 +757,21 @@ class ConvProofCoordinator:
                         "output_indices": list(indices),
                         "shared_qif": asdict(layer.spec),
                     },
+                ))
+            if self.config.jobs > 1 and not self.config.fail_fast:
+                block_records = self.store.check_many(
+                    block_obligations,
+                    jobs=self.config.jobs,
+                    min_available_gib=self.config.min_available_gib,
                 )
+            else:
+                block_records = [
+                    self.store.check(source, name, metadata)
+                    for source, name, metadata in block_obligations
+                ]
+            for block_index, (indices, record) in enumerate(zip(
+                selected, block_records, strict=True
+            )):
                 record.update({
                     "layer_index": layer_index,
                     "block_index": block_index,
@@ -834,6 +954,12 @@ class ConvProofCoordinator:
             },
             "block_size": self.config.block_size,
             "proof_mode": self.config.proof_mode,
+            "resource_scheduling": {
+                "jobs": self.config.jobs,
+                "min_available_gib": self.config.min_available_gib,
+                "parallel_blocks_only": self.config.jobs > 1,
+                "dependency_barriers_preserved": True,
+            },
             "refinement": {
                 "strategy": "demand_driven_abstract_witness_then_exact_final_layer",
                 "enabled": self.config.exact_margin_refinement,

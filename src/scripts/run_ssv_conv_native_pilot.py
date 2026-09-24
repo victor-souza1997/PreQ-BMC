@@ -59,6 +59,14 @@ def validate_config(config: dict):
     max_blocks = proof.get("max_blocks_per_layer")
     if max_blocks is not None and (type(max_blocks) is not int or max_blocks <= 0):
         raise ValueError("proof.max_blocks_per_layer must be null or a positive integer")
+    if type(proof.get("jobs", 1)) is not int or proof.get("jobs", 1) <= 0:
+        raise ValueError("proof.jobs must be positive")
+    if type(proof.get("min_available_gib", 6.0)) not in {int, float} \
+            or proof.get("min_available_gib", 6.0) < 0:
+        raise ValueError("proof.min_available_gib must be nonnegative")
+    sample_split = config.get("split", "test")
+    if sample_split not in {"test", "validation"}:
+        raise ValueError("split must be test or validation")
     if type(config.get("epsilon_raw_bytes")) not in {int, float} \
             or config["epsilon_raw_bytes"] < 0:
         raise ValueError("epsilon_raw_bytes must be nonnegative")
@@ -91,9 +99,15 @@ def run(config_path: Path, output: Path):
     base = _load_json(base_path)
     if sha256(base_path) != search["base_study_sha256"]:
         raise ValueError("Frozen dataset study changed")
-    matches = [row for row in base["records"] if row["id"] == config["sample_id"]]
-    if len(matches) != 1 or matches[0].get("split") != "test":
-        raise ValueError("sample_id must identify exactly one frozen test image")
+    sample_split = config.get("split", "test")
+    matches = [
+        row for row in base["records"]
+        if row["id"] == config["sample_id"] and row.get("split") == sample_split
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            "sample_id must identify exactly one frozen image in the configured split"
+        )
     sample = matches[0]
     image = load_crop(base["dataset_root"], sample)
     if hashlib.sha256(np.ascontiguousarray(image).tobytes()).hexdigest() == sample.get("sha256"):
@@ -131,6 +145,7 @@ def run(config_path: Path, output: Path):
             "final_status": "CENTER_MISCLASSIFIED",
             "certified": False,
             "sample_id": sample["id"],
+            "sample_split": sample_split,
             "target_class": target,
             "quantized_prediction": prediction,
             "qif": [asdict(spec) for spec in specs],
@@ -160,6 +175,8 @@ def run(config_path: Path, output: Path):
             profile=proof["profile"],
             fail_fast=proof.get("fail_fast", True),
             max_blocks_per_layer=proof.get("max_blocks_per_layer"),
+            jobs=proof.get("jobs", 1),
+            min_available_gib=float(proof.get("min_available_gib", 6.0)),
         ),
     )
     formal = coordinator.verify(
@@ -176,6 +193,7 @@ def run(config_path: Path, output: Path):
             else "complete proof ledger determines certification"
         ),
         "sample_id": sample["id"],
+        "sample_split": sample_split,
         "sample_sha256": sample["sha256"],
         "sample_identity_kind": image_identity,
         "target_class": target,

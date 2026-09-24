@@ -331,6 +331,111 @@ int main(void) {
 """
 
 
+
+
+def render_scalarized_symbolic_affine_block(certificate: dict[str, Any]) -> str:
+    """Option A with symbolic state in scalar SSA-style locals."""
+    previous, block = certificate["previous_layer_envelopes"], certificate["block"]
+    support, positions = _support(certificate)
+    previous_position = {row["neuron_index"]: i for i, row in enumerate(previous)}
+    scale = 1 << certificate["scale_bits"]
+    denominator = 1 << certificate["qif"]["fractional_bits"]
+    q_low = -(1 << (certificate["qif"]["total_bits"] - 1))
+    q_high = (1 << (certificate["qif"]["total_bits"] - 1)) - 1
+    lines = [
+        "#include <stdint.h>",
+        "void __ESBMC_assume(_Bool); void __ESBMC_assert(_Bool, const char *);",
+        "long long nondet_long_long(void);",
+        render_arith_kernel(),
+        f"#define AFFINE_SUPPORT_SIZE {len(support)}",
+        f"#define AFFINE_PREVIOUS_COUNT {len(previous)}",
+        f"#define AFFINE_BLOCK_SIZE {len(block)}",
+        "int main(void) {",
+    ]
+
+    for position, index in enumerate(support):
+        low = certificate["input_box"]["low"][index]
+        high = certificate["input_box"]["high"][index]
+        lines.append(f"    int64_t x_{position} = nondet_long_long();")
+        lines.append(
+            f"    __ESBMC_assume(x_{position} >= {low} && x_{position} <= {high});"
+        )
+
+    def evaluate(name: str, form: dict[str, Any]) -> None:
+        lines.append(f"    __int128 {name} = {form['constant']};")
+        for index, coefficient in zip(
+            form["input_indices"], form["coefficients"], strict=True
+        ):
+            lines.append(
+                f"    {name} += (__int128)({coefficient}) * x_{positions[index]};"
+            )
+
+    for position, row in enumerate(previous):
+        low, high = row["box"]
+        lines.append(f"    int64_t previous_{position} = nondet_long_long();")
+        lines.append(
+            f"    __ESBMC_assume(previous_{position} >= {low} && "
+            f"previous_{position} <= {high});"
+        )
+        evaluate(f"previous_lower_{position}", row["h_lower"])
+        evaluate(f"previous_upper_{position}", row["h_upper"])
+        lines.append(
+            f"    __ESBMC_assume(previous_lower_{position} <= "
+            f"(__int128){scale} * previous_{position} && "
+            f"(__int128){scale} * previous_{position} <= "
+            f"previous_upper_{position});"
+        )
+
+    for out, row in enumerate(block):
+        lines.append(f"    __int128 acc_{out} = 0;")
+        for index, weight in zip(
+            row["weights"]["input_neurons"],
+            row["weights"]["values"],
+            strict=True,
+        ):
+            lines.append(
+                f"    acc_{out} = mac_i128(acc_{out}, {weight}, "
+                f"previous_{previous_position[index]});"
+            )
+        lines.append(
+            f"    __int128 raw_{out} = div_round_half_away_from_zero_i128("
+            f"acc_{out}, {denominator}) + ({row['bias']});"
+        )
+        lines.append(
+            f'    __ESBMC_assert(raw_{out} >= {q_low} && raw_{out} <= {q_high}, '
+            f'"clamp inactivity {out}");'
+        )
+        pre_low, pre_high = row["pre_clamp_bounds"]
+        lines.append(
+            f'    __ESBMC_assert(raw_{out} >= {pre_low} && raw_{out} <= '
+            f'{pre_high}, "scalar pre-clamp bounds {out}");'
+        )
+        evaluate(f"z_lower_{out}", row["z_lower"])
+        evaluate(f"z_upper_{out}", row["z_upper"])
+        lines.append(
+            f'    __ESBMC_assert(z_lower_{out} <= (__int128){scale} * raw_{out} '
+            f'&& (__int128){scale} * raw_{out} <= z_upper_{out}, '
+            f'"pre-activation envelope {out}");'
+        )
+        lines.append(
+            f"    __int128 value_{out} = clamp_to_signed_range_i128("
+            f"raw_{out}, {certificate['qif']['total_bits']});"
+        )
+        lines.append(f"    if (value_{out} < 0) value_{out} = 0;")
+        lines.append(
+            f"    value_{out} = clamp_to_signed_range_i128("
+            f"value_{out}, {certificate['qif']['total_bits']});"
+        )
+        evaluate(f"h_lower_{out}", row["h_lower"])
+        evaluate(f"h_upper_{out}", row["h_upper"])
+        lines.append(
+            f'    __ESBMC_assert(h_lower_{out} <= (__int128){scale} * value_{out} '
+            f'&& (__int128){scale} * value_{out} <= h_upper_{out}, '
+            f'"activation envelope {out}");'
+        )
+
+    lines.extend(("    return 0;", "}", ""))
+    return "\n".join(lines)
 def render_recomputed_affine_block(certificate: dict[str, Any]) -> str:
     """Option B: validate the certificate algebra and scalar regimes."""
     code = _common(certificate)
@@ -437,24 +542,25 @@ def render_unrolled_recomputed_affine_block(certificate: dict[str, Any]) -> str:
         f"#define AFFINE_SUPPORT_SIZE {len(support)}",
         f"static const int64_t INPUT_LOW[AFFINE_SUPPORT_SIZE] = {_c_array(certificate['input_box']['low'][i] for i in support)};",
         f"static const int64_t INPUT_HIGH[AFFINE_SUPPORT_SIZE] = {_c_array(certificate['input_box']['high'][i] for i in support)};",
-        "int main(void) {", "    __int128 coefficient[AFFINE_SUPPORT_SIZE];",
+        "int main(void) {",
+        *(f"    __int128 coefficient_{i};" for i in range(len(support))),
         "    __int128 constant, bound;"]
 
     def clear():
         lines.append("    constant = 0;")
-        lines.extend(f"    coefficient[{i}] = 0;" for i in range(len(support)))
+        lines.extend(f"    coefficient_{i} = 0;" for i in range(len(support)))
 
     def add(form, multiplier):
         lines.append(f"    constant += (__int128)({multiplier}) * ({form['constant']});")
         for index, value in zip(form["input_indices"], form["coefficients"], strict=True):
-            lines.append(f"    coefficient[{positions[index]}] += (__int128)({multiplier}) * ({value});")
+            lines.append(f"    coefficient_{positions[index]} += (__int128)({multiplier}) * ({value});")
 
     def extreme(minimum, message):
         lines.append("    bound = constant;")
         lows, highs = certificate["input_box"]["low"], certificate["input_box"]["high"]
         for position, index in enumerate(support):
             first, second = (lows[index], highs[index]) if minimum else (highs[index], lows[index])
-            lines.append(f"    bound += coefficient[{position}] * (coefficient[{position}] >= 0 ? {first} : {second});")
+            lines.append(f"    bound += coefficient_{position} * (coefficient_{position} >= 0 ? {first} : {second});")
         lines.append(f'    __ESBMC_assert(bound >= 0, "{message}");')
 
     def literal_extreme(form, minimum):
