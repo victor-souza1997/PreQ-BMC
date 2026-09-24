@@ -29,6 +29,7 @@ from verification.conv_contracts import (
     IntegerInvariant,
     LayerIntervalCertificate,
     obligation_sha256,
+    dense_output_terms,
     propagate_network,
     render_conv_block_contract,
     render_invariant_bridge,
@@ -77,8 +78,16 @@ def render_dense_block_contract(
     outputs = tuple(int(index) for index in output_indices)
     if not outputs or len(set(outputs)) != len(outputs):
         raise ValueError("A dense block requires unique output indices")
-    weights = [int(layer.weights_int[index, column])
-               for index in outputs for column in range(layer.input_size)]
+    terms_by_output = [dense_output_terms(layer, index) for index in outputs]
+    global_inputs = sorted({index for terms in terms_by_output for index, _ in terms}) or [0]
+    local = {global_index: local_index for local_index, global_index in enumerate(global_inputs)}
+    max_terms = max(1, *(len(terms) for terms in terms_by_output))
+    term_counts, term_inputs, term_weights = [], [], []
+    for terms in terms_by_output:
+        padding = max_terms - len(terms)
+        term_counts.append(len(terms))
+        term_inputs.extend([local[index] for index, _ in terms] + [0] * padding)
+        term_weights.extend([weight for _, weight in terms] + [0] * padding)
     states = []
     for index in outputs:
         if index in certificate.stable_active:
@@ -93,13 +102,15 @@ void __ESBMC_assert(_Bool, const char *);
 long long nondet_long_long(void);
 {render_arith_kernel()}
 #define BLOCK_SIZE {len(outputs)}
-#define LOCAL_INPUT_SIZE {layer.input_size}
-#define MAX_TERMS {layer.input_size}
+#define LOCAL_INPUT_SIZE {len(global_inputs)}
+#define MAX_TERMS {max_terms}
 #define TOTAL_BITS {layer.spec.total_bits}
 #define INPUT_FRACTIONAL_BITS {layer.input_fractional_bits}
-static const int64_t INPUT_LOW[LOCAL_INPUT_SIZE] = {_c_array(certificate.input_invariant.low)};
-static const int64_t INPUT_HIGH[LOCAL_INPUT_SIZE] = {_c_array(certificate.input_invariant.high)};
-static const int64_t WEIGHT[BLOCK_SIZE * LOCAL_INPUT_SIZE] = {_c_array(weights)};
+static const int64_t INPUT_LOW[LOCAL_INPUT_SIZE] = {_c_array(certificate.input_invariant.low[i] for i in global_inputs)};
+static const int64_t INPUT_HIGH[LOCAL_INPUT_SIZE] = {_c_array(certificate.input_invariant.high[i] for i in global_inputs)};
+static const int TERM_COUNT[BLOCK_SIZE] = {_c_array(term_counts)};
+static const int TERM_INPUT[BLOCK_SIZE * MAX_TERMS] = {_c_array(term_inputs)};
+static const int64_t TERM_WEIGHT[BLOCK_SIZE * MAX_TERMS] = {_c_array(term_weights)};
 static const int64_t BIAS[BLOCK_SIZE] = {_c_array(layer.bias_int[index] for index in outputs)};
 static const int64_t OUTPUT_LOW[BLOCK_SIZE] = {_c_array(certificate.output_invariant.low[index] for index in outputs)};
 static const int64_t OUTPUT_HIGH[BLOCK_SIZE] = {_c_array(certificate.output_invariant.high[index] for index in outputs)};
@@ -112,8 +123,10 @@ int main(void) {{
     }}
     for (int out = 0; out < BLOCK_SIZE; ++out) {{
         __int128 acc = 0;
-        for (int i = 0; i < LOCAL_INPUT_SIZE; ++i)
-            acc = mac_i128(acc, WEIGHT[out * LOCAL_INPUT_SIZE + i], input[i]);
+        for (int term = 0; term < TERM_COUNT[out]; ++term) {{
+            const int offset = out * MAX_TERMS + term;
+            acc = mac_i128(acc, TERM_WEIGHT[offset], input[TERM_INPUT[offset]]);
+        }}
         __int128 pre_relu = div_round_half_away_from_zero_i128(
             acc, ((__int128)1 << INPUT_FRACTIONAL_BITS)
         ) + (__int128)BIAS[out];
@@ -248,6 +261,80 @@ int main(void) {{
         output[out] = (int64_t)clamp_to_signed_range_i128(value, TOTAL_BITS);
     }}
     __ESBMC_assert(output[0] > output[1], "strict target/competitor margin");
+    return 0;
+}}
+"""
+
+
+def dense_margin_endpoint_witness(
+    layer: QuantizedDense,
+    invariant: IntegerInvariant,
+    target: int,
+    competitor: int,
+) -> tuple[int, ...]:
+    """Choose a deterministic box endpoint adverse to the raw output margin.
+
+    This is only a candidate witness for abstraction imprecision.  It never
+    represents a concrete network input unless a separate prefix proof says
+    so, and callers must replay it through ESBMC before using it diagnostically.
+    """
+
+    if layer.apply_relu or len(invariant.low) != layer.input_size:
+        raise ValueError("Final margin requires a non-ReLU dense output layer")
+    if not 0 <= target < layer.output_size or not 0 <= competitor < layer.output_size \
+            or target == competitor:
+        raise ValueError("Invalid target/competitor pair")
+    difference = layer.weights_int[target] - layer.weights_int[competitor]
+    return tuple(
+        int(low if int(coefficient) >= 0 else high)
+        for coefficient, low, high in zip(
+            difference, invariant.low, invariant.high, strict=True
+        )
+    )
+
+
+def render_dense_margin_witness_replay(
+    layer: QuantizedDense,
+    invariant: IntegerInvariant,
+    target: int,
+    competitor: int,
+    witness: Iterable[int],
+) -> str:
+    """Replay one abstract-box margin witness with deployment arithmetic."""
+
+    values = tuple(int(value) for value in witness)
+    if len(values) != layer.input_size:
+        raise ValueError("Margin witness size does not match the dense input")
+    if any(value < low or value > high for value, low, high in zip(
+            values, invariant.low, invariant.high, strict=True)):
+        raise ValueError("Margin witness is outside the certified hidden box")
+    weights = [
+        *[int(value) for value in layer.weights_int[target]],
+        *[int(value) for value in layer.weights_int[competitor]],
+    ]
+    return f"""#include <stdint.h>
+void __ESBMC_assert(_Bool, const char *);
+{render_arith_kernel()}
+#define LOCAL_INPUT_SIZE {layer.input_size}
+#define OUTPUT_SIZE 2
+#define TOTAL_BITS {layer.spec.total_bits}
+#define INPUT_FRACTIONAL_BITS {layer.input_fractional_bits}
+static const int64_t INPUT[LOCAL_INPUT_SIZE] = {_c_array(values)};
+static const int64_t WEIGHT[OUTPUT_SIZE * LOCAL_INPUT_SIZE] = {_c_array(weights)};
+static const int64_t BIAS[OUTPUT_SIZE] = {{{int(layer.bias_int[target])}, {int(layer.bias_int[competitor])}}};
+int main(void) {{
+    int64_t output[OUTPUT_SIZE];
+    for (int out = 0; out < OUTPUT_SIZE; ++out) {{
+        __int128 acc = 0;
+        for (int i = 0; i < LOCAL_INPUT_SIZE; ++i)
+            acc = mac_i128(acc, WEIGHT[out * LOCAL_INPUT_SIZE + i], INPUT[i]);
+        __int128 value = div_round_half_away_from_zero_i128(
+            acc, ((__int128)1 << INPUT_FRACTIONAL_BITS)
+        ) + (__int128)BIAS[out];
+        output[out] = (int64_t)clamp_to_signed_range_i128(value, TOTAL_BITS);
+    }}
+    __ESBMC_assert(output[0] > output[1],
+                   "abstract hidden-box witness violates strict margin");
     return 0;
 }}
 """
@@ -632,22 +719,49 @@ class ConvProofCoordinator:
                 if (interval_mode and margin["status"] != "VERIFIED"
                         and self.config.exact_margin_refinement):
                     margin["required_for_certificate"] = False
-                    effective_margin = self.store.check(
-                        render_dense_margin_contract(
+                    witness = dense_margin_endpoint_witness(
+                        final_layer, certificates[-1].input_invariant,
+                        target_class, competitor,
+                    )
+                    witness_record = self.store.check(
+                        render_dense_margin_witness_replay(
                             final_layer, certificates[-1].input_invariant,
-                            target_class, competitor,
+                            target_class, competitor, witness,
                         ),
-                        f"exact_margin_target_{target_class}_competitor_{competitor}",
+                        f"abstract_margin_witness_target_{target_class}_competitor_{competitor}",
                         {
-                            "property_type": "strict_output_margin_exact_refinement",
+                            "property_type": "strict_output_margin_abstraction_witness",
                             "deployment": self.deployment_source_sha256,
                             "target_class": target_class,
                             "competitor_class": competitor,
                             "shared_qif": asdict(final_layer.spec),
                             "trigger": margin["status"],
+                            "witness_provenance": "adverse_raw_margin_box_endpoint",
                         },
                     )
-                    records.append(effective_margin)
+                    witness_record["required_for_certificate"] = False
+                    witness_record["diagnostic_only"] = True
+                    witness_record["does_not_imply_real_input_counterexample"] = True
+                    records.append(witness_record)
+                    if witness_record["status"] == "FAILED":
+                        effective_margin = witness_record
+                    else:
+                        effective_margin = self.store.check(
+                            render_dense_margin_contract(
+                                final_layer, certificates[-1].input_invariant,
+                                target_class, competitor,
+                            ),
+                            f"exact_margin_target_{target_class}_competitor_{competitor}",
+                            {
+                                "property_type": "strict_output_margin_exact_refinement",
+                                "deployment": self.deployment_source_sha256,
+                                "target_class": target_class,
+                                "competitor_class": competitor,
+                                "shared_qif": asdict(final_layer.spec),
+                                "trigger": margin["status"],
+                            },
+                        )
+                        records.append(effective_margin)
                 margin_records.append(effective_margin)
                 if effective_margin["status"] != "VERIFIED" and self.config.fail_fast:
                     break
@@ -683,6 +797,11 @@ class ConvProofCoordinator:
               and len(margin_records) == final_layer.output_size - 1):
             final_status = "VERIFIED"
         elif any(record["status"] == "FAILED"
+                 and record.get("identity", {}).get("property_type")
+                 == "strict_output_margin_abstraction_witness"
+                 for record in records):
+            final_status = "ABSTRACTION_INCONCLUSIVE"
+        elif any(record["status"] == "FAILED"
                  and record.get("identity", {}).get("property_type", "").startswith("strict_output_margin")
                  for record in required_records):
             final_status = "ABSTRACTION_INCONCLUSIVE"
@@ -716,7 +835,7 @@ class ConvProofCoordinator:
             "block_size": self.config.block_size,
             "proof_mode": self.config.proof_mode,
             "refinement": {
-                "strategy": "demand_driven_exact_final_layer",
+                "strategy": "demand_driven_abstract_witness_then_exact_final_layer",
                 "enabled": self.config.exact_margin_refinement,
                 "triggered_competitors": [
                     record.get("identity", {}).get("competitor_class")
@@ -724,6 +843,14 @@ class ConvProofCoordinator:
                     if record.get("identity", {}).get("property_type")
                     == "strict_output_margin_exact_refinement"
                 ],
+                "abstract_witness_competitors": [
+                    record.get("identity", {}).get("competitor_class")
+                    for record in records
+                    if record.get("identity", {}).get("property_type")
+                    == "strict_output_margin_abstraction_witness"
+                    and record.get("status") == "FAILED"
+                ],
+                "abstract_witnesses_are_not_network_counterexamples": True,
                 "unverified_relations_never_assumed": True,
             },
             "proof_basis": {

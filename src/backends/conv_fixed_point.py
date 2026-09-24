@@ -290,21 +290,47 @@ static const int64_t LAYER_{index}_BIAS[{len(layer.bias_int)}] = {_c_values(laye
     }}
 """)
         else:
-            declarations.append(f"""
+            nonzero = int(np.count_nonzero(layer.weights_int))
+            sparse = nonzero * 2 < layer.weights_int.size
+            if sparse:
+                offsets = [0]
+                inputs: list[int] = []
+                weights: list[int] = []
+                for row in layer.weights_int:
+                    for input_index, weight in enumerate(row):
+                        if int(weight) != 0:
+                            inputs.append(input_index)
+                            weights.append(int(weight))
+                    offsets.append(len(inputs))
+                stored = max(1, len(weights))
+                declarations.append(f"""
+static const int LAYER_{index}_OFFSET[{len(offsets)}] = {_c_values(np.asarray(offsets))};
+static const int LAYER_{index}_INPUT[{stored}] = {_c_values(np.asarray(inputs or [0]))};
+static const int64_t LAYER_{index}_WEIGHTS[{stored}] = {_c_values(np.asarray(weights or [0]))};
+static const int64_t LAYER_{index}_BIAS[{len(layer.bias_int)}] = {_c_values(layer.bias_int)};
+""")
+                mac_loop = f"""        for (int term = LAYER_{index}_OFFSET[out_index];
+             term < LAYER_{index}_OFFSET[out_index + 1]; ++term) {{
+            acc = mac_i128(acc, LAYER_{index}_WEIGHTS[term],
+                           buffer_{index % 2}[LAYER_{index}_INPUT[term]]);
+        }}"""
+            else:
+                declarations.append(f"""
 static const int64_t LAYER_{index}_WEIGHTS[{layer.weights_int.size}] = {_c_values(layer.weights_int)};
 static const int64_t LAYER_{index}_BIAS[{len(layer.bias_int)}] = {_c_values(layer.bias_int)};
 """)
-            relu = "        if (value < 0) value = 0;\n" if layer.apply_relu else ""
-            steps.append(f"""
-    for (int out_index = 0; out_index < {layer.output_size}; ++out_index) {{
-        __int128 acc = 0;
-        for (int in_index = 0; in_index < {layer.input_size}; ++in_index) {{
+                mac_loop = f"""        for (int in_index = 0; in_index < {layer.input_size}; ++in_index) {{
             acc = mac_i128(
                 acc,
                 LAYER_{index}_WEIGHTS[out_index * {layer.input_size} + in_index],
                 buffer_{index % 2}[in_index]
             );
-        }}
+        }}"""
+            relu = "        if (value < 0) value = 0;\n" if layer.apply_relu else ""
+            steps.append(f"""
+    for (int out_index = 0; out_index < {layer.output_size}; ++out_index) {{
+        __int128 acc = 0;
+{mac_loop}
         __int128 value = div_round_half_away_from_zero_i128(
             acc, ((__int128)1 << {layer.input_fractional_bits})
         ) + (__int128)LAYER_{index}_BIAS[out_index];

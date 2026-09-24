@@ -21,13 +21,20 @@ from backends.image_encoder import ByteImageEncoder
 from models.restricted_conv import ConvGeometry, RestrictedSequentialCNN
 from verification.conv_contracts import (
     IntegerInvariant,
+    dense_output_terms,
     propagate_interval,
     propagate_network,
     render_conv_block_contract,
     render_invariant_bridge,
 )
 from verification.esbmc import ESBMCConfig, ESBMCRunner
-from verification.conv_proof import render_byte_encoding_contract
+from verification.conv_proof import (
+    dense_margin_endpoint_witness,
+    render_byte_encoding_contract,
+    render_dense_block_contract,
+    render_dense_margin_witness_replay,
+)
+from verification.interval_lemmas import render_dense_interval_certificate
 from verification.esbmc_install import resolve_esbmc_executable
 
 
@@ -106,6 +113,47 @@ class ConvNativeFixedPointTest(unittest.TestCase):
             for certificate, layer_values in zip(certificates, trace, strict=True):
                 self.assertTrue(certificate.output_invariant.contains(layer_values))
 
+    def test_sparse_dense_deployment_and_certificates_skip_zero_macs_exactly(self):
+        spec = LayerQuantizationSpec(8, 3, 4)
+        layer = QuantizedDense(
+            np.asarray([[8, 0, 0, 0], [0, 0, -4, 0]], dtype=np.int64),
+            np.asarray([1, -1], dtype=np.int64),
+            spec,
+            input_fractional_bits=4,
+            apply_relu=False,
+        )
+        network = ConvFixedPointNetwork((1, 4, 1), 4, 8, (layer,))
+        source_text = generate_conv_qnn_source(network)
+        self.assertIn("LAYER_0_OFFSET", source_text)
+        self.assertIn("LAYER_0_INPUT", source_text)
+        self.assertEqual(dense_output_terms(layer, 0), [(0, 8)])
+        self.assertEqual(dense_output_terms(layer, 1), [(2, -4)])
+
+        invariant = IntegerInvariant((-4, -3, -2, -1), (1, 2, 3, 4), (4,))
+        certificate = propagate_interval(layer, invariant, layer_index=0)
+        explicit = render_dense_block_contract(layer, certificate, [0, 1])
+        interval = render_dense_interval_certificate(layer, certificate, [0, 1])
+        for harness in (explicit, interval):
+            self.assertIn("#define LOCAL_INPUT_SIZE 2", harness)
+            self.assertIn("#define MAX_TERMS 1", harness)
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "sparse.c"
+            source.write_text(source_text, encoding="utf-8")
+            library = ctypes.CDLL(str(compile_c_qnn_shared_library(
+                source, source.with_suffix(".so")
+            ).resolve()))
+            pointer = ctypes.POINTER(ctypes.c_int64)
+            library.qnn_forward_fixed.argtypes = [pointer, pointer]
+            for values in itertools.product((-4, 0, 4), repeat=4):
+                sample = np.asarray(values, dtype=np.int64)
+                expected = forward_conv_fixed_point_single(network, sample)
+                actual = np.zeros(2, dtype=np.int64)
+                library.qnn_forward_fixed(
+                    sample.ctypes.data_as(pointer), actual.ctypes.data_as(pointer)
+                )
+                np.testing.assert_array_equal(actual, expected)
+
     def test_conv_harness_contains_only_receptive_field(self):
         layer = self.network.layers[0]
         self.assertIsInstance(layer, QuantizedConv2D)
@@ -123,6 +171,48 @@ class ConvNativeFixedPointTest(unittest.TestCase):
         self.assertTrue(guarantee.subset_of(wider))
         source = render_invariant_bridge(guarantee, wider)
         self.assertIn("ASSUMPTION_LOW[i] <= GUARANTEE_LOW[i]", source)
+
+    def test_dense_margin_endpoint_witness_uses_adverse_box_endpoints(self):
+        spec = LayerQuantizationSpec(8, 7, 0)
+        layer = QuantizedDense(
+            np.asarray([[1, 0], [-1, 0]], dtype=np.int64),
+            np.zeros(2, dtype=np.int64),
+            spec,
+            input_fractional_bits=0,
+            apply_relu=False,
+        )
+        invariant = IntegerInvariant((-3, 0), (3, 0), (2,))
+        witness = dense_margin_endpoint_witness(layer, invariant, 0, 1)
+        self.assertEqual(witness, (-3, 0))
+        source = render_dense_margin_witness_replay(
+            layer, invariant, 0, 1, witness
+        )
+        self.assertIn("static const int64_t INPUT[LOCAL_INPUT_SIZE] = {-3, 0}", source)
+        self.assertNotIn("nondet_long_long", source)
+        self.assertIn("abstract hidden-box witness violates strict margin", source)
+
+    @unittest.skipUnless(resolve_esbmc_executable("esbmc"), "ESBMC is optional")
+    def test_esbmc_replays_abstract_margin_witness_as_failed_diagnostic(self):
+        spec = LayerQuantizationSpec(8, 7, 0)
+        layer = QuantizedDense(
+            np.asarray([[1, 0], [-1, 0]], dtype=np.int64),
+            np.zeros(2, dtype=np.int64),
+            spec,
+            input_fractional_bits=0,
+            apply_relu=False,
+        )
+        invariant = IntegerInvariant((-3, 0), (3, 0), (2,))
+        witness = dense_margin_endpoint_witness(layer, invariant, 0, 1)
+        source = render_dense_margin_witness_replay(
+            layer, invariant, 0, 1, witness
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            harness = Path(directory) / "abstract_margin_witness.c"
+            harness.write_text(source, encoding="utf-8")
+            result = ESBMCRunner(ESBMCConfig(
+                timeout_seconds=30, memlimit="1g", default_profile="paper-z3"
+            )).run_file(harness, profile="paper-z3")
+        self.assertEqual(result.status, "FAILED", result.stderr or result.stdout)
 
     @unittest.skipUnless(resolve_esbmc_executable("esbmc"), "ESBMC is optional")
     def test_esbmc_proves_raw_byte_encoding_box(self):

@@ -119,9 +119,22 @@ def conv_output_terms(layer: QuantizedConv2D, output_index: int):
             if not 0 <= ix < iw:
                 continue
             for ic in range(channels):
-                terms.append(((iy * iw + ix) * channels + ic,
-                              int(layer.kernel_int[ky, kx, ic, oc])))
+                weight = int(layer.kernel_int[ky, kx, ic, oc])
+                if weight != 0:
+                    terms.append(((iy * iw + ix) * channels + ic, weight))
     return terms
+
+
+def dense_output_terms(layer: QuantizedDense, output_index: int):
+    """Return only nonzero dense terms; zero MACs are integer identities."""
+
+    if not 0 <= output_index < layer.output_size:
+        raise IndexError("Dense output index out of range")
+    return [
+        (column, int(weight))
+        for column, weight in enumerate(layer.weights_int[output_index])
+        if int(weight) != 0
+    ]
 
 
 def propagate_interval(
@@ -152,8 +165,13 @@ def propagate_interval(
                 output_index, layer.geometry.output_shape
             )[-1]])
         else:
+            terms = dense_output_terms(layer, output_index)
+            indices = [index for index, _ in terms]
+            weights = [weight for _, weight in terms]
             acc_low, acc_high = _weighted_interval(
-                layer.weights_int[output_index], invariant.low, invariant.high
+                weights,
+                (invariant.low[index] for index in indices),
+                (invariant.high[index] for index in indices),
             )
             bias = int(layer.bias_int[output_index])
         low, high, before_low, before_high = _finish_interval(
@@ -204,9 +222,9 @@ def render_conv_block_contract(
     if not outputs or len(set(outputs)) != len(outputs):
         raise ValueError("A block requires unique output indices")
     terms_by_output = [conv_output_terms(layer, index) for index in outputs]
-    global_inputs = sorted({index for terms in terms_by_output for index, _ in terms})
+    global_inputs = sorted({index for terms in terms_by_output for index, _ in terms}) or [0]
     local = {global_index: local_index for local_index, global_index in enumerate(global_inputs)}
-    max_terms = max(len(terms) for terms in terms_by_output)
+    max_terms = max(1, *(len(terms) for terms in terms_by_output))
     term_counts = [len(terms) for terms in terms_by_output]
     term_indices = []
     term_weights = []

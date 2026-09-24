@@ -42,6 +42,35 @@ def validate_config(config):
     minimum = config.get("minimum_validation_accuracy")
     if type(minimum) not in {int, float} or not 0 < minimum <= 1:
         raise ValueError("minimum_validation_accuracy must be in (0,1]")
+    ramp = config.get("epsilon_warmup_epochs", 1)
+    if type(ramp) is not int or ramp <= 0:
+        raise ValueError("epsilon_warmup_epochs must be positive")
+    training_epsilon = config.get("training_epsilon_raw_bytes", config["epsilon_raw_bytes"])
+    if type(training_epsilon) not in {int, float} or not np.isfinite(training_epsilon) \
+            or training_epsilon < config["epsilon_raw_bytes"]:
+        raise ValueError("training_epsilon_raw_bytes must be at least epsilon_raw_bytes")
+
+
+def group_masks(restricted: RestrictedSequentialCNN, conv_groups):
+    """Block-diagonal masks that keep grouped kernels grouped during training.
+
+    Folded models store grouped (e.g. depthwise) kernels densely with zeros
+    between groups; unmasked gradients would silently turn them into full
+    convolutions and change the verified architecture.
+    """
+    masks = []
+    for geometry, groups in zip(restricted.geometries, conv_groups, strict=True):
+        if groups == 1:
+            masks.append(None)
+            continue
+        kh, kw, channels_in, channels_out = geometry.kernel_shape
+        per_in, per_out = channels_in // groups, channels_out // groups
+        mask = np.zeros(geometry.kernel_shape, dtype=np.float32)
+        for group in range(groups):
+            mask[:, :, group * per_in:(group + 1) * per_in,
+                 group * per_out:(group + 1) * per_out] = 1
+        masks.append(mask)
+    return tuple(masks)
 
 
 def _build_model(tf, restricted: RestrictedSequentialCNN):
@@ -155,6 +184,10 @@ def finetune(config_path: Path, output: Path):
         raise ValueError("Frozen data manifest changed")
     base = _load_json(base_path)
     restricted = restricted_from_npz(selected, params)
+    masks = group_masks(restricted, selected.get("conv_groups", [1] * len(restricted.geometries)))
+    for kernel, mask in zip(restricted.conv_kernels, masks, strict=True):
+        if mask is not None and np.any(kernel[mask == 0]):
+            raise ValueError("Grouped kernel has weights outside its groups")
     arrays = _arrays(base, restricted.input_shape, config["resize_mode"])
 
     output = Path(output).resolve()
@@ -164,6 +197,11 @@ def finetune(config_path: Path, output: Path):
     optimizer = tf.keras.optimizers.Adam(config["learning_rate"])
     loss_function = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
     epsilon = tf.constant(config["epsilon_raw_bytes"] / 256, tf.float32)
+    training_epsilon = config.get("training_epsilon_raw_bytes", config["epsilon_raw_bytes"]) / 256
+    mask_pairs = [
+        (layer.kernel, tf.constant(mask))
+        for layer, mask in zip(conv_layers, masks, strict=True) if mask is not None
+    ]
     dataset = tf.data.Dataset.from_tensor_slices(arrays["train"]).shuffle(
         len(arrays["train"][0]), seed=config["seed"], reshuffle_each_iteration=True,
     ).batch(config["batch_size"])
@@ -186,12 +224,17 @@ def finetune(config_path: Path, output: Path):
         robust_weight = config["maximum_robust_weight"] * min(
             1.0, (epoch + 1) / config["warmup_epochs"]
         )
+        # Ramp the training radius from near zero so the robust loss starts close
+        # to the clean loss instead of hundreds of logit units away from it.
+        step_epsilon = tf.constant(training_epsilon * min(
+            1.0, (epoch + 1) / config.get("epsilon_warmup_epochs", 1)), tf.float32)
         losses = []
         for x, y in dataset:
             with tf.GradientTape() as tape:
                 logits = model(x, training=True)
                 low, high = interval_logits(
-                    tf, tf.maximum(0.0, x - epsilon), tf.minimum(255 / 256, x + epsilon),
+                    tf, tf.maximum(0.0, x - step_epsilon),
+                    tf.minimum(255 / 256, x + step_epsilon),
                     conv_layers, output_layer,
                 )
                 worst_logits = high + tf.one_hot(y, tf.shape(high)[1], dtype=high.dtype) * (low - high)
@@ -202,6 +245,8 @@ def finetune(config_path: Path, output: Path):
                 loss = (1 - robust_weight) * clean_loss + robust_weight * robust_loss
             gradients = tape.gradient(loss, model.trainable_variables)
             optimizer.apply_gradients(zip(gradients, model.trainable_variables, strict=True))
+            for kernel, mask in mask_pairs:
+                kernel.assign(kernel * mask)
             losses.append(float(loss))
         metrics = _evaluate(
             tf, model, conv_layers, output_layer, arrays["validation"],
@@ -217,7 +262,8 @@ def finetune(config_path: Path, output: Path):
         else:
             stale += 1
         record = {"epoch": epoch + 1, "loss": float(np.mean(losses)),
-                  "robust_weight": robust_weight, **metrics}
+                  "robust_weight": robust_weight,
+                  "training_epsilon_raw_bytes": float(step_epsilon) * 256, **metrics}
         history.append(record)
         print(json.dumps(record), flush=True)
         if stale >= config.get("early_stopping_patience", 10):
@@ -236,7 +282,11 @@ def finetune(config_path: Path, output: Path):
         restricted.geometries, conv_kernels, conv_biases, dense_kernels, dense_biases,
         restricted.max_affine_entries,
     )
-    candidate_id = selected["candidate_id"] + "_ibp_eps1"
+    for kernel, mask in zip(conv_kernels, masks, strict=True):
+        if mask is not None and np.any(kernel[mask == 0]):
+            raise AssertionError("Grouped kernel lost its group structure")
+    candidate_id = selected["candidate_id"] + config.get(
+        "candidate_suffix", f"_ibp_eps{config['epsilon_raw_bytes']}")
     candidate_root = output / candidate_id
     candidate_root.mkdir()
     values = {}

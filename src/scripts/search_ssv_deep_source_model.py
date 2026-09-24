@@ -26,6 +26,7 @@ from scripts.search_ssv_source_model import (
 class DeepCandidatePlan:
     candidate_id: str
     geometries: tuple[ConvGeometry, ...]
+    conv_groups: tuple[int, ...]
     dense_hidden: tuple[int, ...]
     global_average_pooling: bool
     average_pool_size: tuple[int, int] | None
@@ -72,6 +73,7 @@ def deep_candidate_plan(config: dict[str, Any], candidate: dict[str, Any]) -> De
     if not isinstance(blocks, list) or len(blocks) < 2:
         raise ValueError("A deep candidate needs at least two convolution blocks")
     geometries = []
+    conv_groups = []
     parameter_count = 0
     affine_entries = []
     relus = []
@@ -82,6 +84,13 @@ def deep_candidate_plan(config: dict[str, Any], candidate: dict[str, Any]) -> De
         strides = tuple(block.get("strides", ()))
         if len(kernel) != 2 or len(strides) != 2:
             raise ValueError("Each convolution needs two kernel and stride dimensions")
+        groups_value = block.get("groups", 1)
+        groups = current[-1] if groups_value == "depthwise" else groups_value
+        groups = _positive_int(groups, f"conv_blocks[{index}].groups")
+        if current[-1] % groups or filters % groups:
+            raise ValueError("Convolution groups must divide input and output channels")
+        if groups_value == "depthwise" and filters != current[-1]:
+            raise ValueError("Depthwise convolution requires filters equal input channels")
         geometry = ConvGeometry(
             current,
             (*tuple(_positive_int(v, "kernel") for v in kernel), current[-1], filters),
@@ -91,10 +100,11 @@ def deep_candidate_plan(config: dict[str, Any], candidate: dict[str, Any]) -> De
         entries = math.prod(geometry.input_shape) * math.prod(geometry.output_shape)
         if entries > config["max_affine_entries"]:
             raise ValueError(f"{candidate_id} layer {index} needs {entries} affine entries")
-        parameter_count += math.prod(geometry.kernel_shape) + filters
+        parameter_count += math.prod(kernel) * (current[-1] // groups) * filters + filters
         affine_entries.append(entries)
         relus.append(math.prod(geometry.output_shape))
         geometries.append(geometry)
+        conv_groups.append(groups)
         current = geometry.output_shape
     dense_hidden_values = candidate.get("dense_hidden", ())
     if not isinstance(dense_hidden_values, (list, tuple)):
@@ -146,7 +156,7 @@ def deep_candidate_plan(config: dict[str, Any], candidate: dict[str, Any]) -> De
             or any(not np.isfinite(value) or not 0 <= value < 1 for value in dropout_rates)):
         raise ValueError("Need one dropout rate in [0,1) per hidden stage")
     return DeepCandidatePlan(
-        candidate_id, tuple(geometries), dense_hidden, global_average_pooling,
+        candidate_id, tuple(geometries), tuple(conv_groups), dense_hidden, global_average_pooling,
         average_pool_size, config["classes"],
         config["max_affine_entries"], parameter_count,
         tuple(affine_entries), tuple(relus), dropout_rates,
@@ -219,11 +229,11 @@ def fold_batch_norm(kernel, batch_norm_weights, epsilon):
 def _build_clean_model(tf, plan: DeepCandidatePlan):
     inputs = tf.keras.Input(shape=plan.geometries[0].input_shape, name="input")
     value = inputs
-    for index, geometry in enumerate(plan.geometries):
+    for index, (geometry, groups) in enumerate(zip(plan.geometries, plan.conv_groups, strict=True)):
         value = tf.keras.layers.Conv2D(
             geometry.kernel_shape[-1], geometry.kernel_shape[:2],
             strides=geometry.strides, padding=geometry.padding.lower(),
-            use_bias=False, name=f"conv_{index}",
+            groups=groups, use_bias=False, name=f"conv_{index}",
         )(value)
         value = tf.keras.layers.BatchNormalization(name=f"bn_conv_{index}")(value)
         value = tf.keras.layers.ReLU(name=f"relu_conv_{index}")(value)
@@ -272,8 +282,19 @@ def _training_model(tf, clean, config):
 
 def _fold_model(clean, plan: DeepCandidatePlan):
     conv_kernels, conv_biases = [], []
-    for index in range(len(plan.geometries)):
+    for index, (geometry, groups) in enumerate(zip(
+        plan.geometries, plan.conv_groups, strict=True
+    )):
         kernel = clean.get_layer(f"conv_{index}").get_weights()[0]
+        if groups > 1:
+            input_per_group = geometry.input_shape[-1] // groups
+            output_per_group = geometry.output_shape[-1] // groups
+            expanded = np.zeros(geometry.kernel_shape, dtype=np.float32)
+            for group in range(groups):
+                input_slice = slice(group * input_per_group, (group + 1) * input_per_group)
+                output_slice = slice(group * output_per_group, (group + 1) * output_per_group)
+                expanded[:, :, input_slice, output_slice] = kernel[:, :, :, output_slice]
+            kernel = expanded
         bn = clean.get_layer(f"bn_conv_{index}")
         folded = fold_batch_norm(kernel, bn.get_weights(), bn.epsilon)
         conv_kernels.append(folded[0])
@@ -419,6 +440,7 @@ def train_candidate(tf, plan, arrays, config, output):
         # The fixed pooling map remains an ordinary non-output affine layer.
         "dense_hidden": ([plan.relus_per_layer[-1]]
                          if plan.average_pool_size is not None else list(plan.dense_hidden)),
+        "conv_groups": list(plan.conv_groups),
         "global_average_pooling": plan.global_average_pooling,
         "average_pool_size": list(plan.average_pool_size) if plan.average_pool_size else None,
         "shared_parameter_count": plan.shared_parameter_count,

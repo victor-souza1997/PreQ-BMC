@@ -198,12 +198,54 @@ class DeepSourceModelTest(unittest.TestCase):
         }]
         plan = validate_config(config)[0]
         tf.keras.utils.set_random_seed(17)
-        clean = _build_clean_model(tf, plan)
         image = np.random.default_rng(17).uniform(
             0, 1, size=(1, *plan.geometries[0].input_shape),
         ).astype(np.float32)
-        expected = np.asarray(clean(image, training=False))[0]
+        with tf.device("/CPU:0"):
+            clean = _build_clean_model(tf, plan)
+            expected = np.asarray(clean(image, training=False))[0]
         actual = _fold_model(clean, plan).float_reference(image[0])
+        np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-5)
+
+    def test_depthwise_pooling_lowers_to_diagonal_standard_convolution(self):
+        import tensorflow as tf
+
+        config = json.loads(json.dumps(self.config))
+        blocks = list(config["candidates"][0]["conv_blocks"])
+        channels = blocks[-1]["filters"]
+        blocks.append({
+            "filters": channels,
+            "kernel_size": [2, 2],
+            "strides": [2, 2],
+            "padding": "VALID",
+            "groups": "depthwise",
+        })
+        config["candidates"] = [{
+            "id": "conv8_16_dwpool43",
+            "conv_blocks": blocks,
+            "dense_hidden": [],
+            "dropout_rates": [0.0, 0.0, 0.0],
+        }]
+        plan = validate_config(config)[0]
+        self.assertEqual(plan.conv_groups, (1, 1, channels))
+        tf.keras.utils.set_random_seed(23)
+        image = np.random.default_rng(23).uniform(
+            0, 1, size=(1, *plan.geometries[0].input_shape),
+        ).astype(np.float32)
+        with tf.device("/CPU:0"):
+            clean = _build_clean_model(tf, plan)
+            expected = np.asarray(clean(image, training=False))[0]
+        restricted = _fold_model(clean, plan)
+        depthwise = restricted.conv_kernels[-1]
+        for output_channel in range(channels):
+            nonzero_inputs = np.flatnonzero(np.any(
+                depthwise[:, :, :, output_channel] != 0, axis=(0, 1)
+            ))
+            np.testing.assert_array_equal(nonzero_inputs, [output_channel])
+        np.testing.assert_allclose(
+            restricted.float_reference(image[0]), expected, rtol=2e-5, atol=2e-5,
+        )
+
     def test_four_stage_candidate_reduces_dense_input(self):
         path = Path(__file__).resolve().parents[2] / "experiments/sign_deep_source_model_search_4stage.json"
         config = json.loads(path.read_text(encoding="utf-8"))

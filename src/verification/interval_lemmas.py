@@ -7,7 +7,11 @@ import numpy as np
 
 from backends.conv_fixed_point import QuantizedConv2D, QuantizedDense
 from verification.arith_kernel import render_arith_kernel
-from verification.conv_contracts import LayerIntervalCertificate, conv_output_terms
+from verification.conv_contracts import (
+    LayerIntervalCertificate,
+    conv_output_terms,
+    dense_output_terms,
+)
 
 
 def _array(values: Iterable[int]) -> str:
@@ -32,9 +36,9 @@ def render_conv_interval_certificate(
     if not outputs:
         raise ValueError("Certificate block cannot be empty")
     terms_by_output = [conv_output_terms(layer, index) for index in outputs]
-    global_inputs = sorted({index for terms in terms_by_output for index, _ in terms})
+    global_inputs = sorted({index for terms in terms_by_output for index, _ in terms}) or [0]
     local = {global_index: local_index for local_index, global_index in enumerate(global_inputs)}
-    max_terms = max(len(terms) for terms in terms_by_output)
+    max_terms = max(1, *(len(terms) for terms in terms_by_output))
     term_count = []
     term_input = []
     term_weight = []
@@ -111,22 +115,30 @@ def render_dense_interval_certificate(
         raise ValueError("Certificate block requires unique output indices")
     if any(index < 0 or index >= layer.output_size for index in outputs):
         raise IndexError("Dense certificate output index out of range")
-    weights = [
-        int(layer.weights_int[index, column])
-        for index in outputs
-        for column in range(layer.input_size)
-    ]
+    terms_by_output = [dense_output_terms(layer, index) for index in outputs]
+    global_inputs = sorted({index for terms in terms_by_output for index, _ in terms}) or [0]
+    local = {global_index: local_index for local_index, global_index in enumerate(global_inputs)}
+    max_terms = max(1, *(len(terms) for terms in terms_by_output))
+    term_count, term_input, term_weight = [], [], []
+    for terms in terms_by_output:
+        padding = max_terms - len(terms)
+        term_count.append(len(terms))
+        term_input.extend([local[index] for index, _ in terms] + [0] * padding)
+        term_weight.extend([weight for _, weight in terms] + [0] * padding)
     states = _relu_states(certificate, outputs)
     return f"""#include <stdint.h>
 void __ESBMC_assert(_Bool, const char *);
 {render_arith_kernel()}
 #define BLOCK_SIZE {len(outputs)}
-#define LOCAL_INPUT_SIZE {layer.input_size}
+#define LOCAL_INPUT_SIZE {len(global_inputs)}
+#define MAX_TERMS {max_terms}
 #define TOTAL_BITS {layer.spec.total_bits}
 #define INPUT_FRACTIONAL_BITS {layer.input_fractional_bits}
-static const int64_t INPUT_LOW[LOCAL_INPUT_SIZE] = {_array(certificate.input_invariant.low)};
-static const int64_t INPUT_HIGH[LOCAL_INPUT_SIZE] = {_array(certificate.input_invariant.high)};
-static const int64_t WEIGHT[BLOCK_SIZE * LOCAL_INPUT_SIZE] = {_array(weights)};
+static const int64_t INPUT_LOW[LOCAL_INPUT_SIZE] = {_array(certificate.input_invariant.low[i] for i in global_inputs)};
+static const int64_t INPUT_HIGH[LOCAL_INPUT_SIZE] = {_array(certificate.input_invariant.high[i] for i in global_inputs)};
+static const int TERM_COUNT[BLOCK_SIZE] = {_array(term_count)};
+static const int TERM_INPUT[BLOCK_SIZE * MAX_TERMS] = {_array(term_input)};
+static const int64_t TERM_WEIGHT[BLOCK_SIZE * MAX_TERMS] = {_array(term_weight)};
 static const int64_t BIAS[BLOCK_SIZE] = {_array(layer.bias_int[index] for index in outputs)};
 static const int64_t EXPECTED_LOW[BLOCK_SIZE] = {_array(certificate.output_invariant.low[index] for index in outputs)};
 static const int64_t EXPECTED_HIGH[BLOCK_SIZE] = {_array(certificate.output_invariant.high[index] for index in outputs)};
@@ -135,9 +147,11 @@ int main(void) {{
     for (int out = 0; out < BLOCK_SIZE; ++out) {{
         __int128 low = 0;
         __int128 high = 0;
-        for (int input = 0; input < LOCAL_INPUT_SIZE; ++input) {{
-            __int128 first = (__int128)WEIGHT[out * LOCAL_INPUT_SIZE + input] * INPUT_LOW[input];
-            __int128 second = (__int128)WEIGHT[out * LOCAL_INPUT_SIZE + input] * INPUT_HIGH[input];
+        for (int term = 0; term < TERM_COUNT[out]; ++term) {{
+            const int offset = out * MAX_TERMS + term;
+            const int input = TERM_INPUT[offset];
+            __int128 first = (__int128)TERM_WEIGHT[offset] * INPUT_LOW[input];
+            __int128 second = (__int128)TERM_WEIGHT[offset] * INPUT_HIGH[input];
             low += first < second ? first : second;
             high += first < second ? second : first;
         }}

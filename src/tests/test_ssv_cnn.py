@@ -23,7 +23,10 @@ class RestrictedConvTest(unittest.TestCase):
             g = ConvGeometry((4, 5, 2), (2, 2, 2, 3), (stride, stride), padding)
             x = rng.normal(size=g.input_shape).astype(np.float32)
             kernel = rng.normal(size=g.kernel_shape).astype(np.float32)
-            expected = tf.nn.conv2d(x[None], kernel, strides=[1, stride, stride, 1], padding=padding).numpy()[0]
+            with tf.device("/CPU:0"):
+                expected = tf.nn.conv2d(
+                    x[None], kernel, strides=[1, stride, stride, 1], padding=padding,
+                ).numpy()[0]
             np.testing.assert_allclose(direct_conv(x, kernel, g), expected, atol=2e-6, rtol=2e-6)
 
     def test_layout_padding_strides_float_and_integer(self):

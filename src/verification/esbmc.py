@@ -171,6 +171,13 @@ class ESBMCRunner:
             r"#define\s+LOCAL_INPUT_SIZE\s+(\d+)",
             r"#define\s+MAX_TERMS\s+(\d+)",
             r"#define\s+INVARIANT_SIZE\s+(\d+)",
+            # Input-affine certificate harnesses use compressed raw-input
+            # supports and sparse predecessor forms.
+            r"#define\s+AFFINE_SUPPORT_SIZE\s+(\d+)",
+            r"#define\s+AFFINE_PREVIOUS_COUNT\s+(\d+)",
+            r"#define\s+AFFINE_BLOCK_SIZE\s+(\d+)",
+            r"#define\s+AFFINE_MAX_FORM_TERMS\s+(\d+)",
+            r"#define\s+AFFINE_MAX_WEIGHT_TERMS\s+(\d+)",
         ]
 
         for pattern in patterns:
