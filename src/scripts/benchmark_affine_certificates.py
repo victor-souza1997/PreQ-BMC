@@ -9,7 +9,7 @@ from verification.conv_affine_certificate import (
     load_affine_certificate,
     render_affine_rounding_error_lemma,
     render_bounded_relu_hull_lemma,
-    render_recomputed_affine_block,
+    render_unrolled_recomputed_affine_block,
     render_symbolic_affine_block,
     slice_affine_certificate,
 )
@@ -63,7 +63,7 @@ def benchmark(paths: list[Path], output: Path, *, timeout: int, memlimit: str,
             selected = slice_affine_certificate(certificate, range(start, end))
             suffix = f"_n{start}_{end}"
             if "option_b" in options:
-                sources.append((f"option_b_recomputation{suffix}", render_recomputed_affine_block(selected)))
+                sources.append((f"option_b_recomputation{suffix}", render_unrolled_recomputed_affine_block(selected)))
             if "option_a" in options:
                 sources.append((f"option_a_symbolic{suffix}", render_symbolic_affine_block(selected)))
         for kind, source in sources:
@@ -106,9 +106,11 @@ def main() -> None:
         default=("relu", "rounding", "option_b", "option_a"),
     )
     args = parser.parse_args()
+    parser.add_argument("--neurons-per-harness", type=int)
     benchmark(args.certificates, args.output, timeout=args.timeout,
               memlimit=args.memlimit, profile=args.profile,
-              options=tuple(args.options))
+              options=tuple(args.options),
+              neurons_per_harness=args.neurons_per_harness)
 
 
 if __name__ == "__main__":

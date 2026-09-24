@@ -423,3 +423,90 @@ int main(void) {
     return 0;
 }
 """
+
+def render_unrolled_recomputed_affine_block(certificate: dict[str, Any]) -> str:
+    """Option B as straight-line C, avoiding solver-hostile pointer loops."""
+    previous, block = certificate["previous_layer_envelopes"], certificate["block"]
+    support, positions = _support(certificate)
+    previous_by_index = {row["neuron_index"]: row for row in previous}
+    scale = 1 << certificate["scale_bits"]
+    denominator = 1 << certificate["qif"]["fractional_bits"]
+    q_low = -(1 << (certificate["qif"]["total_bits"] - 1))
+    q_high = (1 << (certificate["qif"]["total_bits"] - 1)) - 1
+    lines = ["#include <stdint.h>", "void __ESBMC_assert(_Bool, const char *);",
+        f"#define AFFINE_SUPPORT_SIZE {len(support)}",
+        f"static const int64_t INPUT_LOW[AFFINE_SUPPORT_SIZE] = {_c_array(certificate['input_box']['low'][i] for i in support)};",
+        f"static const int64_t INPUT_HIGH[AFFINE_SUPPORT_SIZE] = {_c_array(certificate['input_box']['high'][i] for i in support)};",
+        "int main(void) {", "    __int128 coefficient[AFFINE_SUPPORT_SIZE];",
+        "    __int128 constant, bound;"]
+
+    def clear():
+        lines.append("    constant = 0;")
+        lines.extend(f"    coefficient[{i}] = 0;" for i in range(len(support)))
+
+    def add(form, multiplier):
+        lines.append(f"    constant += (__int128)({multiplier}) * ({form['constant']});")
+        for index, value in zip(form["input_indices"], form["coefficients"], strict=True):
+            lines.append(f"    coefficient[{positions[index]}] += (__int128)({multiplier}) * ({value});")
+
+    def extreme(minimum, message):
+        lines.append("    bound = constant;")
+        lows, highs = certificate["input_box"]["low"], certificate["input_box"]["high"]
+        for position, index in enumerate(support):
+            first, second = (lows[index], highs[index]) if minimum else (highs[index], lows[index])
+            lines.append(f"    bound += coefficient[{position}] * (coefficient[{position}] >= 0 ? {first} : {second});")
+        lines.append(f'    __ESBMC_assert(bound >= 0, "{message}");')
+
+    def literal_extreme(form, minimum):
+        lines.append(f"    constant = {form['constant']};")
+        lows, highs = certificate["input_box"]["low"], certificate["input_box"]["high"]
+        for index, value in zip(form["input_indices"], form["coefficients"], strict=True):
+            endpoint = (lows[index] if value >= 0 else highs[index]) if minimum else \
+                       (highs[index] if value >= 0 else lows[index])
+            lines.append(f"    constant += (__int128)({value}) * ({endpoint});")
+
+    for out, row in enumerate(block):
+        clear()
+        for index, weight in zip(row["weights"]["input_neurons"], row["weights"]["values"], strict=True):
+            add(previous_by_index[index]["h_lower" if weight >= 0 else "h_upper"], weight)
+        add(row["z_lower"], -denominator)
+        lines.append(f"    constant += (__int128){scale} * {denominator} * ({row['bias']}) - (__int128){scale} * {denominator} / 2;")
+        extreme(True, f"lower affine derivation {out}")
+        clear()
+        for index, weight in zip(row["weights"]["input_neurons"], row["weights"]["values"], strict=True):
+            add(previous_by_index[index]["h_upper" if weight >= 0 else "h_lower"], -weight)
+        add(row["z_upper"], denominator)
+        lines.append(f"    constant += -(__int128){scale} * {denominator} * ({row['bias']}) - (__int128){scale} * {denominator} / 2;")
+        extreme(True, f"upper affine derivation {out}")
+
+        literal_extreme(row["z_lower"], True)
+        lines.append(f"    __int128 relation_low_{out} = constant / {scale};")
+        lines.append(f"    if (constant % {scale} != 0 && constant > 0) relation_low_{out} += 1;")
+        literal_extreme(row["z_upper"], False)
+        lines.append(f"    __int128 relation_high_{out} = constant / {scale};")
+        lines.append(f"    if (constant % {scale} != 0 && constant < 0) relation_high_{out} -= 1;")
+        lines.append(f'    __ESBMC_assert(relation_low_{out} >= {q_low} && relation_high_{out} <= {q_high}, "clamp inactivity {out}");')
+        box_low, box_high = row["esbmc_box_pre_activation"]
+        expected_low, expected_high = row["pre_clamp_bounds"]
+        lines.append(f"    __int128 low_{out} = relation_low_{out} > {box_low} ? relation_low_{out} : {box_low};")
+        lines.append(f"    __int128 high_{out} = relation_high_{out} < {box_high} ? relation_high_{out} : {box_high};")
+        lines.append(f'    __ESBMC_assert(low_{out} == {expected_low} && high_{out} == {expected_high} && low_{out} <= high_{out}, "scalar bounds {out}");')
+
+        clear()
+        if row["relu_regime"] == "active" or row["relu_lower_rule"] == "h>=z":
+            add(row["z_lower"], 1); add(row["h_lower"], -1)
+        else:
+            add(row["h_lower"], -1)
+        extreme(True, f"lower ReLU derivation {out}")
+        clear()
+        if row["relu_regime"] == "active":
+            add(row["h_upper"], 1); add(row["z_upper"], -1)
+        elif row["relu_regime"] == "dead":
+            add(row["h_upper"], 1)
+        else:
+            add(row["h_upper"], expected_high - expected_low)
+            add(row["z_upper"], -expected_high)
+            lines.append(f"    constant += (__int128){expected_high} * {scale} * ({expected_low});")
+        extreme(True, f"upper ReLU derivation {out}")
+    lines.extend(("    return 0;", "}", ""))
+    return "\n".join(lines)
