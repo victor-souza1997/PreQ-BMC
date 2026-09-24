@@ -646,9 +646,11 @@ class ESBMCRunner:
                     process,
                     self.config.timeout_seconds + 300,
                 )
-        except Exception as exc:
+        except BaseException as exc:
             if process is not None:
                 self._terminate_process_tree(process)
+            if not isinstance(exc, Exception):
+                raise
             elapsed_seconds = time.monotonic() - start_time
             stdout_tail = self._tail_file(stdout_log_path)
             stderr_tail = f"{self._tail_file(stderr_log_path)}\n{exc}"

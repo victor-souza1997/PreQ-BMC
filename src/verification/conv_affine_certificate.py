@@ -491,6 +491,12 @@ def render_unrolled_recomputed_affine_block(certificate: dict[str, Any]) -> str:
         lines.append(f"    __int128 low_{out} = relation_low_{out} > {box_low} ? relation_low_{out} : {box_low};")
         lines.append(f"    __int128 high_{out} = relation_high_{out} < {box_high} ? relation_high_{out} : {box_high};")
         lines.append(f'    __ESBMC_assert(low_{out} == {expected_low} && high_{out} == {expected_high} && low_{out} <= high_{out}, "scalar bounds {out}");')
+        if row["relu_regime"] == "active":
+            lines.append(f'    __ESBMC_assert(low_{out} >= 0, "active ReLU regime {out}");')
+        elif row["relu_regime"] == "dead":
+            lines.append(f'    __ESBMC_assert(high_{out} <= 0, "dead ReLU regime {out}");')
+        else:
+            lines.append(f'    __ESBMC_assert(low_{out} < 0 && high_{out} > 0, "unstable ReLU regime {out}");')
 
         clear()
         if row["relu_regime"] == "active" or row["relu_lower_rule"] == "h>=z":

@@ -41,7 +41,9 @@ def _result(result, source: Path, certificate: Path, kind: str) -> dict:
 
 def benchmark(paths: list[Path], output: Path, *, timeout: int, memlimit: str,
               profile: str, options: tuple[str, ...],
-              neurons_per_harness: int | None) -> dict:
+              neurons_per_harness: int | None,
+              start_position: int = 0,
+              max_neurons: int | None = None) -> dict:
     output.mkdir(parents=True, exist_ok=False)
     runner = ESBMCRunner(ESBMCConfig(
         timeout_seconds=timeout, memlimit=memlimit, default_profile=profile,
@@ -55,11 +57,20 @@ def benchmark(paths: list[Path], output: Path, *, timeout: int, memlimit: str,
             sources.append(("rounding_error_lemma", render_affine_rounding_error_lemma(certificate)))
         if "relu" in options:
             sources.append(("bounded_relu_hull_lemma", render_bounded_relu_hull_lemma(certificate)))
-        step = neurons_per_harness or len(certificate["block"])
+        stop = len(certificate["block"])
+        if not 0 <= start_position < stop:
+            raise ValueError(
+                f"start_position {start_position} is outside {certificate_path}"
+            )
+        if max_neurons is not None:
+            if max_neurons <= 0:
+                raise ValueError("max_neurons must be positive")
+            stop = min(stop, start_position + max_neurons)
+        step = neurons_per_harness or (stop - start_position)
         if step <= 0:
             raise ValueError("neurons_per_harness must be positive")
-        for start in range(0, len(certificate["block"]), step):
-            end = min(start + step, len(certificate["block"]))
+        for start in range(start_position, stop, step):
+            end = min(start + step, stop)
             selected = slice_affine_certificate(certificate, range(start, end))
             suffix = f"_n{start}_{end}"
             if "option_b" in options:
@@ -85,6 +96,8 @@ def benchmark(paths: list[Path], output: Path, *, timeout: int, memlimit: str,
         "profile": profile,
         "options": list(options),
         "neurons_per_harness": neurons_per_harness,
+        "start_position": start_position,
+        "max_neurons": max_neurons,
         "records": records,
     }
     (output / "benchmark_summary.json").write_text(
@@ -105,12 +118,16 @@ def main() -> None:
         choices=("relu", "rounding", "option_a", "option_b"),
         default=("relu", "rounding", "option_b", "option_a"),
     )
-    args = parser.parse_args()
     parser.add_argument("--neurons-per-harness", type=int)
+    parser.add_argument("--start-position", type=int, default=0)
+    parser.add_argument("--max-neurons", type=int)
+    args = parser.parse_args()
     benchmark(args.certificates, args.output, timeout=args.timeout,
               memlimit=args.memlimit, profile=args.profile,
               options=tuple(args.options),
-              neurons_per_harness=args.neurons_per_harness)
+              neurons_per_harness=args.neurons_per_harness,
+              start_position=args.start_position,
+              max_neurons=args.max_neurons)
 
 
 if __name__ == "__main__":
