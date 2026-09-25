@@ -8,6 +8,8 @@ import unittest
 from verification.crown_chain_v2 import (
     bind_layers_to_deployment,
     render_relu_class_lemmas,
+    render_rounding_lemma,
+    split_claim,
 )
 from verification.esbmc import ESBMCConfig, ESBMCRunner
 from verification.esbmc_install import resolve_esbmc_executable
@@ -75,6 +77,20 @@ class CrownChainV2BindingTest(unittest.TestCase):
         lower = next(source for name, source, _ in rendered if name == "lemma_relu_lower.c")
         self.assertIn("raw >= lower", lower)
 
+    def test_claim_follows_recorded_split(self):
+        self.assertEqual(split_claim({"provenance": {"split": "test"}})[0], "test_split_result")
+        self.assertEqual(
+            split_claim({"provenance": {"split": "validation"}})[0],
+            "validation_pilot_not_paper_test_result",
+        )
+        with self.assertRaisesRegex(ValueError, "no defined claim"):
+            split_claim({"provenance": {"split": "train"}})
+
+    def test_rounding_lemma_uses_deployed_kernel(self):
+        _, source, _ = render_rounding_lemma()
+        self.assertIn("div_round_half_away_from_zero_i128(acc, 256)", source)
+        self.assertIn("error >= -128 && error <= 128", source)
+
 
 @unittest.skipUnless(resolve_esbmc_executable("esbmc"), "ESBMC is optional")
 class CrownChainV2LemmaESBMCTest(unittest.TestCase):
@@ -89,6 +105,20 @@ class CrownChainV2LemmaESBMCTest(unittest.TestCase):
                     harness.write_text(source, encoding="utf-8")
                     result = runner.run_file(harness, profile="paper-z3")
                     self.assertEqual(result.status, "VERIFIED")
+
+    def test_rounding_lemma_is_tight(self):
+        runner = ESBMCRunner(ESBMCConfig(
+            timeout_seconds=20, memlimit="1g", default_profile="paper-z3"
+        ))
+        _, source, _ = render_rounding_lemma()
+        with tempfile.TemporaryDirectory() as directory:
+            for bound, expected in ((128, "VERIFIED"), (127, "FAILED")):
+                with self.subTest(bound=bound):
+                    harness = Path(directory) / f"rounding_{bound}.c"
+                    harness.write_text(source.replace(
+                        "error >= -128 && error <= 128", f"error >= -{bound} && error <= {bound}"
+                    ), encoding="utf-8")
+                    self.assertEqual(runner.run_file(harness, profile="paper-z3").status, expected)
 
 
 if __name__ == "__main__":

@@ -429,8 +429,9 @@ def validate_chain(
                     if fact_id != expected:
                         raise ValueError(f"{step['step_id']} cites {fact_id} for coordinate {index}")
                     value = _fact_value(facts, layer_index - 1, index, "lower")
-                    if value <= 0:
-                        raise ValueError(f"{step['step_id']} cites a nonpositive residual lower fact")
+                    # h >= value needs clamp(r) >= value, so the fact must lie inside Q16.
+                    if value <= 0 or value > Q_HIGH:
+                        raise ValueError(f"{step['step_id']} cites a residual lower fact outside (0, Q_HIGH]")
                     lower_values[index] = value
             bias_dot = sum(coefficient * csr["bias"][row] for row, coefficient in current.items())
             residual_dot = sum(value * lower_values.get(index, 0) for index, value in residual.items())
@@ -655,6 +656,44 @@ def load_certificate_v2(
     )
 
 
+SPLIT_CLAIMS = {
+    "validation": (
+        "validation_pilot_not_paper_test_result",
+        "validation-pilot-deployed-local-robustness",
+        "This is a validation-split pilot and is not a paper test-set result.",
+    ),
+    "test": (
+        "test_split_result",
+        "deployed-local-robustness",
+        "This is a test-split result under the pre-registered protocol named in its provenance.",
+    ),
+}
+
+
+def split_claim(root: dict[str, Any]) -> tuple[str, str, str]:
+    """Claim, guarantee level and scope limitation for the certificate's recorded split."""
+
+    split = root["provenance"]["split"]
+    if split not in SPLIT_CLAIMS:
+        raise ValueError(f"Certificate split {split!r} has no defined claim")
+    return SPLIT_CLAIMS[split]
+
+
+def checker_sources() -> dict[str, str]:
+    """sha256 of every source file that decides what the checker emits and accepts."""
+
+    root = Path(__file__).resolve().parents[1]
+    paths = [
+        root / "verification" / "crown_chain_v2.py",
+        root / "verification" / "arith_kernel.py",
+        root / "scripts" / "check_crown_chain_v2.py",
+        root / "scripts" / "aggregate_crown_chain_v2.py",
+        root / "scripts" / "benchmark_esbmc_concurrency.py",
+        root / "verification" / "esbmc.py",
+    ]
+    return {str(path.relative_to(root.parent)): _sha256(path) for path in paths}
+
+
 def _header() -> list[str]:
     return [
         "#include <stdint.h>",
@@ -665,6 +704,17 @@ def _header() -> list[str]:
         "static __int128 floor_div_i128(__int128 n, __int128 d) {",
         "  __int128 q = n / d, r = n % d;",
         "  return q - (r != 0 && n < 0);",
+        "}",
+        "static __int128 relu_gap(__int128 a, __int128 a_out, __int128 z) {",
+        "  return a * (z > 0 ? z : 0) - a_out * z;",
+        "}",
+        "static int64_t relu_gap64(int64_t a, int64_t a_out, int64_t z) {",
+        "  return a * (z > 0 ? z : 0) - a_out * z;",
+        "}",
+        "static __int128 lower_upper_constant(__int128 a, __int128 a_out, __int128 l, __int128 u) {",
+        "  __int128 at_l = relu_gap(a, a_out, l), at_u = relu_gap(a, a_out, u);",
+        "  __int128 m = at_l < at_u ? at_l : at_u;",
+        "  return (l < 0 && u > 0 && m > 0) ? 0 : m;",
         "}",
         render_arith_kernel(),
         "",
@@ -734,17 +784,24 @@ def _render_affine(
             {"chain_id": chain["certificate_id"], "step_id": step["step_id"],
              "kind": "affine_chunk", "multiply_terms": terms},
         ))
-    lines = _header() + ["int main(void) {", "  __int128 bias_dot = 0;"]
+    lines = _header() + ["int main(void) {", "  __int128 bias_dot = 0;", "  __int128 l1 = 0;"]
     for row, coefficient in coefficients.items():
         lines.append(f"  bias_dot += (__int128)({coefficient}) * ({csr['bias'][row]});")
+        lines.append(f"  l1 += ({coefficient}) < 0 ? -(__int128)({coefficient}) : (__int128)({coefficient});")
     lines.append("  __int128 residual_dot = 0;")
     for column, value in residual.items():
         lines.append(f"  residual_dot += (__int128)({value}) * ({lower_values.get(column, 0)});")
+    if layer_index > 0:
+        for column, value in sorted(lower_values.items()):
+            lines.append(
+                f'  __ESBMC_assert(({value}) > 0 && ({value}) <= {Q_HIGH}, "{step["step_id"]} residual fact {column} in Q16");'
+            )
     lines.extend([
         f'  __ESBMC_assert(bias_dot == (__int128)({step["_bias_dot"]}), "{step["step_id"]} bias dot");',
         f'  __ESBMC_assert(residual_dot == (__int128)({step["_residual_dot"]}), "{step["step_id"]} residual dot");',
+        f'  __ESBMC_assert((__int128)({step["rounding_term"]}) == 128 * l1, "{step["step_id"]} rounding term");',
         f"  __int128 computed = (__int128)({step['input_constant']}) + bias_dot",
-        f"      + floor_div_i128(residual_dot - (__int128)({step['rounding_term']}), 256);",
+        "      + floor_div_i128(residual_dot - 128 * l1, 256);",
         f'  __ESBMC_assert(computed == (__int128)({step["output_constant"]}), "{step["step_id"]} output constant");',
         "  return 0;", "}", "",
     ])
@@ -758,7 +815,11 @@ def _render_affine(
 
 def _render_relu(
     certificate: CertificateV2, chain: dict[str, Any], step: dict[str, Any], max_coordinates: int,
+    max_abs_coefficient: int, raw_abs_limit: int,
 ) -> list[tuple[str, str, dict[str, Any]]]:
+    def inside(value: Any, limit: int) -> str:
+        return f"({value}) >= -{limit} && ({value}) <= {limit}"
+
     coefficients: dict[int, int] = step["_input_coefficients"]
     layer_index = int(step["layer_index"])
     output = _sparse(
@@ -793,43 +854,61 @@ def _render_relu(
                     f"({a}) > 0 && ({a_out}) == ({a}) && ({upper}) <= {Q_HIGH} "
                     f"&& ({constant}) == 0"
                 )
+            # The constant is recomputed in C from the cited fact value, not copied from Python.
             elif class_name == "lower":
-                expected = a * max(-int(lower), 0)
                 predicate = (
                     f"({a}) < 0 && ({a_out}) == ({a}) "
-                    f"&& (__int128)({constant}) == (__int128)({expected})"
+                    f"&& (__int128)({constant}) == (__int128)({a}) * "
+                    f"(({lower}) < 0 ? -(__int128)({lower}) : 0)"
                 )
             elif class_name == "upper":
-                expected = a * max(int(upper), 0)
                 predicate = (
                     f"({a}) < 0 && ({a_out}) == 0 "
-                    f"&& (__int128)({constant}) == (__int128)({expected})"
+                    f"&& (__int128)({constant}) == (__int128)({a}) * "
+                    f"(({upper}) > 0 ? (__int128)({upper}) : 0)"
                 )
             else:
-                points = [int(lower), int(upper)]
-                if int(lower) < 0 < int(upper):
-                    points.append(0)
-                expected = min(a * max(point, 0) - a_out * point for point in points)
                 predicate = (
                     f"({lower}) >= {Q_LOW} && ({upper}) <= {Q_HIGH} "
                     f"&& ({lower}) <= ({upper}) "
-                    f"&& (__int128)({constant}) == (__int128)({expected})"
+                    f"&& (__int128)({constant}) == "
+                    f"lower_upper_constant({a}, {a_out}, {lower}, {upper})"
                 )
+            # Each instance must lie inside the envelope the shared lemmas quantify over.
+            envelope = [inside(a, max_abs_coefficient), inside(a_out, max_abs_coefficient)]
+            if class_name in {"nosat_upper", "upper", "lower_upper"}:
+                envelope.append(inside(upper, raw_abs_limit))
+            if class_name in {"lower", "lower_upper"}:
+                envelope.append(inside(lower, raw_abs_limit))
+            predicate = " && ".join(envelope + [predicate])
             lines.append(
                 f'  __ESBMC_assert({predicate}, "{step["step_id"]} {class_name} instance {index}");'
             )
+            if class_name == "lower_upper":
+                # With a and a_out literal the gap is linear in z, so the breakpoint
+                # minimum is proved per instance. Implication form, not assume:
+                # nothing here can make a later assertion vacuous.
+                # int16 z covers [l, u] because the predicate above asserts Q16, and
+                # |a| < 2^31 (envelope) keeps the int64 products below 2^47.
+                lines.extend([
+                    f"  int64_t z_{ordinal} = (int16_t)nondet_long_long();",
+                    f"  __ESBMC_assert(!(z_{ordinal} >= ({lower}) && z_{ordinal} <= ({upper})) "
+                    f"|| (__int128)relu_gap64({a}, {a_out}, z_{ordinal}) >= (__int128)({constant}), "
+                    f'"{step["step_id"]} lower_upper breakpoint {index}");',
+                ])
         lines.extend(["  return 0;", "}", ""])
         rendered.append((
             f"{_safe(step['step_id'])}_relu_{chunk_index}.c", "\n".join(lines),
             {"chain_id": chain["certificate_id"], "step_id": step["step_id"],
              "kind": "relu_chunk", "coordinates": len(chunk), "class_counts": counts},
         ))
-    expected = int(step["input_constant"]) + sum(constants.values())
-    lines = _header() + [
-        "int main(void) {",
-        f'  __ESBMC_assert((__int128)({step["output_constant"]}) == (__int128)({expected}), "{step["step_id"]} constant sum");',
+    lines = _header() + ["int main(void) {", f"  __int128 total = {step['input_constant']};"]
+    for index, value in sorted(constants.items()):
+        lines.append(f"  total += (__int128)({value});")
+    lines.extend([
+        f'  __ESBMC_assert((__int128)({step["output_constant"]}) == total, "{step["step_id"]} constant sum");',
         "  return 0;", "}", "",
-    ]
+    ])
     rendered.append((
         f"{_safe(step['step_id'])}_relu_close.c", "\n".join(lines),
         {"chain_id": chain["certificate_id"], "step_id": step["step_id"],
@@ -846,7 +925,7 @@ def render_relu_class_lemmas(max_abs_coefficient: int, raw_abs_limit: int) -> li
     coefficient signs, facts, endpoint minima, and constants.
     """
 
-    if max_abs_coefficient <= 0 or raw_abs_limit <= 0 or raw_abs_limit > (1 << 31) - 1:
+    if not 0 < max_abs_coefficient <= (1 << 31) - 1 or not 0 < raw_abs_limit <= (1 << 31) - 1:
         raise ValueError("Unsupported ReLU lemma envelope")
     difference_limit = 2 * raw_abs_limit + 65536
     if difference_limit > (1 << 31) - 1:
@@ -911,6 +990,26 @@ def render_relu_class_lemmas(max_abs_coefficient: int, raw_abs_limit: int) -> li
     return rendered
 
 
+def render_rounding_lemma() -> tuple[str, str, dict[str, Any]]:
+    """Prove |256 * round_half_away(acc / 256) - acc| <= 128 with the deployed kernel.
+
+    This is the per-row error the affine rounding term 128 * ||a||_1 charges.
+    The envelope is all of int64, which contains every deployed accumulator.
+    """
+
+    source = _header() + [
+        "int main(void) {",
+        "  __int128 acc = (int64_t)nondet_long_long();",
+        "  __int128 error = 256 * div_round_half_away_from_zero_i128(acc, 256) - acc;",
+        '  __ESBMC_assert(error >= -128 && error <= 128, "deployed rounding error is within half a step");',
+        "  return 0;", "}", "",
+    ]
+    return (
+        "lemma_affine_rounding.c", "\n".join(source),
+        {"chain_id": "__shared_lemmas__", "step_id": "", "kind": "affine_lemma_rounding"},
+    )
+
+
 def _render_concretize(
     certificate: CertificateV2, chain: dict[str, Any], step: dict[str, Any]
 ) -> tuple[str, str, dict[str, Any]]:
@@ -954,15 +1053,42 @@ def _render_chain_close(
             )
     scaled = int(chain["scaled_bound"])
     scale = 1 << int(certificate.root["scale_bits"])
-    expected = (-scaled) // scale if chain["claim"] == "upper" else -((-scaled) // scale)
+    # upper: floor(-scaled / scale); lower and margin: ceil(scaled / scale) = -floor(-scaled / scale)
+    rounded = f"floor_div_i128(-(__int128)({scaled}), {scale})"
+    expected = rounded if chain["claim"] == "upper" else f"-{rounded}"
     lines.extend([
-        f'  __ESBMC_assert((__int128)({chain["bound"]}) == (__int128)({expected}), "{chain["certificate_id"]} rounded bound");',
+        f'  __ESBMC_assert((__int128)({chain["bound"]}) == {expected}, "{chain["certificate_id"]} rounded bound");',
         "  return 0;", "}", "",
     ])
     return (
         f"{_safe(chain['certificate_id'])}_chain_close.c", "\n".join(lines),
         {"chain_id": chain["certificate_id"], "step_id": "", "kind": "chain_close"},
     )
+
+
+def relu_envelope(certificate: CertificateV2) -> tuple[int, int]:
+    """Coefficient and raw-value envelopes the shared ReLU lemmas quantify over."""
+
+    # Recomputed from the coefficients, not read from the manifest; the ReLU
+    # harnesses assert each instance against it.
+    max_coefficient = max(
+        abs(value)
+        for chain in certificate.chains
+        for step in chain["_normalized_steps"] if step["kind"] == "relu"
+        for value in [
+            *step["_input_coefficients"].values(),
+            *_sparse(step["output_coefficients"], "output_coefficients",
+                     certificate.layers[int(step["layer_index"])]["rows"]).values(),
+        ]
+    )
+    raw_limits = []
+    for csr in certificate.layers.values():
+        for row in range(csr["rows"]):
+            weight_sum = sum(
+                abs(value) for value in csr["data"][csr["indptr"][row]:csr["indptr"][row + 1]]
+            )
+            raw_limits.append((weight_sum * 32768 + 127) // 256 + abs(csr["bias"][row]) + 1)
+    return max_coefficient, max(raw_limits)
 
 
 def render_v2_harnesses(
@@ -972,22 +1098,24 @@ def render_v2_harnesses(
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     records = []
+    lemmas: list[tuple[str, str, dict[str, Any]]] = []
+    if any(
+        step["kind"] == "affine"
+        for chain in certificate.chains
+        for step in chain["_normalized_steps"]
+    ):
+        lemmas.append(render_rounding_lemma())
     if any(
         step["kind"] == "relu"
         for chain in certificate.chains
         for step in chain["_normalized_steps"]
     ):
-        max_coefficient = int(certificate.root["manifest"]["diagnostic_counts"]["max_abs_coefficient"])
-        raw_limits = []
-        for csr in certificate.layers.values():
-            for row in range(csr["rows"]):
-                weight_sum = sum(
-                    abs(value) for value in csr["data"][csr["indptr"][row]:csr["indptr"][row + 1]]
-                )
-                raw_limits.append((weight_sum * 32768 + 127) // 256 + abs(csr["bias"][row]) + 1)
+        max_coefficient, raw_abs_limit = relu_envelope(certificate)
+        lemmas.extend(render_relu_class_lemmas(max_coefficient, raw_abs_limit))
+    if lemmas:
         lemma_dir = output / "shared_lemmas"
         lemma_dir.mkdir()
-        for filename, source, metadata in render_relu_class_lemmas(max_coefficient, max(raw_limits)):
+        for filename, source, metadata in lemmas:
             path = lemma_dir / filename
             path.write_text(source, encoding="utf-8")
             records.append({
@@ -999,7 +1127,9 @@ def render_v2_harnesses(
             if step["kind"] == "affine":
                 rendered.extend(_render_affine(certificate, chain, step, max_affine_terms))
             elif step["kind"] == "relu":
-                rendered.extend(_render_relu(certificate, chain, step, max_relu_coordinates))
+                rendered.extend(_render_relu(
+                    certificate, chain, step, max_relu_coordinates, max_coefficient, raw_abs_limit,
+                ))
             else:
                 rendered.append(_render_concretize(certificate, chain, step))
         rendered.append(_render_chain_close(certificate, chain))

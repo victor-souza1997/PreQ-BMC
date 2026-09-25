@@ -9,7 +9,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from verification.crown_chain_v2 import Q_HIGH, Q_LOW, load_certificate_v2
+from verification.crown_chain_v2 import (
+    Q_HIGH, Q_LOW, checker_sources, load_certificate_v2, split_claim,
+)
 
 
 def _sha256(path: Path) -> str:
@@ -108,6 +110,8 @@ def aggregate_shards(
             or summary["aborted_low_memory"]
         ):
             raise ValueError(f"Shard layer {layer} is not a complete VERIFIED shard")
+        if summary.get("checker_sources") != checker_sources():
+            raise ValueError(f"Shard layer {layer} was checked by different checker sources")
         if Path(summary["certificate_dir"]).resolve() != certificate_dir.resolve():
             raise ValueError(f"Shard layer {layer} names another certificate")
         if Path(summary["deployment_c"]).resolve() != deployment_c.resolve():
@@ -150,17 +154,12 @@ def aggregate_shards(
     if layers_seen != set(expected_by_layer):
         raise ValueError(f"Missing shard layers: {sorted(set(expected_by_layer) - layers_seen)}")
     summaries.sort(key=lambda row: row["layer"])
-    source_root = Path(__file__).resolve().parents[1]
-    checker_paths = [
-        source_root / "verification" / "crown_chain_v2.py",
-        source_root / "scripts" / "check_crown_chain_v2.py",
-        Path(__file__).resolve(),
-    ]
+    claim, guarantee_level, split_limitation = split_claim(certificate.root)
     summary = {
         "schema": "crown_chain_v2_complete_check",
-        "claim": "validation_pilot_not_paper_test_result",
+        "claim": claim,
         "status": "VERIFIED",
-        "guarantee_level": "validation-pilot-deployed-local-robustness",
+        "guarantee_level": guarantee_level,
         "split": certificate.root["provenance"]["split"],
         "image_id": certificate.root["provenance"]["image_id"],
         "epsilon_raw_bytes": certificate.root["provenance"]["epsilon_raw_bytes"],
@@ -182,11 +181,9 @@ def aggregate_shards(
         "maximum_shard_peak_aggregate_rss_mib": peak_rss,
         "minimum_mem_available_gib": minimum_available,
         "shards": summaries,
-        "checker_sources": {
-            str(path): _sha256(path) for path in checker_paths
-        },
+        "checker_sources": checker_sources(),
         "limitations": [
-            "This is a validation-split pilot and is not a paper test-set result.",
+            split_limitation,
             "The certificate establishes local robustness only for the stated image and L-infinity byte radius.",
             "Certificate parsing, hashing, and proof composition remain part of the checker trusted base.",
         ],

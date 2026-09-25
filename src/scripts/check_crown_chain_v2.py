@@ -9,7 +9,9 @@ import time
 from typing import Any
 
 from scripts.benchmark_esbmc_concurrency import benchmark
-from verification.crown_chain_v2 import load_certificate_v2, render_v2_harnesses
+from verification.crown_chain_v2 import (
+    checker_sources, load_certificate_v2, render_v2_harnesses, split_claim,
+)
 
 
 def _aggregate_status(counts: Counter[str], expected: int) -> str:
@@ -76,9 +78,10 @@ def check_v2(
     counts = Counter(record["status"] for record in records)
     arithmetic_status = _aggregate_status(counts, manifest["harness_count"])
     complete = bool(certificate.preflight["complete_certificate_scope"])
+    complete_claim, complete_guarantee, _ = split_claim(certificate.root)
     if arithmetic_status == "VERIFIED" and complete:
         final_status = "VERIFIED"
-        guarantee = "validation-pilot-deployed-local-robustness"
+        guarantee = complete_guarantee
     elif arithmetic_status == "VERIFIED":
         final_status = "SHARD_VERIFIED"
         guarantee = "arithmetic-shard-only"
@@ -87,10 +90,9 @@ def check_v2(
         guarantee = "none"
     summary = {
         "schema": "crown_chain_v2_check_summary",
-        "claim": (
-            "validation_pilot_not_paper_test_result" if complete
-            else "throughput_measurement_not_network_certificate"
-        ),
+        "claim": complete_claim if complete else "throughput_measurement_not_network_certificate",
+        "split": certificate.root["provenance"]["split"],
+        "checker_sources": checker_sources(),
         "status": final_status,
         "guarantee_level": guarantee,
         "arithmetic_status": arithmetic_status,
