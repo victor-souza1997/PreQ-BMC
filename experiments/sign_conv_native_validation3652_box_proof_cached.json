@@ -47,10 +47,11 @@
     "memlimit": "6g",
     "fail_fast": false,
     "jobs": 4,
-    "min_available_gib": 6.0
+    "min_available_gib": 6.0,
+    "cache_directory": "output/sign_conv_depthwise_pool_validation3652_box_proof_20260924/proof/verified_cache"
   },
   "claim_boundary": {
-    "purpose": "validation-image box proof ledger for CROWN-chain pilot dependencies",
+    "purpose": "status-corrected replay of validation-image box ledger using content-addressed VERIFIED obligations",
     "network_certificate": "result_dependent_and_not_a_paper_test_result",
     "required_for_verified": "all complete-network obligations must be ESBMC VERIFIED",
     "split_policy": "validation is allowed only for method-development pilots; paper results remain held-out test images"

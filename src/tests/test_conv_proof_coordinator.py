@@ -109,6 +109,42 @@ class ConvProofCoordinatorTest(unittest.TestCase):
         self.assertIn("contract_chaining", kinds)
         self.assertEqual(kinds[-1], "strict_output_margin")
 
+    def test_parallel_mode_batches_only_independent_blocks(self):
+        batches = []
+
+        def verified_many(_store, obligations, *, jobs, min_available_gib):
+            batches.append((jobs, min_available_gib, [row[2] for row in obligations]))
+            return [
+                verified_record(_store, source, name, metadata)
+                for source, name, metadata in obligations
+            ]
+
+        with patch.object(ESBMCProofStore, "check", verified_record), \
+                patch.object(ESBMCProofStore, "check_many", verified_many):
+            with tempfile.TemporaryDirectory() as directory:
+                summary = ConvProofCoordinator(
+                    self.network, Path(directory) / "proof",
+                    config=ConvProofConfig(
+                        block_size=2,
+                        jobs=4,
+                        min_available_gib=6.0,
+                        fail_fast=False,
+                    ),
+                ).verify(
+                    self.initial,
+                    input_witness=np.zeros(9, dtype=int),
+                    target_class=0,
+                )
+        self.assertEqual(summary["final_status"], "VERIFIED")
+        self.assertTrue(batches)
+        self.assertTrue(all(jobs == 4 and guard == 6.0 for jobs, guard, _ in batches))
+        self.assertTrue(all(
+            metadata["property_type"] == "integer_layer_contract"
+            for _, _, batch in batches for metadata in batch
+        ))
+        self.assertEqual(summary["resource_scheduling"]["jobs"], 4)
+        self.assertTrue(summary["resource_scheduling"]["dependency_barriers_preserved"])
+
     @patch.object(ESBMCProofStore, "check", verified_record)
     def test_proof_carrying_mode_requires_lemmas_certificates_and_margins(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -158,6 +194,37 @@ class ConvProofCoordinatorTest(unittest.TestCase):
                        == "strict_output_margin_interval"]
         self.assertEqual(diagnostics[0]["status"], "FAILED")
         self.assertFalse(diagnostics[0]["required_for_certificate"])
+
+    def test_failed_diagnostic_margins_cannot_be_promoted_when_fail_fast_is_off(self):
+        def failed_abstract_witness(_store, _source, name, metadata):
+            kind = metadata["property_type"]
+            status = "FAILED" if kind in {
+                "strict_output_margin_interval",
+                "strict_output_margin_abstraction_witness",
+            } else "VERIFIED"
+            record = verified_record(_store, _source, name, metadata)
+            record["status"] = status
+            record["return_code"] = 1 if status == "FAILED" else 0
+            return record
+
+        with patch.object(ESBMCProofStore, "check", failed_abstract_witness):
+            with tempfile.TemporaryDirectory() as directory:
+                summary = ConvProofCoordinator(
+                    self.network, Path(directory) / "proof",
+                    config=ConvProofConfig(
+                        block_size=2,
+                        proof_mode="proof_carrying_interval",
+                        exact_margin_refinement=True,
+                        fail_fast=False,
+                    ),
+                ).verify(
+                    self.initial,
+                    input_witness=np.zeros(9, dtype=int),
+                    target_class=0,
+                )
+        self.assertEqual(summary["final_status"], "ABSTRACTION_INCONCLUSIVE")
+        self.assertFalse(summary["certified"])
+        self.assertFalse(summary["all_required_margins_verified"])
 
     def test_exact_refinement_timeout_remains_timeout(self):
         def timeout_exact(_store, _source, name, metadata):

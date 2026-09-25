@@ -765,12 +765,15 @@ class ConvProofCoordinator:
                     min_available_gib=self.config.min_available_gib,
                 )
             else:
-                block_records = [
-                    self.store.check(source, name, metadata)
-                    for source, name, metadata in block_obligations
-                ]
+                block_records = []
+                for source, name, metadata in block_obligations:
+                    record = self.store.check(source, name, metadata)
+                    block_records.append(record)
+                    if record["status"] != "VERIFIED" and self.config.fail_fast:
+                        break
+            executed_indices = selected[:len(block_records)]
             for block_index, (indices, record) in enumerate(zip(
-                selected, block_records, strict=True
+                executed_indices, block_records, strict=True
             )):
                 record.update({
                     "layer_index": layer_index,
@@ -911,10 +914,14 @@ class ConvProofCoordinator:
         all_verified = bool(required_records) and all(
             record["status"] == "VERIFIED" for record in required_records
         )
+        all_margins_verified = (
+            len(margin_records) == final_layer.output_size - 1
+            and all(record["status"] == "VERIFIED" for record in margin_records)
+        )
         if partial:
             final_status = "PARTIAL_NOT_CERTIFIED"
         elif (all_verified and all_required_blocks_executed and all_required_bridges_executed
-              and len(margin_records) == final_layer.output_size - 1):
+              and all_margins_verified):
             final_status = "VERIFIED"
         elif any(record["status"] == "FAILED"
                  and record.get("identity", {}).get("property_type")
@@ -957,8 +964,9 @@ class ConvProofCoordinator:
             "resource_scheduling": {
                 "jobs": self.config.jobs,
                 "min_available_gib": self.config.min_available_gib,
-                "parallel_blocks_only": self.config.jobs > 1,
+                "parallel_blocks_only": self.config.jobs > 1 and not self.config.fail_fast,
                 "dependency_barriers_preserved": True,
+                "batch_ledger_directory": str(self.output / "parallel_batches"),
             },
             "refinement": {
                 "strategy": "demand_driven_abstract_witness_then_exact_final_layer",
@@ -1001,6 +1009,7 @@ class ConvProofCoordinator:
             "required_bridges": required_bridge_count,
             "executed_bridges": executed_bridge_count,
             "all_required_bridges_executed": all_required_bridges_executed,
+            "all_required_margins_verified": all_margins_verified,
             "invariants": [
                 {
                     "layer_index": certificate.layer_index,
@@ -1012,7 +1021,10 @@ class ConvProofCoordinator:
                 for certificate in certificates
             ],
             "obligations": records,
-            "esbmc_calls_executed": sum(not record.get("cache_reused", False) for record in records),
+            "esbmc_calls_executed": sum(
+                not record.get("cache_reused", False) and bool(record.get("command"))
+                for record in records
+            ),
             "esbmc_verified": sum(record["status"] == "VERIFIED" for record in records),
             "proof_relevant_obligations_verified": sum(
                 record["status"] == "VERIFIED" for record in required_records

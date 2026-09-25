@@ -9,7 +9,11 @@ import unittest
 from verification.crown_chain_certificate import (
     render_affine_step,
     render_chain_closure,
+    render_int64_distributivity_lemma,
     render_margin_closure,
+    render_positive_product_lemma,
+    render_relu_order_lemma,
+    render_relu_step,
     render_weighted_rounding_lemma,
 )
 from verification.esbmc import ESBMCConfig, ESBMCRunner
@@ -45,6 +49,41 @@ def _affine_fixture() -> tuple[dict, dict, dict]:
         "rounding_term": 1,
         "output_constant": 2,
         "max_abs_g": 2,
+    }
+    return certificate, chain, step
+
+
+def _relu_fixture() -> tuple[dict, dict, dict]:
+    bounds = {
+        f"bound/L0/n{index}": {
+            "bound_id": f"bound/L0/n{index}",
+            "layer_index": 0,
+            "neuron_index": index,
+            "lower": -2,
+            "upper": 3,
+            "chain_lower": -2,
+            "chain_upper": 3,
+            "post_clamp_pre_relu_box": [-2, 3],
+            "source": "chain_intersect_box",
+        }
+        for index in range(2)
+    }
+    certificate = {
+        "qif": {"total_bits": 8},
+        "layers_by_index": {0: {"rows": 2}},
+        "bounds_by_id": bounds,
+    }
+    chain = {"certificate_id": "chain/L0/n0/lower"}
+    step = {
+        "step_id": "chain/L0/n0/lower/s1",
+        "kind": "relu",
+        "layer_index": 0,
+        "input_coefficients": {"indices": [0, 1], "values": [2, -3]},
+        "output_coefficients": {"indices": [0], "values": [2]},
+        "relu_constants": {"indices": [1], "values": [-9]},
+        "bound_ids": ["bound/L0/n0", "bound/L0/n1"],
+        "input_constant": 0,
+        "output_constant": -9,
     }
     return certificate, chain, step
 
@@ -100,6 +139,20 @@ class CrownChainCertificateTest(unittest.TestCase):
         self.assertIn("floor_div_i128(residual_dot - rounding_term, 2)", close)
         self.assertIn("computed == (__int128)(2)", close)
 
+    def test_bound_free_relu_coordinates_omit_symbolic_interval_query(self):
+        certificate, chain, step = _relu_fixture()
+        source, metadata = next(
+            (source, metadata)
+            for _, source, metadata in render_relu_step(certificate, chain, step)
+            if metadata["kind"] == "relu_chunk"
+        )
+        self.assertEqual(metadata["bound_free_coordinates"], 1)
+        self.assertEqual(metadata["symbolic_coordinates"], 1)
+        self.assertIn("bound-free slope 0", source)
+        self.assertNotIn("z_0 =", source)
+        self.assertIn("int32_t z_1", source)
+        self.assertIn("int64 product envelope", source)
+
     def test_two_sided_margin_closure_emits_both_conditions(self):
         source = render_margin_closure(_margin_fixture())
         self.assertIn('1, "two-sided top clamp condition"', source)
@@ -150,6 +203,27 @@ class CrownChainCertificateESBMCTest(unittest.TestCase):
             self._run(corrupted, "corrupted_identity.c"),
             "FAILED",
         )
+
+    def test_decomposed_bound_free_relu_lemmas(self):
+        lemmas = (
+            ("relu_order.c", render_relu_order_lemma(16)),
+            ("positive_product.c", render_positive_product_lemma()),
+            ("int64_distributivity.c", render_int64_distributivity_lemma(16)),
+        )
+        for name, source in lemmas:
+            with self.subTest(name=name):
+                self.assertEqual(self._run(source, name), "VERIFIED")
+
+    def test_bound_free_constant_corruption_is_rejected(self):
+        certificate, chain, step = _relu_fixture()
+        clean = render_relu_step(certificate, chain, step)[0][1]
+        corrupted = deepcopy(step)
+        corrupted["relu_constants"] = {
+            "indices": [0, 1], "values": [1, -9]
+        }
+        bad = render_relu_step(certificate, chain, corrupted)[0][1]
+        self.assertEqual(self._run(clean, "clean_bound_free.c"), "VERIFIED")
+        self.assertEqual(self._run(bad, "bad_bound_free.c"), "FAILED")
 
     def test_round_half_away_error_bound(self):
         source = render_weighted_rounding_lemma(8)

@@ -11,6 +11,7 @@ from dataclasses import asdict
 import hashlib
 import json
 from pathlib import Path
+import re
 
 import numpy as np
 
@@ -67,6 +68,12 @@ def validate_config(config: dict):
     sample_split = config.get("split", "test")
     if sample_split not in {"test", "validation"}:
         raise ValueError("split must be test or validation")
+    expected_deployment = config.get("expected_deployment_source_sha256")
+    if expected_deployment is not None and (
+        not isinstance(expected_deployment, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_deployment) is None
+    ):
+        raise ValueError("expected_deployment_source_sha256 must be lowercase SHA-256")
     if type(config.get("epsilon_raw_bytes")) not in {int, float} \
             or config["epsilon_raw_bytes"] < 0:
         raise ValueError("epsilon_raw_bytes must be nonnegative")
@@ -179,6 +186,13 @@ def run(config_path: Path, output: Path):
             min_available_gib=float(proof.get("min_available_gib", 6.0)),
         ),
     )
+    expected_deployment = config.get("expected_deployment_source_sha256")
+    if (expected_deployment is not None
+            and coordinator.deployment_source_sha256 != expected_deployment):
+        raise ValueError(
+            "Generated deployment source does not match "
+            "expected_deployment_source_sha256"
+        )
     formal = coordinator.verify(
         input_invariant, input_witness=center, target_class=target,
         input_byte_low=byte_low.reshape(-1), input_byte_high=byte_high.reshape(-1),
@@ -200,6 +214,8 @@ def run(config_path: Path, output: Path):
         "quantized_prediction": prediction,
         "epsilon_raw_bytes": config["epsilon_raw_bytes"],
         "qif": [asdict(spec) for spec in specs],
+        "expected_deployment_source_sha256": expected_deployment,
+        "deployment_source_sha256": coordinator.deployment_source_sha256,
         "center_trace_shapes": [list(value.shape) for value in center_trace],
         "source_test_accuracy": test_report["test_accuracy_folded_affine"],
         "source_local_robustness": {
