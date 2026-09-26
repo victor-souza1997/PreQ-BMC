@@ -1,6 +1,6 @@
 {
  "schema": "crown_chain_v2_protocol_v1",
- "drafted_at": "2026-09-25T05:42:41-04:00",
+ "drafted_at": "2026-09-25T19:10:31-04:00",
  "split": "test",
  "epsilon_raw_bytes": 1,
  "sampling": {
@@ -9,7 +9,7 @@
   "population_size": 12630,
   "rng": "numpy.random.default_rng(seed).permutation(population_size)[:n]",
   "seed": 20260925,
-  "n": 100
+  "n": 80
  },
  "images_in_draw_order": [
   "Final_Test/Images/07500.ppm",
@@ -91,29 +91,9 @@
   "Final_Test/Images/10126.ppm",
   "Final_Test/Images/10772.ppm",
   "Final_Test/Images/09815.ppm",
-  "Final_Test/Images/06229.ppm",
-  "Final_Test/Images/03054.ppm",
-  "Final_Test/Images/04641.ppm",
-  "Final_Test/Images/06420.ppm",
-  "Final_Test/Images/11798.ppm",
-  "Final_Test/Images/00353.ppm",
-  "Final_Test/Images/03495.ppm",
-  "Final_Test/Images/00204.ppm",
-  "Final_Test/Images/10366.ppm",
-  "Final_Test/Images/01726.ppm",
-  "Final_Test/Images/05462.ppm",
-  "Final_Test/Images/06112.ppm",
-  "Final_Test/Images/06230.ppm",
-  "Final_Test/Images/05624.ppm",
-  "Final_Test/Images/05888.ppm",
-  "Final_Test/Images/08165.ppm",
-  "Final_Test/Images/02756.ppm",
-  "Final_Test/Images/07779.ppm",
-  "Final_Test/Images/11294.ppm",
-  "Final_Test/Images/02713.ppm",
-  "Final_Test/Images/00980.ppm"
+  "Final_Test/Images/06229.ppm"
  ],
- "launch_cutoff": "2026-10-02T12:00:00-04:00",
+ "launch_cutoff": "2026-09-28T04:00:00-04:00",
  "budget_rule": "Phase A screens every image. Phase B takes FINDER_POSITIVE images in draw order and starts no box proof, export or check after launch_cutoff; every image it did not start is NOT_RUN_BUDGET. An image already started runs to its outcome.",
  "outcomes": {
   "VERIFIED": "every obligation of a complete-network certificate is ESBMC VERIFIED (PROVED)",
