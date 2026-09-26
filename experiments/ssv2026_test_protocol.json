@@ -154,7 +154,7 @@
   }
  },
  "check": {
-  "jobs": 4,
+  "jobs": 12,
   "timeout": 60,
   "memlimit": "4g",
   "profile": "paper-z3",
@@ -307,5 +307,15 @@
   "src/verification/properties.py": "baeb1ebd3ad9391766631504ef5b9c8bcb547ab1ab19dfbefbb90b9a4db5db81",
   "src/verification/replay.py": "56c23b8ed0d01990491688cc1b05782c3e066780f9c777e8fe1b98e374f9aefe"
  },
- "esbmc_version": "ESBMC version 7.11.0 64-bit x86_64 linux"
+ "esbmc_version": "ESBMC version 7.11.0 64-bit x86_64 linux",
+ "amendments": [
+  {
+   "date": "2026-09-26T17:30:00-04:00",
+   "change": "check.jobs 4 -> 12",
+   "reason": "the workstation froze twice (host RAM exhaustion by WSL page cache), losing proof time before the launch cutoff; more parallel ESBMC jobs recover the budget",
+   "scope": "resource parameter only: every obligation, timeout (60 s), memory limit (4g), profile, image list, epsilon, cutoff and outcome rules are unchanged; per-obligation verdicts do not depend on the number of parallel jobs",
+   "state_when_amended": "screening of all 80 images complete; 1 full outcome known (image 005 VERIFIED); image 011 interrupted mid-check",
+   "previous_protocol_commit": "049764a4"
+  }
+ ]
 }
