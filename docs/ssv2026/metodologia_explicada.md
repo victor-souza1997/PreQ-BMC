@@ -14,7 +14,13 @@ reconhecimento é um programa chamado **rede neural**. Queremos **provar
 matematicamente** que o programa que de fato roda no carro não muda de resposta
 quando a imagem sofre uma alteração minúscula.
 
-Três palavras dessa frase importam muito:
+Em termos de artigo, a proposta é **um método para quantizar uma rede neural
+convolucional sem perda de acurácia e certificar com o ESBMC o código C que é
+implantado**, avaliado pela **acurácia robusta certificada** numa amostra
+aleatória pré-registrada, e **executado numa placa embarcada real** (Khadas
+VIM3), com saídas idênticas às do código verificado.
+
+Três palavras da frase acima importam muito:
 
 - **provar**, e não apenas testar (seção 5);
 - **o programa que de fato roda no carro**, e não uma versão idealizada dele
@@ -330,6 +336,25 @@ A **taxa de certificação** é o número de VERIFICADAS dividido por **todas as
 80**. As que ficaram sem prova contam como "não certificadas", e nunca são
 descartadas. E **nenhuma** foto é declarada "não robusta" por falta de prova.
 
+### Por que certificamos fotos, e não "a rede inteira"
+
+Uma pergunta natural é: por que não provar de uma vez que **a rede** é
+robusta? Porque isso é **falso para qualquer classificador útil**.
+
+Se a rede distingue "Pare" de "60 km/h", existe em algum lugar uma fronteira
+entre as duas respostas. Uma imagem que esteja bem em cima dessa fronteira muda
+de resposta com a alteração de 1 byte. Essas imagens podem ser raras ou
+estranhas, mas existem em qualquer rede que separe mais de uma classe.
+
+Por isso a garantia possível tem duas partes:
+
+- **por foto:** "em volta desta foto, nenhuma alteração de ±1 muda a resposta",
+  provado pelo ESBMC;
+- **sobre a rede, estatisticamente:** "numa amostra aleatória de 80 fotos,
+  *k* foram certificadas", com um intervalo de confiança. Esse número é a
+  **acurácia robusta certificada**. É a forma usual de descrever a qualidade de
+  uma rede em verificação formal, e ela se apoia nas provas por foto.
+
 ---
 
 ## 9. O que a prova garante, e o que não garante
@@ -345,8 +370,9 @@ parte do código verificado.
 
 - O programa C e uma implementação independente em Python dão **exatamente os
   mesmos 43 números** em todas as 12.630 fotos de teste.
-- O mesmo arquivo C compilado para a placa embarcada deve dar os mesmos
-  números, bit por bit. Esse teste está sendo feito agora.
+- O mesmo arquivo C compilado para o processador ARM da placa (em emulação,
+  antes de ir para a placa) dá exatamente os mesmos números. O teste na placa
+  VIM3 real é o da seção 10.
 
 ### Supomos (e declaramos abertamente)
 
@@ -370,7 +396,55 @@ parte do código verificado.
 
 ---
 
-## 10. E o DeepPoly, a pré-imagem e o MILP?
+## 10. A parte prática: a placa VIM3
+
+Uma prova sobre um arquivo C só tem valor prático se esse arquivo rodar onde
+precisa rodar. Por isso levamos o **mesmo arquivo C**, com a mesma impressão
+digital, para uma placa embarcada: a **Khadas VIM3**. Ela é um computador do
+tamanho de um cartão, com processador ARM, semelhante ao tipo de hardware
+usado em sistemas embarcados de veículos.
+
+### O que é feito
+
+1. O arquivo C verificado é **compilado para ARM**, sem nenhuma alteração.
+2. Na placa, o programa classifica **todas as 12.630 fotos de teste**.
+3. Comparamos as saídas da placa com as do computador onde a verificação foi
+   feita: **todos os 43 números de todas as fotos precisam ser idênticos, bit
+   por bit**.
+4. Medimos o **tempo por foto** (nos núcleos rápidos e nos econômicos da placa),
+   a memória usada e o tamanho do programa.
+
+### Por que a comparação bit a bit importa
+
+O ESBMC prova coisas sobre o **código-fonte** C. Quem transforma esse código em
+instruções do processador é o **compilador**, e ele não foi verificado. Se as
+saídas da placa forem idênticas às do código verificado em todas as 12.630
+fotos, temos uma **evidência medida** (não uma prova) de que as garantias do
+ESBMC valem também no programa que roda na placa.
+
+Isso só funciona porque a rede usa **números inteiros**: com números com
+vírgula, a placa e o computador poderiam dar resultados ligeiramente
+diferentes, e a comparação exata não seria possível.
+
+### Um cuidado importante
+
+A VIM3 também tem um **acelerador de redes neurais (NPU)**. Ele é mais rápido,
+mas faz as contas do seu próprio jeito, com outra aritmética. Rodar a rede nele
+**anularia as provas**, porque o programa verificado não seria mais o que está
+executando. Por isso a rede roda no **processador principal (CPU)**. O NPU pode
+aparecer no artigo, no máximo, como comparação de velocidade, sem garantia.
+
+### O que já foi medido
+
+| Onde | Saídas iguais às verificadas? | Acurácia | Tempo por foto |
+|---|---|---|---|
+| Computador (x86) | sim, bit a bit | 91,35% | cerca de 3,7 ms (mediana) |
+| Programa ARM em emulação | sim, bit a bit | 91,35% | não se aplica (emulação) |
+| **Placa VIM3** | a medir | a medir | a medir |
+
+---
+
+## 11. E o DeepPoly, a pré-imagem e o MILP?
 
 Nas versões anteriores deste trabalho, com redes pequenas (Iris, Seeds, MNIST e
 uma primeira rede GTSRB com 41,75% de acurácia), os limites vinham de duas
@@ -398,15 +472,18 @@ executada no C para confirmar.
 
 ---
 
-## 11. Limitações, ditas com franqueza
+## 12. Limitações, ditas com franqueza
 
-- **Custo:** cerca de 4 horas por foto, numa única máquina. Isso serve para
-  uma amostra, não para milhares de fotos. A maior parte do tempo é gasta
-  iniciando o ESBMC dezenas de milhares de vezes; agrupar verificações é o
-  próximo passo natural.
+- **Custo:** cerca de 3,5 a 4 horas por foto, numa única máquina, com 4
+  verificações em paralelo. Isso serve para uma amostra, não para milhares de
+  fotos.
+  - A maior parte do tempo (cerca de 72%) vai para verificar os passos lineares
+    das cadeias. É trabalho real do ESBMC, não custo de inicialização.
+  - Rodar mais verificações em paralelo é o ganho mais direto: a máquina tem 22
+    núcleos, e hoje usamos 4.
 - **Cobertura:** o buscador só consegue montar certificados para parte das
-  fotos (nos testes de validação, cerca de 1 em cada 7). Isso é limitação do
-  buscador, não necessariamente da rede.
+  fotos. Das 80 fotos de teste, 18 passaram pela triagem do buscador. Isso é
+  limitação do buscador, não necessariamente da rede.
 - **Raio pequeno:** ε = 1 é a perturbação digital mínima possível. Raios
   maiores são trabalho futuro.
 - **Uma rede, um conjunto de dados:** os resultados valem para esta rede e para
@@ -414,7 +491,7 @@ executada no C para confirmar.
 
 ---
 
-## 12. Resumo em cinco passos
+## 13. Resumo em cinco passos
 
 1. **Treinamos** uma rede neural para reconhecer 43 tipos de placa de trânsito
    (91,32% de acurácia).
@@ -426,7 +503,8 @@ executada no C para confirmar.
    todas passarem a foto é declarada robusta.
 5. Os resultados vêm de uma **amostra sorteada e pré-registrada** do conjunto
    de teste, com **todos** os desfechos reportados, e o mesmo código roda na
-   placa embarcada com saídas idênticas.
+   placa VIM3, no processador ARM, com saídas idênticas às do código
+   verificado.
 
 ---
 
@@ -460,3 +538,7 @@ executada no C para confirmar.
 | SHA-256 | "Impressão digital" de um arquivo; muda se qualquer caractere mudar. |
 | Pré-registro | Fixar e registrar o plano do experimento antes de ver os resultados. |
 | Validação / teste | Dados usados para desenvolver o método / dados usados uma única vez para medir o resultado. |
+| Acurácia robusta certificada | Fração das fotos de uma amostra aleatória que foram classificadas corretamente **e** certificadas robustas pelo ESBMC. |
+| VIM3 | Placa embarcada Khadas VIM3, com processador ARM, usada na parte prática. |
+| NPU | Acelerador de redes neurais da placa; não é usado, porque sua aritmética não é a verificada. |
+| Paridade bit a bit | Saídas da placa idênticas, bit por bit, às do código verificado. |
