@@ -154,7 +154,7 @@
   }
  },
  "check": {
-  "jobs": 6,
+  "jobs": 4,
   "timeout": 60,
   "memlimit": "4g",
   "profile": "paper-z3",
@@ -324,6 +324,14 @@
    "scope": "resource parameter only, as in amendment 1",
    "state_when_amended": "outcomes recorded: 005 VERIFIED; 011 015 016 017 026 027 032 037 042 044 058 CHECK_INCONCLUSIVE (resource abort, cause above); 059 interrupted in box proof; remaining positives not started",
    "previous_protocol_commit": "7aa4a929"
+  },
+  {
+   "date": "2026-09-27T14:30:00-04:00",
+   "change": "check.jobs 6 -> 4; also record an unplanned machine crash/reboot",
+   "reason": "the workstation froze and rebooted a third time (uptime reset), killing the run and the memory guard, unrelated to check.jobs; separately, at jobs=6 five more images (059, 062, 064, 069, 070) were resource-aborted by the same low-memory guard as amendment 2, because concurrent editor/IDE processes on the host use several GB independent of the run; dropping to jobs=4, the value that ran cleanly for image 005, trades some throughput for headroom",
+   "scope": "resource parameter only, as in amendments 1-2",
+   "state_when_amended": "outcomes recorded: 005 VERIFIED; 16 images CHECK_INCONCLUSIVE via aborted_low_memory (011 015 016 017 026 027 032 037 042 044 058 059 062 064 069 070), all queued for the disclosed rerun already approved by the user; 54 FINDER_INCONCLUSIVE; 8 MISCLASSIFIED; image at ordinal 072 interrupted mid-check by the reboot, resumes cleanly (interrupted stage outputs are kept, never deleted, and redone)",
+   "previous_protocol_commit": "b390496e"
   }
  ]
 }
