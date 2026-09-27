@@ -154,7 +154,7 @@
   }
  },
  "check": {
-  "jobs": 12,
+  "jobs": 6,
   "timeout": 60,
   "memlimit": "4g",
   "profile": "paper-z3",
@@ -316,6 +316,14 @@
    "scope": "resource parameter only: every obligation, timeout (60 s), memory limit (4g), profile, image list, epsilon, cutoff and outcome rules are unchanged; per-obligation verdicts do not depend on the number of parallel jobs",
    "state_when_amended": "screening of all 80 images complete; 1 full outcome known (image 005 VERIFIED); image 011 interrupted mid-check",
    "previous_protocol_commit": "049764a4"
+  },
+  {
+   "date": "2026-09-27T06:50:00-04:00",
+   "change": "check.jobs 12 -> 6",
+   "reason": "at 12 jobs the aggregate ESBMC memory drove MemAvailable below the checker's 6 GiB guard (and the 12G scope OOM-killed single jobs), so the checker killed in-flight obligations: every UNKNOWN (SIGTERM, rc 15) and MEMOUT (SIGKILL at 0.2-0.9 GB, far below the 4g per-job limit) in images 011 015 016 017 026 027 032 037 042 044 058 is a resource abort caused by amendment 1, not a solver result; at 4 jobs image 005 peaked at 4.2 GB aggregate with 10.9 GiB available",
+   "scope": "resource parameter only, as in amendment 1",
+   "state_when_amended": "outcomes recorded: 005 VERIFIED; 011 015 016 017 026 027 032 037 042 044 058 CHECK_INCONCLUSIVE (resource abort, cause above); 059 interrupted in box proof; remaining positives not started",
+   "previous_protocol_commit": "7aa4a929"
   }
  ]
 }
