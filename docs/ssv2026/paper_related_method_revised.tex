@@ -1,0 +1,196 @@
+\subsection{Verification of Quantized Neural Networks}
+
+Formal verification of quantized networks must account for arithmetic operations that are absent from idealized real-valued models. Mistry \emph{et al.} encode fixed-point QNN verification as a mixed-integer linear programming problem and explicitly represent operations such as shifting and rounding using bit-precise semantics~\cite{Mistry2022MILP}. Their evaluation shows that MILP can solve more instances than the evaluated bit-vector SMT approaches for several benchmarks. This result is particularly relevant to our study because it demonstrates both the importance of modeling fixed-point semantics and the scalability limitations of solver-based QNN verification. Our work follows the same implementation-aware motivation but uses ESBMC to analyze the generated C arithmetic directly.
+
+QEBVerif combines differential reachability analysis with MILP to verify bounds on the error introduced by fully quantized neural networks~\cite{Zhang2023QEBVerif}. Its staged analysis demonstrates that tighter intermediate bounds can reduce the number of verification instances requiring the more expensive exact procedure. In contrast, our target property is local classification robustness under a fixed pixel-perturbation bound, and our verification target is the generated fixed-point C implementation rather than the difference between floating-point and quantized outputs.
+
+CEG4N is particularly related to our scalability analysis because it combines neural-network quantization with formal equivalence checking and supports both ESBMC and neural-network-specific verification engines~\cite{Matos2022CEG4N}. Its evaluation includes convolutional networks and reports a substantial increase in ESBMC timeouts as network complexity and input-region size increase. These observations directly motivate our investigation of verification cost for a quantized traffic-sign CNN. Unlike CEG4N, which uses verification to guide quantization refinement and targets equivalence between the original and quantized networks, our current methodology fixes the quantization configuration before verification and evaluates local robustness of the resulting fixed-point implementation.
+
+Overall, previous studies separately demonstrate efficient fixed-point CNN quantization, target-aware embedded inference, and formal analysis of quantized networks. Our study connects these concerns in a single automotive case study by comparing 8-bit and 16-bit quantization, verifying a selected fixed-point C implementation under a fixed perturbation region, and executing the same implementation on a VIM3 running \AAOS{}. The emphasis is therefore on characterizing the practical relationship between quantization accuracy, embedded deployment, and the time and memory requirements of bit-precise verification.
+
+\subsection{Linear Bound Propagation}
+
+Linear bound propagation is the main alternative to exact solving for real-valued networks. DeepPoly associates each neuron with one symbolic lower and one symbolic upper linear bound and back-substitutes these bounds through earlier layers~\cite{Singh2019DeepPoly}. CROWN computes similar bounds by propagating linear relaxations of the activation functions backward from the property to the input~\cite{Zhang2018CROWN}. Both approaches scale to networks far beyond the reach of exact procedures, but they reason about real-valued or floating-point arithmetic and do not model the rounding, clamping, and finite accumulators of a fixed-point implementation. Their bounds therefore cannot be used directly as guarantees for the generated C code. Our work reuses the CROWN back-substitution structure but performs it in exact integer arithmetic, includes the rounding of each rescaling step as an explicit error term, and treats the result only as a candidate certificate whose steps must be verified by ESBMC on the deployed C implementation.
+
+\subsection{Quantization Synthesis and the Implementation Gap}
+
+Previous approaches integrate formal reasoning directly into the quantization process. CEG4N uses counterexamples to refine candidate quantization strategies and checks output equivalence between the original and quantized networks~\cite{Matos2022CEG4N}. Quadapter computes backward layer preimages and uses MILP under-approximations to synthesize layer-wise quantization strategies that preserve properties such as robustness or backdoor-freeness~\cite{Zhang2024Quadapter}. These approaches demonstrate how verification can guide quantization selection. In contrast, our current methodology does not use formal verification to synthesize the quantization configuration. A single global 16-bit fixed-point configuration is fixed before verification, and 8-bit configurations are evaluated afterwards on the validation split for comparison. We then verify local robustness of the fixed 16-bit implementation under a fixed input-perturbation bound.
+
+A separate challenge concerns the gap between the mathematical quantized model and its deployed implementation. Guarantees established over an idealized network representation may not directly transfer to the program executed on the target platform~\cite{Cordeiro2025NNPL}. Our study therefore generates an explicit fixed-point C implementation and uses it as the target of the bit-precise analysis. The same C file is subsequently compiled for AArch64 and executed natively on an \AAOS{}-based Khadas VIM3. This design allows us to study both the computational cost of implementation-level verification and the behavior of the corresponding fixed-point model in the target embedded environment. Table~\ref{tab:comparison} summarizes the positioning of our study relative to representative approaches.
+
+\begin{table}[h]
+\centering
+\caption{Positioning against representative approaches. %A check indicates that the capability is a primary part of the cited approach; a dash indicates that it is outside the stated scope.
+}
+\label{tab:comparison}
+\scriptsize
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccccc}
+\toprule
+Approach & Synth. & Finite & C-level & Contract & AAOS\\
+ & quant. & arithmetic & verification & composition & deploy.\\
+\midrule
+DeepPoly~\cite{Singh2019DeepPoly} & -- & -- & -- & -- & --\\
+CROWN~\cite{Zhang2018CROWN} & -- & -- & -- & -- & --\\
+QNNVerifier~\cite{Song2021QNNVerifier} & -- & \checkmark & \checkmark & -- & --\\
+CEG4N~\cite{Matos2022CEG4N} & \checkmark & -- & -- & -- & --\\
+Quadapter~\cite{Zhang2024Quadapter} & \checkmark & -- & -- & \checkmark & --\\
+\textbf{This paper} & -- & \checkmark & \checkmark & \checkmark & \checkmark\\
+\bottomrule
+\end{tabular}
+}%
+\end{table}
+
+\section{Deployment-Aware Methodology}
+\label{sec:methodology}
+
+\subsection{Problem Definition and Verification Boundary}
+\label{sec:problem}
+
+Let $f:\mathbb{R}^{m}\rightarrow\mathbb{R}^{K}$ be a trained floating-point classifier, let $x$ be a preprocessed image with label $c$, and let $\mathcal{X}$ be the valid input domain. We define the local region
+\begin{equation}
+\mathcal{B}_{\varepsilon}(x)=\{x'\in\mathcal{X}:\|x'-x\|_{\infty}\leq\varepsilon\}.
+\label{eq:ball}
+\end{equation}
+The radius is expressed in raw byte units of the $32\times32$ RGB image, before normalization, and $\mathcal{X}$ contains only valid byte images. It models bounded pixel or sensor variation, not every physical image transformation.
+
+The deployed network is an integer C program $g$. The input encoder $Q_{\mathrm{in}}$ maps the declared input to the integer representation consumed by $g$. The target property is
+\begin{equation}
+\forall x'\in\mathcal{B}_{\varepsilon}(x),\quad g_c(Q_{\mathrm{in}}(x'))>g_k(Q_{\mathrm{in}}(x'))\quad\forall k\neq c.
+\label{eq:robustness}
+\end{equation}
+The strict inequality excludes ties. If $g$ already misclassifies $x$, the center of the region violates Eq.~\eqref{eq:robustness}; such pairs are reported as misclassified and are not submitted to verification. The verification boundary begins at the byte image and includes input encoding, fixed-point layers, rescaling, activation, saturation, and the output comparison. Resizing, image acquisition, sign detection, camera drivers, and vehicle actuation are outside the boundary unless explicitly modeled.
+
+\subsection{Fixed-Point Semantics}
+\label{sec:synthesis}
+
+The fixed-point format is chosen before verification and is not synthesized from the verification results. The layer contracts used in this study are proposed by interval and CROWN bound propagation over the integer arithmetic (Section~\ref{sec:contracts}). These analyses only propose candidates; they are not used as a substitute for verification of the integer C program.
+
+For the deployed configuration, all layers share one signed 16-bit format with eight fractional bits (Q7.8), and each affine layer accumulates into a signed \texttt{\_\_int128} value. Rescaling uses round-half-away-from-zero, and each pre-activation is clamped to the 16-bit range before the ReLU. The certified C file stores the parameters as \texttt{int64\_t}. A compact variant stores the same values as \texttt{int16\_t}; this changes its SHA-256, so it is not covered by the certificate, and its agreement with the certified file was measured (identical logits on the 7{,}830 validation images), not proved. The 8-bit comparison uses a global Q3.4 format under the same rules. The verification harnesses use the same integer operations, so no multiply--accumulate, rescaling, or clamp is replaced by a real-valued approximation. A representable final output is not treated as evidence that an intermediate accumulator cannot overflow. ESBMC is run without \texttt{--overflow-check}, so accumulator overflow is not checked by ESBMC; it is excluded by a static bound computed from the deployed integer weights. The largest worst-case accumulator magnitude over all layers is about $3.4\times10^{10}$ ($<2^{35}$), far below the \texttt{\_\_int128} limit of $2^{127}$.
+
+The board executes the certified C file, and its SHA-256 matches the file from which the verification harnesses are generated. ESBMC does not analyze this file as a whole: loading it exhausts memory while the GOTO program is built. Each harness instead carries the parameters of one block as literal constants. A binding step, implemented in Python and therefore trusted, compares every constant in the harnesses with the deployed parameter arrays; ESBMC corroborates this binding only on verbatim slices of the file for sampled rows. This provides a source-level correspondence between what ESBMC checks and what the board executes. It is not a proof of compiler correctness, binary equivalence, or absence of hardware faults.
+
+\subsection{Contracts and Composition}
+\label{sec:contracts}
+For layer $l$, let $f_l^C$ denote the finite-width C computation and let $\mathcal{A}_l$ and $\mathcal{G}_l$ denote its admissible input and output regions. The layer obligations are
+\begin{equation}
+\begin{aligned}
+Q_{\mathrm{in}}(\mathcal{B}_{\varepsilon}(x))&\subseteq\mathcal{A}_1, \\
+\forall a\in\mathcal{A}_l:\; f_l^C(a)&\in\mathcal{G}_l, \\
+\mathcal{G}_l&\subseteq\mathcal{A}_{l+1}\quad(l<L), \\
+\mathcal{G}_L&\subseteq\{z:z_c>z_k,\;k\neq c\}.
+\end{aligned}
+\label{eq:contracts}
+\end{equation}
+The third condition is essential: independently verified layer harnesses do not compose unless the output of one layer satisfies the assumptions of the next. Integer scale conversions are included in the checked computation. If hidden layers are decomposed into output-neuron blocks, every block is checked under the same layer format and input contract; all blocks must pass.
+
+Intervals alone are too loose to discharge the last condition for this network. The regions $\mathcal{A}_l$ and $\mathcal{G}_l$ are therefore described by two kinds of facts, both proposed by untrusted finders. The first are per-neuron intervals proved in blocks of 24 neurons. The second are exact-integer linear bounds obtained by CROWN back-substitution~\cite{Zhang2018CROWN}, which relate a neuron or an output margin $z_c-z_k$ to earlier layers. Unlike the original floating-point formulation, every coefficient is an integer, each ReLU is replaced by an integer linear relaxation over the proved interval of its input, and each rescaling contributes an explicit rounding term. The finder writes every relaxation constant, rounding term, and referenced fact into a certificate; ESBMC recomputes them in C rather than trusting the values produced by the finder. Each chain is split into straight-line harnesses for its affine, ReLU, and rounding steps, and a fact may be used only after all of its own harnesses are verified. Every fact must have exactly one verified source.
+
+ESBMC checks the generated C harnesses with bounded loops fully unwound and with unwinding assertions enabled. Array bounds, pointer validity, and division-by-zero are checked by the default ESBMC properties in every harness. Signed-overflow checking is not enabled; accumulator overflow is excluded by the static bound above. A region is \emph{certified} only when all required obligations in Eq.~\eqref{eq:contracts} and the declared safety properties are discharged for one frozen implementation. A concrete violation in the original input region is \emph{refuted}; timeouts, memory exhaustion (including runs stopped by the host memory guard), unknown solver results, and unresolved obligations are \emph{inconclusive}.
+
+\subsection{AAOS Integration and CPU Execution}
+\label{sec:aaos}
+
+The certified C file is compiled with a GCC cross-compiler into a statically linked AArch64 benchmark executable and run natively from the Android shell. It is not packaged as an NDK library or called through JNI in this campaign. The target is a Khadas VIM3 with an Amlogic A311D system-on-chip. The board provides four \Aseven{} performance cores and two \Athree{} efficiency cores~\cite{KhadasVIM3}; AOSP documents the VIM3 as a reference board capable of running AOSP-based builds~\cite{AOSPReferenceBoards}. The experiment records the AAOS/AOSP build, kernel, application binary interface, compiler, and optimization flags, and the SHA-256 of every executable and input file on the board.
+
+Each run uses one single-threaded process pinned with \texttt{taskset} to the \Aseven{} cluster. The model parameters, fixed-point format, executable, and input set remain unchanged across runs. The core types are read from \texttt{/proc/cpuinfo}. The kernel does not expose frequency scaling, so the observed frequency cannot be logged. Warm-up, alternated cluster order, and thermal and background-activity logging were not performed, and \Athree{} runs are left for future work.
+
+\subsection{Evaluation Metrics}
+The formal evaluation reports the number and fraction of certified, refuted, inconclusive, and misclassified image--radius pairs; CROWN finder and ESBMC time; peak ESBMC memory; and the number of ESBMC calls per layer. The denominator includes every declared attempt, including failures, timeouts, and resource aborts. As a scalability reference, we also report how far a monolithic ESBMC run on the C program progresses under the same time and memory limits.
+
+The deployment evaluation reports classification accuracy of the float32 and fixed-point builds on the validation split, integer-output parity between the board and the host execution of the certified C file, median and 95th-percentile native inference latency, peak resident memory, and binary size. CPU utilization, observed frequency, temperature, and energy per inference are not measured, because the board kernel does not expose frequency scaling and no power instrument was available.
+\section{Experimental Configuration}
+\label{sec:setup}
+
+\subsection{Research Questions and Data Protocol}
+
+The study evaluates the following questions:
+
+% Research questions
+\begin{tcolorbox}[
+    colback=gray!10,
+    colframe=gray!50,
+    boxrule=0.5pt,
+    arc=1mm,
+    left=2mm,
+    right=2mm,
+    top=1mm,
+    bottom=1mm
+]
+\begin{description}[leftmargin=0.55cm,labelsep=0.2em,itemsep=1pt,topsep=0pt]
+  \item[RQ1:] Which GTSRB image--radius pairs satisfy the complete integer-C certification criterion?
+  \item[RQ2:] What finder and ESBMC costs are required, and does decomposition bound individual query costs where monolithic BMC does not?
+  \item[RQ3:] What latency, variability, and resource usage does the certified C implementation exhibit on \AAOS{}, compared with a float32 reference?
+  \item[RQ4:] Does the deployed library preserve the host integer outputs and the predictions of the quantized reference model?
+\end{description}
+\end{tcolorbox}
+
+The benchmark is GTSRB, a single-image, 43-class traffic-sign classification dataset containing more than 50,000 images and realistic variation in illumination, weather, occlusion, scale, and rotation~\cite{Stallkamp2011GTSRB}. We use the official release: 39,209 training images and 12,630 test images. The training images are split by physical sign track (seed 2026, fraction 0.2) into 31,379 training and 7,830 validation images, so no track spans two partitions. Images are resized to $32\times32$ RGB by center-aligned nearest-neighbor sampling and normalized by $1/256$, the same map implemented by the exact byte encoder of the deployed C. Model selection used a predeclared 90\% validation-accuracy gate. Quantization-format search, finder development, and all board measurements use only the validation split. The test split was evaluated once, after the model and its C implementation were frozen.
+
+The network has five layers: a $5\times5$ stride-2 convolution (6,144 outputs), two further convolutions (4,096 and 3,072 outputs), a $2\times2$ depthwise pooling layer stored as a dense layer (768 outputs), and a dense output layer (43 logits). It has 14,123 neurons and 307,211 stored parameter values. The float32 source reaches 91.32\% test accuracy. The deployed integer C reaches 91.35\% (balanced 87.33\%; worst class 30 at 44.7\%). Its logits are bit-exact with the Python integer reference on all 12,630 test images.
+
+The radius is $\varepsilon = 1$ raw byte in $L_\infty$ over the 3,072 input bytes, i.e.\ $1/256$ after normalization. The property is local robustness: the deployed argmax equals the target class for every byte image in the ball. The verification sample is 80 test images drawn with seed 20260925. The draw, the deployment hash, all verifier source hashes, the resource limits, and the outcome taxonomy were pinned in a protocol file before any proof ran. The formal denominator is all 80 drawn image--radius pairs, including images that the deployed C misclassifies.
+
+\subsection{Hardware and Software}
+Table~\ref{tab:setup} lists the configuration.
+
+\begin{table}[t]
+\centering
+\caption{Experimental configuration used for deployment and formal verification.}
+\label{tab:setup}
+\scriptsize
+\renewcommand{\arraystretch}{1.12}
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\columnwidth}{@{}>{\bfseries}p{0.26\columnwidth}X@{}}
+\toprule
+\textbf{Item} & \textbf{Configuration} \\
+\midrule
+
+Board &
+Khadas VIM3, Amlogic A311D; 4$\times$ \Aseven{} and
+2$\times$ \Athree{}; 3.7\,GB RAM. \\
+
+\addlinespace[1pt]
+OS &
+\AAOS{} \texttt{aosp\_yukawa\_car}, Android 16 (Baklava),
+BP1A.250505.005.B1, \texttt{userdebug}; kernel
+7.1.0-mainline with 4\,KiB pages. \\
+
+\addlinespace[1pt]
+Native toolchain &
+GCC 13.3.0 \texttt{aarch64-linux-gnu} cross-compiler;
+AArch64 ABI; statically linked; flags:
+\texttt{-std=c11 -O2 -Wall -Wextra -Werror -static}. \\
+
+\addlinespace[1pt]
+Model &
+5-layer GTSRB CNN with 14,123 neurons and 307,211 stored
+parameters; global Q7.8 format using \texttt{int16} values,
+round-half-away, clamp before ReLU, and
+\texttt{\_\_int128} accumulators. The certified C
+implementation stores parameters as \texttt{int64\_t}. \\
+
+\addlinespace[1pt]
+Formal tools &
+\ESBMC{} 7.11.0 (64-bit) with Z3 using profile
+\texttt{paper-z3}; Bitwuzla used only for the monolithic
+baseline. Untrusted finders use interval propagation and
+exact-integer CROWN back-substitution~\cite{Zhang2018CROWN}; no MILP is used in
+this campaign. \\
+
+\addlinespace[1pt]
+Resource limits &
+Box stage: 120\,s, 6\,GB, 4 jobs, and 24-neuron blocks.
+Chain check: 60\,s and 4\,GB per harness, with the job count
+adjusted from $4\!\rightarrow\!12\!\rightarrow\!6\!\rightarrow\!4$
+for resource management. Host free-memory guard: 6\,GiB. \\
+
+\addlinespace[1pt]
+Verification host &
+x86-64, Linux 6.18 (WSL2), \TBD{GiB} RAM. \\
+
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Every benchmark binary is single-threaded and pinned with \texttt{taskset} to the \Aseven{} cluster (CPUs 2--5). \Athree{} runs were not performed. Each build processes the 7,830 validation images once, checking outputs against the host, and then again in a 3-pass latency run (23,490 inferences). Resident memory comes from a separate 1-image, 1,000-pass run. No warm-up inferences are discarded. We report median and 95th-percentile latency; variability is reported as the p95$-$median spread and the maximum. The 99th percentile was not recorded. The sha256 of every binary and data file on the board was checked against the bundle manifest before the runs.

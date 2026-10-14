@@ -1,9 +1,20 @@
 # Round-table briefing: verified traffic-sign QNN for SBSeg/SSV 2026
 
-**Your role.** You are one of several AI reviewers in a technical discussion about this project. The
-others are Claude, GPT, DeepSeek and Codex, and the human owner of the project decides. You
-cannot run code; the owner or Claude implements what the group agrees on. Be concrete and
-quantitative, and disagree with other participants when they are wrong.
+**Your role.** You are one of several AI participants in a three-round technical discussion about
+this project. The human owner decides and triggers every turn by hand; the Claude Opus session
+also merges the round files into the thread. Be concrete and quantitative, and disagree with
+other participants when they are wrong. How to take part is in [KICKOFF.md](KICKOFF.md).
+
+| Participant | Role | Sees |
+|---|---|---|
+| GPT-6 Sol (Codex chat) | Architect: structural changes (finder, certificate format, checker design) | briefing, thread, repository (read-only) |
+| GPT-5.6 Sol (Codex chat) | Engineer: code-grounded costs and measurements, implementation hours | briefing, thread, repository (read-only) |
+| Claude Opus 5.5 (Claude Code chat) | Soundness Auditor: what each VERIFIED rests on; trust-base changes | briefing, thread, repository (read-only) |
+| NotebookLM | Librarian: answers only from about 90 papers in the area, with citations | its own short prompts, no code |
+
+**If you can read the repository:** read files and grep freely, but do not run ESBMC, tests,
+training or anything that uses much memory or disk. The pre-registered test run is using this
+machine and aborts if free memory drops below 6 GiB.
 
 ## 1. Goal
 
@@ -34,8 +45,11 @@ quantitative, and disagree with other participants when they are wrong.
    ASSUMED or GUESS.
 6. **The test set is used once**, via a pre-registered protocol. All tuning happens on
    validation.
-7. **Machine:** one workstation (22 cores, 23 GB RAM, WSL2), with no GPU in the loop and no
-   cluster. It has crashed from running out of memory before.
+7. **Machine:** one workstation, with no GPU in the loop and no cluster.
+   - 22 cores; the WSL2 VM gets 20 GB of the host's 31.5 GB; the editor takes about 10 GB of that.
+   - One ESBMC affine-check job needs about 1.1 GB. The checker SIGTERMs its jobs when free
+     memory drops below 6 GiB, and records them as UNKNOWN (never as a result).
+   - The host froze three times from memory pressure between 2026-09-26 and 2026-09-27.
 8. **Code freeze:** no changes under `src/` until Monday 2026-09-28 about 09:00. A pre-registered
    test run is in progress and pins the hash of every source file. Ideas can be prototyped
    outside `src/` or implemented after the freeze.
@@ -107,13 +121,19 @@ Time by kind:
 | affine_close | 11,695 | 0.9 h | 0.28 s |
 | everything else | about 15.8k | about 0.7 h | — |
 
-**Pre-registered test run (in progress, started 2026-09-26):**
+**Pre-registered test run (in progress, started 2026-09-26; MEASURED as of 2026-09-27 15:30):**
 - 80 random test images, ε = 1.
 - Screen: 8 MISCLASSIFIED, 54 FINDER_INCONCLUSIVE (the finder margin is below 1 against some
-  competitor), 18 FINDER_POSITIVE.
-- At about 4 h per positive, only about 10 of the 18 will be checked before the launch cutoff
-  (Mon 04:00). The rest are reported as NOT_RUN_BUDGET, and they count against the certified
-  rate.
+  competitor), 18 FINDER_POSITIVE. All 18 positives were started before the launch cutoff.
+- **Pre-registered primary result:** 1 VERIFIED, 17 CHECK_INCONCLUSIVE, so the certified rate is
+  1/80.
+  - All 17 inconclusives are resource aborts: jobs killed by the low-memory guard (UNKNOWN,
+    rc 15) after the job count was raised from 4 to 12, then 6. None is a solver verdict.
+  - The job count is now back to 4. A **disclosed rerun** of those 17 is in progress and will be
+    reported next to the primary result, never in place of it.
+- **Parallelism, measured:** 12 jobs gave about 1.6× over 4 jobs, not 3×. The run is bound by
+  disk I/O and memory; the CPU was about 40% idle at 12 jobs. Memory, not cores, caps the job
+  count.
 
 **Earlier approaches that failed (MEASURED):**
 - **Monolithic ESBMC query on the network:** no verdict after about 22 min at 20 GB, even with an
@@ -131,20 +151,33 @@ Time by kind:
 
 ## 6. Agenda (open questions)
 
-- **Q1: speed.** How can the certificate check be cut from about 4 h per image?
-  - Known: batching obligations saves only about 15–20% (startup is small). Parallelism
-    (4 → 12 jobs) looks like about 3×.
+- **Q1: speed.** How can the certificate check be cut from about 4 h per image, within about
+  1.1 GB per job and 4–8 jobs?
+  - Known: batching obligations saves only about 15–20% (startup is small). Parallelism is
+    memory-bound (see §5).
   - Open: what is behind affine_chunk's 72%? Chunk size, the expression shape, the solver
     (z3 vs bitwuzla vs boolector), ESBMC flags, reusing shared sub-chains across competitors,
     or proving some affine steps once as a lemma.
+  - **Trust-base question:** each affine obligation is currently a fresh bounded-model-checking
+    query. An alternative is to prove a *generic* checker once with ESBMC (for every input within
+    stated bounds, if the check passes, the bound holds for the deployed arithmetic), then run
+    that compiled checker on the concrete certificate data.
+    - It moves the compiler, and the exact correspondence between the proved and the executed
+      checker, into the trusted base.
+    - Is that acceptable under constraint 1, and how would it be stated and tested?
 - **Q2: coverage.** 54 of 80 test images fail in the untrusted finder, before ESBMC is asked
   anything. How can the finder produce tighter certificates that ESBMC can still check piece by
   piece? Options: optimized slopes (alpha-CROWN), branch-and-bound or input splitting (each
   branch certified; the union of branches must cover the ε box), competitor-specific chains.
   Which gives most coverage per hour of implementation?
-- **Q3: the paper.** Framing, the minimum convincing evaluation, baselines, threats to validity,
-  and what reviewers will attack. What efficiency evidence should we show (see the timing
-  data)?
+- **Q3: the paper.** The working framing: "a method to quantize a CNN without accuracy loss and
+  certify its deployed C code with ESBMC; evaluated by certified robust accuracy on a
+  pre-registered random sample", plus deployment on a Khadas VIM3 board.
+  - What is the minimum convincing evaluation? Which baselines and threats to validity, and
+    what will reviewers attack?
+  - How should the primary result and the disclosed rerun be presented?
+  - How should we show that the QNN uses fewer resources than the float network (memory,
+    latency, energy), and what efficiency evidence for the verifier itself?
 - **Q4: anything we are missing:** a soundness hole, a cheaper design, related work that already
   does this.
 
@@ -159,4 +192,20 @@ Time by kind:
   4. the implementation cost in hours;
   5. how to measure it on validation images.
 - Mark citations you are not sure about with "(verify)". Do not invent numbers.
-- Keep it under about 900 words, with no pleasantries.
+- Keep within the round's word limit, with no pleasantries.
+
+## 8. Where to look in the repository (read-only participants)
+
+| Path | What |
+|---|---|
+| `src/verification/crown_chain_v2.py` | Certificate format and every ESBMC harness renderer (about 1,150 lines) |
+| `src/scripts/check_crown_chain_v2.py` | Shard checker: runs ESBMC, 60 s timeout, low-memory guard |
+| `src/scripts/run_crown_chain_v2_protocol.py` | Pre-registered protocol driver: screen, box, export, check, aggregate |
+| `src/scripts/crown_finder/` | Untrusted finder: box ledger, CROWN chain export |
+| `src/scripts/regress_crown_chain_v2_data_corruption.py` | Data-corruption soundness regression |
+| `experiments/ssv2026_test_protocol.json` | The pre-registered protocol and its amendments |
+| `output/crown_chain_v2_20260924/image3652/claude_hardened_l{0..4}/check_summary.json` | Per-obligation status and time, validation image 3652 |
+| `output/crown_chain_v2_test_20260925/<nnn>/` | Test-run images: `outcome.json`, `screen.json`, `check_l*/check_summary.json` |
+
+Test-image outputs may be read for timing and structure, but **proposals must be tuned and
+piloted on validation images only**.

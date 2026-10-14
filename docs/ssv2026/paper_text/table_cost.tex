@@ -1,0 +1,36 @@
+\begin{table*}[t]
+\centering
+\caption{Formal-verification cost of monolithic and decomposed configurations.
+\emph{Interval}: every listed output stays within its bounds;
+\emph{robustness}: the classification margin stays positive over the whole
+$\epsilon=1$ input box. ESBMC time is summed over calls. Monolithic RSS is per
+run; decomposed RSS is the peak aggregate over concurrent jobs (4, or 12 for part
+of 04083), with a 4\,GiB limit per call. ``--'': not applicable or not recorded.
+$^\dagger$Development image, not part of the test sample.
+$^\ddagger$The 84 box-level margin checks fail; the margins are closed by the
+CROWN chains.}
+\label{tab:cost}
+\scriptsize
+\renewcommand{\arraystretch}{1.15}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{lllrrrrrl}
+\toprule
+\textbf{Configuration} & \textbf{Property} & \textbf{Solver} & \textbf{Neurons} &
+\textbf{Finder (s)} & \textbf{ESBMC (s)} & \textbf{Calls} & \textbf{Peak RSS} & \textbf{Outcome} \\
+\midrule
+\multicolumn{9}{l}{\textit{Monolithic}} \\
+\addlinespace[1pt]
+Whole network, concrete input  & Interval   & Z3       & 14,123 & -- & 600 & 1 & 2.8\,GiB & TIMEOUT \\
+L0, 12 free bytes              & Interval   & Bitwuzla & 24     & -- & 186 & 1 & 4.4\,GiB & VERIFIED \\
+L0, 18 free bytes              & Interval   & Bitwuzla & 24     & -- & 270 & 1 & 4.6\,GiB & OUT\_OF\_MEMORY \\
+L0, concrete input             & Interval   & Bitwuzla & 48     & -- & 122 & 1 & 5.0\,GiB & OUT\_OF\_MEMORY \\
+\midrule
+\multicolumn{9}{l}{\textit{Decomposed}} \\
+\addlinespace[1pt]
+\quad Box stage, 06267         & Interval   & Z3 & 14,123 & --  & 2,002  & 689    & --       & 589/589 blocks$^\ddagger$ \\
+CROWN chains, 06267            & Robustness & Z3 & 14,123 & 109 & 42,541 & 48,871 & 4.1\,GiB & VERIFIED \\
+CROWN chains, 04083            & Robustness & Z3 & 14,123 & 110 & 73,714 & 50,851 & 8.4\,GiB & VERIFIED \\
+CROWN chains, 3652$^\dagger$   & Robustness & Z3 & 14,123 & --  & 50,123 & 58,695 & 4.0\,GiB & VERIFIED \\
+\bottomrule
+\end{tabular}
+\end{table*}

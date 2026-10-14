@@ -1,0 +1,84 @@
+% Requires \usepackage{booktabs,tabularx}.
+% Values are MEASURED; VERIFIED refers to the stated obligation only.
+% Direct-C records:
+% output/ssv_scalability_20260928/int16_calib/curve.jsonl
+% output/ssv_scalability_20260928/cols_int16_f8/layer0_cols_curve.jsonl
+% Completed CROWN records:
+% output/crown_chain_v2_test_20260925/005/complete/complete_check_summary.json
+% output/crown_chain_v2_test_20260925/015/complete/complete_check_summary.json
+% output/crown_chain_v2_20260924/image3652/claude_hardened_complete/complete_check_summary.json
+\begin{table*}[t]
+\centering
+\caption{Direct-C queries and CROWN certificate-checking costs
+for the Q7.8 GTSRB model.}
+\label{tab:cost}
+\small
+\renewcommand{\arraystretch}{1.12}
+\setlength{\tabcolsep}{5pt}
+
+\begin{tabularx}{\textwidth}{@{}Xlrrl@{}}
+\toprule
+\multicolumn{5}{@{}l}{\textit{(a) Direct-C queries: validation image 3652}}\\
+\addlinespace[2pt]
+\textbf{Configuration}
+& \textbf{Solver}
+& \shortstack{\textbf{Elapsed}\\\textbf{(s)}}
+& \shortstack{\textbf{Peak RSS}\\\textbf{(GiB)}}
+& \textbf{Outcome}\\
+\midrule
+Whole network; concrete input
+& Z3 & 600 & 2.78 & Timeout\\
+L0: 24 outputs; concrete input
+& Bitwuzla & 80 & 4.15 & Verified\\
+L0: 24 outputs; 12 free bytes
+& Bitwuzla & 186 & 4.38 & Verified\\
+L0: 24 outputs; 18 free bytes
+& Bitwuzla & 270 & 4.57 & Out of memory\\
+L0: 48 outputs; concrete input
+& Bitwuzla & 122 & 4.99 & Out of memory\\
+\bottomrule
+\end{tabularx}
+
+\vspace{5pt}
+
+\begin{tabularx}{\textwidth}{@{}Xrrrrrl@{}}
+\toprule
+\multicolumn{7}{@{}l}{\textit{(b) Completed CROWN checks: full-network certificates,
+$\varepsilon=1$ byte}}\\
+\addlinespace[2pt]
+\textbf{Image (split)}
+& \textbf{Jobs}
+& \shortstack{\textbf{Shard wall}\\\textbf{(h)}}
+& \shortstack{\textbf{Summed elapsed}\\\textbf{(h)}}
+& \shortstack{\textbf{ESBMC}\\\textbf{checks}}
+& \shortstack{\textbf{Peak RSS}\\\textbf{(GiB)}}
+& \textbf{Outcome}\\
+\midrule
+06267 (test; primary)
+& 4 & 3.26 & 11.82 & 48{,}871 & 4.10 & Certified\\
+04083 (test; disclosed rerun)
+& 12/4 & 2.17 & 20.48 & 50{,}851 & 8.43 & Certified\\
+3652 (validation; development)
+& 4 & 3.85 & 13.92 & 58{,}695 & 3.97 & Certified\\
+\bottomrule
+\end{tabularx}
+
+\vspace{3pt}
+\begin{minipage}{\textwidth}
+\footnotesize
+\textit{Notes.}
+Direct-C queries use compact int16 storage; CROWN certificates bind
+to the int64-storage reference C. L0 denotes layer 0.
+Each direct-C row is one query, with a
+600\,s timeout and \texttt{5g} memory limit; layer queries check
+interval containment, not classification robustness.
+CROWN checks use Z3 with 60\,s and \texttt{4g} per harness.
+For image 04083, layers 0--3 used 12 jobs and layer 4 used 4.
+Shard wall is the sum of layer-shard wall times; summed elapsed
+is the sum of individual check durations, not CPU time.
+CROWN RSS is the peak aggregate across concurrent checking processes.
+Finder/export time, preceding box proofs, and unsuccessful earlier
+attempts are excluded. Certification assumes the binding and
+composition described in the methodology.
+\end{minipage}
+\end{table*}

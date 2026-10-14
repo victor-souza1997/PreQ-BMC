@@ -1,0 +1,215 @@
+% Filled from docs/ssv2026/RESULTS_SO_FAR.md (2026-09-28). Remaining \TBD{} entries were not measured.
+\section{Experimental Configuration}
+\label{sec:setup}
+
+\subsection{Research Questions and Data Protocol}
+The study evaluates the following questions:
+\begin{description}[leftmargin=0.55cm,labelsep=0.2em,itemsep=0pt,topsep=0pt]
+  \item[RQ1:] Which GTSRB image--radius pairs satisfy the complete integer-C certification criterion?
+  \item[RQ2:] What finder and ESBMC cost is required, and does decomposition bound individual query cost where monolithic BMC does not?
+  \item[RQ3:] What latency, variability, and resource use does the certified C exhibit on \AAOS{}, compared with a float32 reference?
+  \item[RQ4:] Does the deployed library preserve the host integer outputs and the predictions of the quantized reference model?
+\end{description}
+
+The benchmark is GTSRB, a single-image, 43-class traffic-sign classification dataset containing more than 50,000 images and realistic variation in illumination, weather, occlusion, scale, and rotation~\cite{Stallkamp2011GTSRB}. We use the official release: 39,209 training images and 12,630 test images. The training images are split by physical sign track (seed 2026, fraction 0.2) into 31,379 training and 7,830 validation images, so no track spans two partitions. Images are resized to $32\times32$ RGB by center-aligned nearest-neighbor sampling and normalized by $1/256$, the same map implemented by the exact byte encoder of the deployed C. Model selection used a predeclared 90\% validation-accuracy gate. Quantization-format search, finder development, and all board measurements use only the validation split. The test split was evaluated once, after the model and its C implementation were frozen.
+
+The network has five layers: a $5\times5$ stride-2 convolution (6,144 outputs), two further convolutions (4,096 and 3,072 outputs), a $2\times2$ depthwise pooling layer stored as a dense layer (768 outputs), and a dense output layer (43 logits). It has 14,123 neurons and 307,211 stored parameter values. The float32 source reaches 91.32\% test accuracy. The deployed integer C reaches 91.35\% (balanced 87.33\%; worst class 30 at 44.7\%). Its logits are bit-exact with the Python integer reference on all 12,630 test images.
+
+The radius is $\varepsilon = 1$ raw byte in $L_\infty$ over the 3,072 input bytes, i.e.\ $1/256$ after normalization. The property is local robustness: the deployed argmax equals the target class for every byte image in the ball. The verification sample is 80 test images drawn with seed 20260925. The draw, the deployment hash, all verifier source hashes, the resource limits, and the outcome taxonomy were pinned in a protocol file before any proof ran. The formal denominator is all 80 drawn image--radius pairs, including images that the deployed C misclassifies.
+
+\subsection{Hardware and Software}
+Table~\ref{tab:setup} lists the configuration.
+
+\begin{table}[t]
+\centering
+\caption{Experimental configuration.}
+\label{tab:setup}
+\scriptsize
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{p{0.33\columnwidth}p{0.60\columnwidth}}
+\toprule
+Item & Configuration\\
+\midrule
+Board & Khadas VIM3, Amlogic A311D; 4$\times$ \Aseven{} and 2$\times$ \Athree{}; 3.7\,GB RAM\\
+OS & \AAOS{} \texttt{aosp\_yukawa\_car}, Android 16 (Baklava) BP1A.250505.005.B1, userdebug; kernel 7.1.0-mainline (4\,KiB pages); cpufreq not exposed\\
+Native toolchain & GCC 13.3.0 \texttt{aarch64-linux-gnu} (cross, not NDK); ABI AArch64, statically linked; flags \texttt{-std=c11 -O2 -Wall -Wextra -Werror -static}\\
+Model & 5-layer GTSRB CNN, 14,123 neurons, 307,211 stored parameters; one global Q7.8 format (int16 value range), round-half-away, clamp before ReLU, \texttt{\_\_int128} accumulators; certified C stores parameters as \texttt{int64\_t}\\
+Formal tools & \ESBMC{} 7.11.0 (64-bit) with Z3 (profile \texttt{paper-z3}); Bitwuzla only in the monolithic baseline. Untrusted finders: interval propagation and exact-integer CROWN back-substitution; no MILP in this campaign\\
+Limits & box stage: 120\,s, 6\,GB, 4 jobs, blocks of 24 neurons; chain check: 60\,s and 4\,GB per harness, 4 jobs (amended 4$\to$12$\to$6$\to$4, resource-only); host free-memory guard 6\,GiB\\
+Verification host & x86-64, Linux 6.18 (WSL2), RAM \TBD{GiB}\\
+Energy & not measured (no power instrument available)\\
+\bottomrule
+\end{tabular}
+}%
+\end{table}
+
+Every benchmark binary is single-threaded and pinned with \texttt{taskset} to the \Aseven{} cluster (CPUs 2--5). \Athree{} runs were not performed. Each build processes the 7,830 validation images once, checking outputs against the host, and then again in a 3-pass latency run (23,490 inferences). Resident memory comes from a separate 1-image, 1,000-pass run. No warm-up inferences are discarded. We report median and 95th-percentile latency; variability is reported as the p95$-$median spread and the maximum. The 99th percentile was not recorded. The sha256 of every binary and data file on the board was checked against the bundle manifest before the runs.
+
+\section{Results and Discussion}
+\label{sec:results}
+
+\subsection{Formal Certification (RQ1)}
+A pair counts as certified only if two things hold:
+\begin{itemize}
+  \item every ESBMC obligation of its certificate returns VERIFIED on the bit-precise C, covering input encoding, every layer, the rounding lemma, the ReLU and breakpoint checks, and the output margin;
+  \item the dependency closure is complete: each fact has exactly one source, either an ESBMC-proved box block or an ESBMC-checked chain.
+\end{itemize}
+
+\begin{table}[t]
+\centering
+\caption{Formal results on the 80 pre-registered GTSRB test pairs ($\varepsilon = 1$ byte). Rate is over all 80 pairs, with a Wilson 95\% interval. Inconclusive pairs are split by cause: finder margin $<1$ / checker resource abort.}
+\label{tab:formal}
+\scriptsize
+\begin{tabular}{lrrrrrl}
+\toprule
+Run & Pairs & Miscl. & Certified & Refuted & Inconcl. & Rate\\
+\midrule
+Primary (pre-registered) & 80 & 8 & 1 & 0 & 54 / 17 & 1.25\% [0.2, 6.7]\\
+With disclosed rerun & 80 & 8 & 2 & 0 & 54 / 16 & 2.50\% [0.7, 8.7]\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:formal} reports one radius. ESBMC certified two test images:
+\begin{itemize}
+  \item image 06267 (class 40) with 48,871 obligations;
+  \item image 04083 (class 15) with 50,851 obligations, in a disclosed rerun.
+\end{itemize}
+A development image from the validation split was also certified, with 58,690 of 58,690 obligations. It is not part of the sample.
+
+The largest certified radius is $\varepsilon = 1$ byte, the only radius attempted.
+
+No pair has a counterexample; no ESBMC obligation returned FAILED in any run. The inconclusive pairs have two measured causes:
+\begin{itemize}
+  \item \textbf{Relaxation gap (54 pairs).} The untrusted CROWN finder could not produce a positive margin lower bound for at least one competitor class (median screen margin $-1{,}975$). This is a property of the relaxation, not evidence of a reachable counterexample.
+  \item \textbf{Resource abort (16 pairs).} The finder was positive, but the checker stopped because host free memory fell below its guard. The in-flight obligations were recorded as UNKNOWN or MEMOUT, never as FAILED.
+\end{itemize}
+If every finder-positive pair verified, the rate would be 18/80 = 22.5\% [14.7, 32.8]. That is the ceiling of this finder, not a result.
+
+The guarantee is local. If the complete proof discharges Eq.~\eqref{eq:contracts}, every input in the declared region is covered under the implemented integer semantics. No conclusion follows for inputs outside that region, and a non-certified pair is not shown to be non-robust.
+
+\subsection{Verification Cost and Scalability (RQ2)}
+\begin{table*}[t]
+\centering
+\caption{Formal-verification cost. Monolithic rows run ESBMC directly on the verbatim deployed C (validation image, 5\,GB limit). The other rows are the decomposed pipeline. ESBMC time is summed CPU time. Peak is host RSS over all concurrent jobs. n.r.: not recorded.}
+\label{tab:cost}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrl}
+\toprule
+Configuration & Finder (s) & ESBMC (s) & Calls & Peak & Outcome\\
+\midrule
+Monolithic, whole net, concrete input (Z3) & -- & 600 & 1 & 3.0\,GB & TIMEOUT in symex\\
+Monolithic, L0 24/6,144 outputs, 12 free bytes (Bitwuzla) & -- & 186 & 1 & 4.7\,GB & VERIFIED\\
+Monolithic, L0 24 outputs, 18 free bytes (Bitwuzla) & -- & 270 & 1 & 4.9\,GB & OUT\_OF\_MEMORY\\
+Monolithic, L0 48 outputs, concrete input (Bitwuzla) & -- & 122 & 1 & 5.4\,GB & OUT\_OF\_MEMORY\\
+\midrule
+Box blocks, 24 neurons (test 06267) & -- & 616 (wall) & 689 & -- & 605 VERIFIED: 589/589 blocks, 4/4 bridges; margins left to chains\\
+CROWN chains, test 06267 & 109 & 42,552 & 48,871 & 4,196\,MiB & VERIFIED\\
+CROWN chains, test 04083 & 34 + n.r. &73,728 & 50,851 & 8,635\,MiB & VERIFIED\\
+CROWN chains, validation 3652 (dev.) & -- & 50,112 & 58,690 & 4,064\,MiB & VERIFIED\\
+\bottomrule
+\end{tabular}
+}%
+\end{table*}
+
+Monolithic BMC on the deployed C does not reach the full network. Its limits are 24--48 of 14,123 neurons (0.2--0.3\%) and about 12 free input bytes. The decomposed pipeline checks all 14,123 neurons over the full $\varepsilon$ ball. That takes 12--20 CPU-hours and about 49k--59k calls per certified image, and every individual harness stays under the 4\,GB limit.
+
+Decomposition does bound per-query cost, but it multiplies the number of calls. Above about 4k multiply terms, ESBMC cost is flat at 177--188\,$\mu$s per exported term. Total cost is therefore linear in the size of the finder's certificate, and layer 2 carries 57--69\% of it. Image 04083 is the most expensive because it partly ran at 12 concurrent jobs under memory contention.
+
+Decomposition also changes what is proved. The monolithic query states the property directly. The decomposed pipeline proves per-block interval facts and per-chain affine and ReLU lemmas on straight-line C slices. The property then follows by composition, and that composition rests on two parts outside ESBMC:
+\begin{itemize}
+  \item the checked dependency closure;
+  \item a binding step, which maps certificate layers to the deployed C arrays and which ESBMC corroborates only on sampled rows.
+\end{itemize}
+Both are part of the trust base.
+
+Every timeout, memory-out, and unknown outcome remains in the denominator of Table~\ref{tab:formal}.
+
+\subsection{CPU Execution on \AAOS{} (RQ3)}
+The two QNN rows in Table~\ref{tab:runtime} use the same Q7.8 arithmetic.
+\begin{itemize}
+  \item The \emph{certified} row is the exact C file checked by ESBMC.
+  \item The \emph{compact} row stores the same values as \texttt{int16\_t}. Its link to the certified file is measured (identical logits on 7,830 images), not proved.
+\end{itemize}
+The float32 row is a reference and is not formally verified.
+
+\begin{table}[t]
+\centering
+\caption{Deployment measurements on the VIM3 under \AAOS{} (7,830 validation images, one thread, pinned to the \Aseven{} cluster). RSS is peak resident memory for a 1-image run. n.m.: not measured.}
+\label{tab:runtime}
+\scriptsize
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lrrrrrrr}
+\toprule
+Backend & Acc. & Med. ms & P95 ms & RSS KiB & CPU\% & Temp. & $E_{inf}$\\
+\midrule
+Float32 / \Aseven{} & 90.36\% & 21.99 & 22.13 & 1,856 & n.m. & n.m. & n.m.\\
+QNN certified (int64) / \Aseven{} & 90.24\% & 31.68 & 31.85 & 3,132 & n.m. & n.m. & n.m.\\
+QNN compact (int16) / \Aseven{} & 90.24\% & 27.94 & 28.08 & 1,260 & n.m. & n.m. & n.m.\\
+QNN / \Athree{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & \TBD{} & n.m.\\
+\bottomrule
+\end{tabular}
+}%
+\end{table}
+
+\paragraph{Latency.}
+The integer QNN is slower than float32 on the \Aseven{}: 1.44$\times$ for the certified build and 1.27$\times$ for the compact build. That is consistent with the cost of \texttt{\_\_int128} accumulation; the generated code was not profiled. Run-to-run dispersion is small. The 3-pass medians (31.67, 27.75, and 21.99\,ms) match the single-pass values, and p95 is within 0.2\,ms of the median. Isolated maxima of 63--70\,ms occur, and their cause is not identified, because frequency and throttling could not be observed.
+
+\paragraph{Memory.}
+The compact build has the smallest resident set (1.26\,MB vs 1.86\,MB for float32) and the smallest binary. The certified int64 build has the largest (3.1\,MB). A resource advantage of quantization therefore holds only for memory and only for the compact build.
+
+\paragraph{Not measured.}
+The paired ratios $t_{A53}/t_{A73}$ and $E_{A53}/E_{A73}$ are \TBD{}. No \Athree{} runs, temperature logs, or energy measurements were performed, so the study makes no energy claim.
+
+\subsection{Numerical Fidelity (RQ4)}
+On the \Aseven{}, both builds reproduce the host reference exactly on all 7,830 validation images:
+\begin{itemize}
+  \item the certified C matches all 43 int64 logits of every image;
+  \item the compact build also matches them exactly;
+  \item no encoder rejects occurred.
+\end{itemize}
+Host-to-\Aseven{} parity is therefore 100\% (7,830/7,830), with maximum absolute logit error 0. Host-to-\Athree{} parity is \TBD{\%}.
+
+On the host, the deployed C and the Python integer reference are bit-exact on all 12,630 test images. Their accuracy differs from float32 by $+0.02$ points on test and $-0.11$ points on validation. The per-image quantized-to-float32 prediction mismatch is \TBD{\%}, and observed saturation is \TBD{\%} of evaluated activations; neither counter was collected.
+
+These values characterize implementation fidelity and do not enlarge the certified input set. They do connect the proof to the board: a certificate for the C source applies to what the \Aseven{} computes, under the unproved assumption that the compiler preserves the C semantics.
+
+\subsection{Answers to the Research Questions}
+\textbf{RQ1.} Two of 80 pre-registered test pairs are certified at $\varepsilon = 1$ byte (2.5\%, 95\% CI [0.7, 8.7]); the pre-registered primary result is 1 of 80. No pair was refuted. Of the 70 inconclusive pairs, 54 fail at the relaxation and 16 at checker resources.
+
+\textbf{RQ2.} Monolithic BMC stops at 24--48 layer-0 neurons. Decomposition certifies the full 14,123-neuron network at 12--20 CPU-hours per image, with bounded per-query memory, linear cost in certificate terms, and about 50k calls.
+
+\textbf{RQ3.} On the \Aseven{}, the QNN is 1.27--1.44$\times$ slower than float32. Only the int16 compact build uses less memory than float32. \Athree{} and energy results are not available.
+
+\textbf{RQ4.} Integer parity between host and \Aseven{} is exact on 7,830 of 7,830 images.
+
+Average accuracy is not presented as evidence of robustness: the model is 91.35\% accurate, and 2.5\% of the sampled pairs are certified.
+
+\section{Limitations and Threats to Validity}
+\label{sec:limitations}
+
+\textbf{Internal validity.}
+\begin{itemize}
+  \item Model selection, format search, and finder development used only the validation partition. The test split was evaluated once for accuracy and then used only for the pre-registered draw.
+  \item The deployment hash, verifier sources, and resource limits were pinned before the draw. Four resource-only amendments changed the job count; each is recorded with its cause (host memory pressure and three unplanned reboots). The primary and rerun results are reported side by side.
+  \item On the board:
+    \begin{itemize}
+      \item runs were not interleaved or warmed up, and 3 passes are one session, not independent repetitions;
+      \item DVFS state could not be read, because cpufreq is not exposed;
+      \item background Android activity was not controlled.
+    \end{itemize}
+\end{itemize}
+
+\textbf{External validity.} GTSRB is a single-image classification benchmark, not a complete perception stack. The conclusions may not generalize to detection, segmentation, temporal tracking, other camera pipelines, other SoCs, deeper networks (a deeper 91.54\% model exhausted the method), or safety-critical vehicle control. The VIM3 is an experimental platform and should not be described as a production automotive ECU. An int8 (Q3.4) variant reached only 80.75\% validation accuracy, and the finder closed none of 6 correctly classified validation images at $\varepsilon = 1$, so the results do not transfer to int8.
+
+\textbf{Construct validity.} Local $L_\infty$ robustness at one byte is a mathematical abstraction of bounded input variation. It does not cover camera faults, transformations outside the ball, distribution shift, sensor synchronization, or incorrect labels. With 80 sampled pairs, the certified rate is a wide-interval estimate for this pipeline, not a robustness rate of the model. Accuracy and output parity complement the formal results but do not replace them.
+
+\textbf{Formal scope.} ESBMC verifies each generated harness under its stated assumptions and finite bounds. The trust base includes the following:
+\begin{itemize}
+  \item the soundness of \ESBMC{} 7.11 with Z3;
+  \item the aggregator's dependency closure;
+  \item the binding of certificate layers to the deployed C arrays, which is corroborated by ESBMC only on sampled rows;
+  \item the byte-encoder contract;
+  \item the pinned interval-analysis flags.
+\end{itemize}
+The proof does not establish compiler correctness (GCC 13.3 for AArch64), binary equivalence, operating-system isolation, absence of hardware faults, or vehicle-level safety. It does not imply global robustness. Arithmetic safety is covered only by ESBMC's default checks (array bounds, pointers, division by zero) on each harness. Signed-overflow checking (\texttt{--overflow-check}) was not enabled. Absence of overflow in the \texttt{\_\_int128} accumulators follows from a width argument, not from an ESBMC proof. The int16 compact build is linked to the certified C only by measured output equality. No contract relaxation, slack tolerance, or saturation-policy change was used to obtain any VERIFIED result.
