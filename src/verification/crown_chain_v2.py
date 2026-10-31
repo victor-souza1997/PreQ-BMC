@@ -318,7 +318,12 @@ def _validate_facts(
             raise ValueError(f"Malformed fact identity {fact_id}")
         source = fact["source"]
         if source["kind"] == "chain":
-            if chains.get(source["chain_id"]) != fact["value"]:
+            # The chain must bound this fact's own neuron and side, not merely
+            # carry the same number.
+            own_chain = f"chain/L{fact['layer_index']}/n{fact['neuron_index']}/{fact['side']}"
+            if source.get("chain_id") != own_chain:
+                raise ValueError(f"{fact_id} cites {source.get('chain_id')}, not {own_chain}")
+            if chains.get(own_chain) != fact["value"]:
                 raise ValueError(f"{fact_id} does not equal its chain bound")
             continue
         if source.get("kind") != "box" or source.get("digest") not in blocks:
@@ -377,6 +382,17 @@ def _fact_value(facts: dict[str, dict[str, Any]], layer: int, index: int, side: 
     return int(facts[fact_id]["value"])
 
 
+def expected_traversal(lambda_layer: int) -> list[tuple[str, int | None]]:
+    """affine(L), relu(L-1), affine(L-1), ..., affine(0), concretize."""
+
+    traversal: list[tuple[str, int | None]] = []
+    for layer in range(lambda_layer, -1, -1):
+        traversal.append(("affine", layer))
+        if layer > 0:
+            traversal.append(("relu", layer - 1))
+    return traversal + [("concretize", None)]
+
+
 def validate_chain(
     chain: dict[str, Any], layers: dict[int, dict[str, Any]],
     facts: dict[str, dict[str, Any]], low: list[int], high: list[int], scale_bits: int,
@@ -384,6 +400,21 @@ def validate_chain(
     steps = chain.get("steps", [])
     if not steps or steps[-1].get("kind") != "concretize":
         raise ValueError(f"{chain.get('certificate_id')} has no terminal concretize step")
+    lambda_layer = int(chain["lambda_layer"])
+    if lambda_layer not in layers:
+        raise ValueError(f"{chain['certificate_id']} starts at unknown layer {lambda_layer}")
+    # Each step is checked against its own layer, so the sequence itself must be
+    # the one back-substitution through every layer; otherwise a chain could
+    # skip a layer and still pass every local check.
+    traversal = [
+        (step.get("kind"), None if step.get("kind") == "concretize" else int(step["layer_index"]))
+        for step in steps
+    ]
+    if traversal != expected_traversal(lambda_layer):
+        raise ValueError(f"{chain['certificate_id']} does not traverse layers {lambda_layer}..0 in order")
+    for ordinal, step in enumerate(steps):
+        if step.get("step_id") != f"{chain['certificate_id']}/s{ordinal}":
+            raise ValueError(f"{chain['certificate_id']} step {ordinal} has identity {step.get('step_id')}")
     scale = 1 << scale_bits
     current = _chain_property(chain, scale, len(layers))
     constant = 0
@@ -532,6 +563,77 @@ def validate_chain(
     return {"affine_terms": affine_terms, "relu_coordinates": relu_coordinates}
 
 
+# Clamp-closure rules: side -> rule -> (whose logit, bound side, value check).
+_CLOSURE_RULES = {
+    "top": {
+        "raw_c <= 32766": ("competitor", "upper", lambda value: value <= Q_HIGH - 1),
+        "raw_t <= 32767": ("target", "upper", lambda value: value <= Q_HIGH),
+    },
+    "bottom": {
+        "raw_t >= -32767": ("target", "lower", lambda value: value >= Q_LOW + 1),
+        "raw_c >= -32768": ("competitor", "lower", lambda value: value >= Q_LOW),
+    },
+}
+
+
+def validate_margin_closure(
+    root: dict[str, Any], layers: dict[int, dict[str, Any]],
+    facts: dict[str, dict[str, Any]], chain_bounds: dict[str, int],
+) -> dict[str, Any]:
+    """Every competitor margin is >= 1 and survives the output clamp.
+
+    Roots come from the output dimension and the recorded nominal class, not
+    from the finder's manifest, and each clamp edge must cite a bound on the
+    logit and side its rule is about.
+    """
+
+    last = len(layers) - 1
+    target = int(root["margin_closure"]["target"])
+    if target != int(root["provenance"]["target"]):
+        raise ValueError("Margin closure target differs from the recorded nominal class")
+    competitors = [index for index in range(layers[last]["rows"]) if index != target]
+    if sorted(_ints(root["manifest"]["required_competitors"], "required competitors")) != competitors:
+        raise ValueError("Competitor manifest is incomplete")
+    if not set(root["manifest"]["root_chains"]).issubset(chain_bounds):
+        raise ValueError("Root-chain manifest contains a missing chain")
+    records = root["margin_closure"]["competitors"]
+    if set(records) != {str(competitor) for competitor in competitors}:
+        raise ValueError("Margin closure does not list exactly the competitors")
+    minimum_margin = None
+    for competitor in competitors:
+        margin_id = f"chain/margin/{target}-{competitor}"
+        record = records[str(competitor)]
+        if margin_id not in chain_bounds:
+            raise ValueError(f"Missing margin chain {margin_id}")
+        margin = chain_bounds[margin_id]
+        if margin != record["raw_margin_lower_bound"] or margin < 1 or not record["closed"]:
+            raise ValueError(f"Competitor {competitor} does not have a positive closed margin")
+        minimum_margin = margin if minimum_margin is None else min(minimum_margin, margin)
+        for side, rules in _CLOSURE_RULES.items():
+            edge = record[side]
+            if edge["rule"] not in rules:
+                raise ValueError(f"Competitor {competitor} {side} edge has rule {edge['rule']!r}")
+            whose, bound_side, holds = rules[edge["rule"]]
+            neuron = target if whose == "target" else competitor
+            allowed = {
+                f"fact/L{last}/n{neuron}/{bound_side}",
+                f"chain/L{last}/n{neuron}/{bound_side}",
+                f"chain/logit/{neuron}/{bound_side}",
+            }
+            reference = edge["fact"]
+            if reference not in allowed or reference not in (facts if reference.startswith("fact/") else chain_bounds):
+                raise ValueError(f"Competitor {competitor} {side} edge cites {reference} for {edge['rule']}")
+            value = facts[reference]["value"] if reference.startswith("fact/") else chain_bounds[reference]
+            if value != edge["value"] or not holds(value):
+                raise ValueError(f"Competitor {competitor} violates closure rule {edge['rule']}")
+    return {
+        "status": "VERIFIED",
+        "target": target,
+        "competitors_closed": len(competitors),
+        "minimum_raw_margin_lower_bound": minimum_margin,
+    }
+
+
 def load_certificate_v2(
     root_dir: Path | str, *, selected_layers: Iterable[int] | None = None,
     deployment_c: Path | str,
@@ -575,6 +677,8 @@ def load_certificate_v2(
                 identifier = chain["certificate_id"]
                 if identifier in chain_bounds:
                     raise ValueError(f"Duplicate chain {identifier}")
+                if int(chain["lambda_layer"]) != layer:
+                    raise ValueError(f"{identifier} is stored in the layer {layer} shard")
                 chain_bounds[identifier] = int(chain["bound"])
                 chain_locations[identifier] = layer
     expected_count = int(root["manifest"]["diagnostic_counts"]["chains"])
@@ -608,34 +712,7 @@ def load_certificate_v2(
     complete = set(selected) == set(shards_by_layer)
     closure_status = "NOT_IN_SHARD_SCOPE"
     if complete:
-        required = set(root["manifest"]["root_chains"])
-        if not required.issubset(chain_bounds):
-            raise ValueError("Root-chain manifest is incomplete")
-        target = int(root["margin_closure"]["target"])
-        competitors = _ints(root["manifest"]["required_competitors"], "required competitors")
-        if sorted(competitors) != [index for index in range(layers[len(layers) - 1]["rows"]) if index != target]:
-            raise ValueError("Competitor manifest is incomplete")
-        for competitor in competitors:
-            margin_id = f"chain/margin/{target}-{competitor}"
-            record = root["margin_closure"]["competitors"][str(competitor)]
-            if chain_bounds[margin_id] != record["raw_margin_lower_bound"] or chain_bounds[margin_id] < 1:
-                raise ValueError(f"Margin closure failed for competitor {competitor}")
-            for side in ("top", "bottom"):
-                edge = record[side]
-                reference = edge["fact"]
-                value = facts[reference]["value"] if reference.startswith("fact/") else chain_bounds[reference]
-                if value != edge["value"]:
-                    raise ValueError(f"Margin {competitor} {side} reference mismatch")
-                if side == "top" and edge["rule"] == "raw_c <= 32766" and value > Q_HIGH - 1:
-                    raise ValueError(f"Margin {competitor} lacks top clamp separation")
-                if side == "top" and edge["rule"] == "raw_t <= 32767" and value > Q_HIGH:
-                    raise ValueError(f"Margin {competitor} lacks target upper bound")
-                if side == "bottom" and edge["rule"] == "raw_t >= -32767" and value < Q_LOW + 1:
-                    raise ValueError(f"Margin {competitor} lacks bottom clamp separation")
-                if side == "bottom" and edge["rule"] == "raw_c >= -32768" and value < Q_LOW:
-                    raise ValueError(f"Margin {competitor} lacks competitor lower bound")
-            if not record["closed"]:
-                raise ValueError(f"Margin {competitor} is marked open")
+        validate_margin_closure(root, layers, facts, chain_bounds)
         closure_status = "STRUCTURALLY_CLOSED"
     preflight = {
         "schema": SCHEMA,
@@ -685,6 +762,7 @@ def checker_sources() -> dict[str, str]:
     root = Path(__file__).resolve().parents[1]
     paths = [
         root / "verification" / "crown_chain_v2.py",
+        root / "verification" / "crown_chain_v2_coverage.py",
         root / "verification" / "arith_kernel.py",
         root / "scripts" / "check_crown_chain_v2.py",
         root / "scripts" / "aggregate_crown_chain_v2.py",
@@ -756,7 +834,9 @@ def _render_affine(
         for position in range(csr["indptr"][row], csr["indptr"][row + 1]):
             column = csr["indices"][position]
             contributions.setdefault(column, []).append((csr["data"][position], coefficient))
-    columns = sorted(set(g) | set(output))
+    # Every column the rows touch, including ones whose products cancel to 0:
+    # g == 0 there is an arithmetic claim too, and ESBMC must check it.
+    columns = sorted(set(contributions) | set(output))
     rendered = []
     cost = {column: len(contributions.get(column, ())) for column in columns}
     for chunk_index, chunk in enumerate(_chunks(columns, cost, max_terms)):

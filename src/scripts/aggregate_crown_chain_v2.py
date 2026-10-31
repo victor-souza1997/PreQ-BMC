@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from verification.crown_chain_v2 import (
-    Q_HIGH, Q_LOW, checker_sources, load_certificate_v2, split_claim,
+    checker_sources, load_certificate_v2, split_claim, validate_margin_closure,
 )
+from verification.crown_chain_v2_coverage import verify_shard_coverage
 
 
 def _sha256(path: Path) -> str:
@@ -19,47 +20,9 @@ def _sha256(path: Path) -> str:
 
 
 def _validate_closure(certificate) -> dict[str, Any]:
-    root = certificate.root
-    layers = certificate.layers
-    facts = certificate.facts
-    bounds = certificate.chain_bounds
-    target = int(root["margin_closure"]["target"])
-    competitors = [int(value) for value in root["manifest"]["required_competitors"]]
-    expected = [index for index in range(layers[max(layers)]["rows"]) if index != target]
-    if sorted(competitors) != expected:
-        raise ValueError("Competitor manifest is incomplete")
-    required_roots = set(root["manifest"]["root_chains"])
-    if not required_roots.issubset(bounds):
-        raise ValueError("Root-chain manifest contains a missing chain")
-    minimum_margin = None
-    for competitor in competitors:
-        margin_id = f"chain/margin/{target}-{competitor}"
-        record = root["margin_closure"]["competitors"][str(competitor)]
-        margin = bounds[margin_id]
-        minimum_margin = margin if minimum_margin is None else min(minimum_margin, margin)
-        if margin != record["raw_margin_lower_bound"] or margin < 1 or not record["closed"]:
-            raise ValueError(f"Competitor {competitor} does not have a positive closed margin")
-        for side in ("top", "bottom"):
-            edge = record[side]
-            reference = edge["fact"]
-            value = facts[reference]["value"] if reference.startswith("fact/") else bounds[reference]
-            if value != edge["value"]:
-                raise ValueError(f"Competitor {competitor} {side} reference mismatch")
-            rule = edge["rule"]
-            valid = {
-                "raw_c <= 32766": value <= Q_HIGH - 1,
-                "raw_t <= 32767": value <= Q_HIGH,
-                "raw_t >= -32767": value >= Q_LOW + 1,
-                "raw_c >= -32768": value >= Q_LOW,
-            }.get(rule, False)
-            if not valid:
-                raise ValueError(f"Competitor {competitor} violates closure rule {rule}")
-    return {
-        "status": "VERIFIED",
-        "target": target,
-        "competitors_closed": len(competitors),
-        "minimum_raw_margin_lower_bound": minimum_margin,
-    }
+    return validate_margin_closure(
+        certificate.root, certificate.layers, certificate.facts, certificate.chain_bounds
+    )
 
 
 def aggregate_shards(
@@ -135,6 +98,13 @@ def aggregate_shards(
             if record["status"] != "VERIFIED" or forbidden.intersection(record["command"]):
                 raise ValueError(f"Layer {layer} has a failed or unsafe ESBMC record")
             harness_hashes_checked += 1
+        # Recount the obligations from the deployed rows and validated chains,
+        # independently of the renderer that emitted this shard's harnesses.
+        shard_certificate = load_certificate_v2(
+            certificate_dir, selected_layers=[layer], deployment_c=deployment_c
+        )
+        coverage = verify_shard_coverage(shard_certificate, summary["records"])
+        del shard_certificate
         total_harnesses += summary["harness_count"]
         status_counts.update(summary["status_counts"])
         peak_rss = max(peak_rss, float(summary["peak_aggregate_rss_mib"] or 0))
@@ -150,6 +120,7 @@ def aggregate_shards(
             "wall_seconds": summary["wall_seconds"],
             "summed_esbmc_seconds": summary["summed_esbmc_seconds"],
             "peak_aggregate_rss_mib": summary["peak_aggregate_rss_mib"],
+            "coverage": coverage,
         })
     if layers_seen != set(expected_by_layer):
         raise ValueError(f"Missing shard layers: {sorted(set(expected_by_layer) - layers_seen)}")
@@ -186,6 +157,7 @@ def aggregate_shards(
             split_limitation,
             "The certificate establishes local robustness only for the stated image and L-infinity byte radius.",
             "Certificate parsing, hashing, and proof composition remain part of the checker trusted base.",
+            "Coverage is matched by assertion label; that each C assertion encodes its labelled obligation is trusted.",
         ],
     }
     (output / "complete_check_summary.json").write_text(
