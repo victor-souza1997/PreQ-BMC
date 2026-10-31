@@ -39,9 +39,19 @@ from scripts.evaluate_ssv_deep_source_model import restricted_from_npz  # noqa: 
 from verification.conv_interval_fast import _im2col, propagate_box  # noqa: E402
 
 S = 16          # envelope scale bits
-F = 8           # layer input fractional bits (Q16/I7/F8 everywhere)
+BITS = 16       # one signed format for the input and every layer (default Q16/I7/F8)
+F = 8           # layer input fractional bits
 Q_LOW, Q_HIGH = -32768, 32767
 HEADROOM = 1 << 62
+
+
+def configure(bits, frac):
+    """Select the global fixed-point format before load(); Q16/I7/F8 is the default."""
+    global BITS, F, Q_LOW, Q_HIGH
+    if not 0 <= frac < bits - 1:
+        raise ValueError(f"unsupported format bits={bits} frac={frac}")
+    BITS, F = bits, frac
+    Q_LOW, Q_HIGH = -(1 << (bits - 1)), (1 << (bits - 1)) - 1
 
 
 def lowered(layer):
@@ -61,7 +71,7 @@ def lowered(layer):
 
 
 def _guard(A, C, xl):
-    worst = int(np.abs(A).max(initial=0)) * 256 * A.shape[1] + int(np.abs(C).max(initial=0))
+    worst = int(np.abs(A).max(initial=0)) * (1 << F) * A.shape[1] + int(np.abs(C).max(initial=0))
     if worst >= HEADROOM:
         raise OverflowError(f"envelope magnitude {worst} exceeds int64 headroom")
 
@@ -179,8 +189,9 @@ def load():
     sel = search["selected_candidate_summary"]
     base = json.loads(Path(search["base_study_path"]).read_text())
     model = restricted_from_npz(sel, Path(sel["folded_model_path"]))
-    net = quantize_restricted_sequential(model, [LayerQuantizationSpec(16, 7, 8)] * 5)
-    enc = ByteImageEncoder(model.input_shape, fractional_bits=8, total_bits=16, resize_mode="nearest_center")
+    net = quantize_restricted_sequential(model, [LayerQuantizationSpec(BITS, BITS - F - 1, F)] * 5,
+                                         input_fractional_bits=F, input_total_bits=BITS)
+    enc = ByteImageEncoder(model.input_shape, fractional_bits=F, total_bits=BITS, resize_mode="nearest_center")
     rows = [r for r in base["records"] if r["split"] == "validation"]
     return sel, base, net, enc, rows
 

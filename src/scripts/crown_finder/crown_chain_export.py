@@ -105,6 +105,7 @@ def lower_chain(A, k, mats, bounds, xl, record=False):
 
 
 XU = [None]  # the upper input corner, set once per region (keeps signatures short)
+ENC = [None]  # the byte encoder of the loaded format, set with XU
 
 
 def ceil_div(a, d):
@@ -165,7 +166,7 @@ def setup(eps, image):
     mats = [lowered(layer) for layer in net.layers]
     row = rows[int(image)] if image.isdigit() else next(r for r in base["records"] if r["id"] == image)
     target, correct, xl, xu, box = image_region(base, net, enc, row, eps)
-    XU[0] = xu
+    XU[0], ENC[0] = xu, enc
     return sel, row, net, mats, target, correct, xl, xu, box
 
 
