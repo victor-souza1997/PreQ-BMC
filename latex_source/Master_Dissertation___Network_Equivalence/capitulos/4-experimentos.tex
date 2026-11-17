@@ -1,0 +1,222 @@
+
+\chapter{Experimental Evaluation}\label{chap:experimental_evaluation}
+
+%\textcolor{red}{can you please reestructure this section as follows. First, describe the setup and benchmarks. Second, descrbibe the objectives. Third, describe the results. Lastly, describe the threads of validity.}
+
+\section{Hardware and Software Configuration}
+
+To run the experiments, we used the hardware and software configurations shown in Tables~\ref{tab:hardware_config} and~\ref{tab:software_config2}, respectively.
+
+
+\begin{table}[h!]
+\centering
+\caption{Hardware Configuration Used in the Experiments}
+\label{tab:hardware_config}
+\begin{tabular}{|l|l|}
+\hline
+\textbf{Componente} & \textbf{Especificação} \\
+\hline
+Processor & Intel® Core™ Ultra 7 155H \\
+Architecture & x86-64, 64-bit \\
+Cores & 16 cores (8P + 8E) \\
+Threads & 22 threads \\
+Frequency & 2.0 GHz (up to 4.8 GHz Turbo) \\
+L3 Cache & 24 MB Intel® Smart Cache \\
+Instruction Set & AVX2, AVX-VNNI, SHA-NI, AES-NI \\
+\hline
+Memory & 26 GiB DDR5 Dual-channel \\
+\hline
+Main Storage & 1 TiB SSD NVMe (EXT4) \\
+Swap & 7 GiB \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[h!]
+\centering
+\caption{Software Environment Used in the Experiments}
+\label{tab:software_config2}
+\begin{tabular}{|l|l|}
+\hline
+\textbf{Component} & \textbf{Specification} \\
+\hline
+Operating System & Windows Subsystem for Linux (WSL2) \\
+Kernel & Linux 6.6.87.2-microsoft-standard-WSL \\
+\hline
+ML Framework & TensorFlow 2.13+ / PyTorch 2.0+ \\
+Formal Verifier & ESBMC 7.5+ \\
+MILP Solver & Gurobi 9.5+ \\
+\hline
+Language & Python 3.10.18 \\
+Libraries & NumPy 1.24+, SciPy 1.10+ \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Benchmarks}
+
+In the Quadapter work, the authors used the MNIST and Fashion-MNIST datasets to evaluate their synthesizer. However, given the limitations of our algorithm in handling layers with a high number of inputs, we opted to use smaller datasets to validate our proposed methodology:
+
+\begin{itemize}
+    \item \textbf{Iris Dataset:} This dataset consists of 150 samples from three species of iris flowers (Iris setosa, Iris virginica, and Iris versicolor). Each sample has four features: sepal length, sepal width, petal length, and petal width. The objective is to classify the species based on these features. In our experiments, we used fully connected feedforward neural networks with two hidden layers containing 10, 15, 3, and 4 neurons, respectively.
+    \item \textbf{Seeds Dataset:} This dataset contains 210 samples of three different varieties of wheat seeds. Each sample has seven features, including area, perimeter, compactness, length of kernel, width of kernel, asymmetry coefficient, and length of kernel groove. The goal is to classify wheat seed varieties based on these features. In our experiments, we used fully connected feedforward neural networks with one hidden layer containing 10, 15, 2, 4, 5, and 6 neurons, respectively. 
+\end{itemize}
+
+\section{Experimental Objectives}
+
+This work aims to compare two different methods for the synthesis of QNNs that are robust to adversarial attacks:
+
+\begin{enumerate}
+    \item The MILP-based approach proposed by Cai et al.~\cite{cai2025certified} in Quadapter.
+    \item And our bit-precise approach using the SMT-based verifier ESBMC.
+\end{enumerate}
+
+The robustness property is the variant considered in our experiments. We evaluated the robustness under $\ell^\infty$ norm with radius $\epsilon \in \{0.01, 0.1, 0.2, 0.3\}$. By doing that, we aim to:
+
+\begin{itemize}
+    \item Compare the quantization strategies synthesized by both approaches in terms of bit-width allocation.
+    \item Evaluate the accuracy preservation of the QNN relative to the baseline ANN.
+    \item Evaluate the computational synthesis time among the methods.
+    \item Assess the scalability of each approach with respect to network size.
+\end{itemize}
+
+\section{Experimental Results}
+
+The results of both sets of experiments are presented in Table~\ref{tab:results-attack001-id25}.
+
+\begin{table}[htbp]
+\centering
+\caption{Quantization and verification results (Attack $\epsilon=0.01$, ID=25). Times in seconds.}
+\label{tab:results-attack001-id25}
+\small
+\begin{tabular}{@{}llccc rrr rr@{}}
+\hline
+Dataset & Backend & All bits & Frac bits & Int bits & Backward & Forward & Total & Acc. DNN & Acc. QNN \\
+\hline
+Iris\_10$\times$2 & ESBMC & {[4, 3, 3]} & {[2, 1, 1]} & {[2, 2, 2]} & 0.024 & 2.498 & 2.522 & 0.900 & 0.867 \\
+Iris\_10$\times$2 & MILP & {[5, 4, 3]} & {[3, 2, 1]} & {[2, 2, 2]} & 0.022 & 0.015 & 0.036 & 0.900 & 0.900 \\
+\hline
+Iris\_15$\times$2 & ESBMC & --- & --- & --- & --- & --- & 6.934 & --- & --- \\
+Iris\_15$\times$2 & MILP & {[3, 3, 3]} & {[1, 1, 1]} & {[2, 2, 2]} & 0.004 & 0.005 & 0.009 & 0.867 & 0.867 \\
+\hline
+Iris\_3$\times$2 & ESBMC & {[4, 4, 3]} & {[2, 1, 1]} & {[2, 3, 2]} & 0.014 & 1.271 & 1.285 & 0.933 & 0.900 \\
+Iris\_3$\times$2 & MILP & {[3, 4, 3]} & {[1, 1, 1]} & {[2, 3, 2]} & 0.026 & 0.005 & 0.030 & 0.933 & 0.833 \\
+\hline
+Iris\_4$\times$2 & ESBMC & --- & --- & --- & --- & --- & 5.160 & --- & --- \\
+Iris\_4$\times$2 & MILP & {[3, 3, 3]} & {[1, 1, 1]} & {[2, 2, 2]} & 0.004 & 0.005 & 0.009 & 0.867 & 0.867 \\
+\hline
+Seeds\_10$\times$1 & ESBMC & {[7, 3]} & {[5, 1]} & {[2, 2]} & 0.030 & 8.476 & 8.506 & 0.905 & 0.905 \\
+Seeds\_10$\times$1 & MILP & {[7, 3]} & {[5, 1]} & {[2, 2]} & 0.016 & 0.033 & 0.048 & 0.905 & 0.905 \\
+\hline
+Seeds\_15$\times$1 & ESBMC & {[7, 3]} & {[5, 1]} & {[2, 2]} & 0.060 & 24.926 & 24.986 & 0.905 & 0.905 \\
+Seeds\_15$\times$1 & MILP & {[6, 4]} & {[4, 2]} & {[2, 2]} & 0.020 & 0.031 & 0.051 & 0.905 & 0.905 \\
+\hline
+Seeds\_2$\times$1 & ESBMC & {[6, 4]} & {[3, 1]} & {[3, 3]} & 0.008 & 1.412 & 1.420 & 0.857 & 0.833 \\
+Seeds\_2$\times$1 & MILP & {[4, 4]} & {[1, 1]} & {[3, 3]} & 0.064 & 0.005 & 0.069 & 0.857 & 0.500 \\
+\hline
+Seeds\_4$\times$1 & ESBMC & --- & --- & --- & --- & --- & 7.107 & --- & --- \\
+Seeds\_4$\times$1 & MILP & {[4, 4]} & {[2, 1]} & {[2, 3]} & 0.008 & 0.005 & 0.014 & 0.881 & 0.905 \\
+\hline
+Seeds\_5$\times$1 & ESBMC & {[6, 3]} & {[4, 1]} & {[2, 2]} & 0.011 & 2.219 & 2.230 & 0.833 & 0.833 \\
+Seeds\_5$\times$1 & MILP & {[4, 4]} & {[2, 2]} & {[2, 2]} & 0.029 & 0.017 & 0.046 & 0.833 & 0.857 \\
+\hline
+Seeds\_6$\times$1 & ESBMC & {[6, 3]} & {[4, 1]} & {[2, 2]} & 0.012 & 2.299 & 2.310 & 0.833 & 0.833 \\
+Seeds\_6$\times$1 & MILP & {[4, 4]} & {[2, 2]} & {[2, 2]} & 0.012 & 0.013 & 0.025 & 0.833 & 0.857 \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Analysis of Results}
+
+
+As shown in Table~\ref{tab:results-attack001-id25}, our SMT-based methodology successfully synthesized the QNN for several benchmarks, achieving competitive accuracy compared to the non-quantized model. From it, we were also able to compare our methodology with the prior synthesis method using MILP solvers.
+
+
+\begin{itemize}
+    \item \textbf{Accuracy Comparison} Both the SMT and MILP approaches achieved similar accuracies for most benchmarks. For instance, in the Seeds\_10$\times$1 configuration, both SMT and MILP achieved identical accuracy (0.905) with the same bit-width allocation ([7, 3]).
+    
+    \item \textbf{Synthesis Time:} MILP demonstrated significantly faster synthesis times across all configurations tested. For example, in the Seeds\_15$\times$1 configuration, MILP completed synthesis in 0.051 seconds, while ours took 24.986 seconds, yielding a speed-up of approximately 490$\times$.
+    
+    \item \textbf{Scalability:} For larger networks (e.g., Iris\_15$\times$2, Iris\_4$\times$2, Seeds\_4$\times$1), our approach ran into problems in completing the synthesis within the time limits, as indicated by the ``---'' spaces and timeout values.
+    \item \textbf{Quantization Precision}: In some cases, our approach found a different bit-width compared to the MILP solver's. For instance, in Seeds\_2$\times$1, our work used [6, 4] bit-width, whereas MILP used [4, 4] bits. In addition, the SMT method achieved better accuracy, suggesting that bit-precise reasoning can lead to more robust quantization strategies in specific scenarios.
+    
+      \item \textbf{Trade-offs:} Overall, the MILP strategy is much faster than using our work strategy, as the SMT solver must explore every state within a k-depth in search of counterexamples. However, in some cases, such as Seeds\_2$\times$1, our work displayed a notable enhancement over the Quadapter MILP strategy.
+\end{itemize}
+
+\section{Threats to Validity}
+
+\subsection{Internal Validity}
+
+\begin{itemize}
+    \item \textbf{Implementation Differences:} The two approaches may have different underlying implementations and optimizations that could affect the comparison. We attempted to minimize this by applying equivalent configuration parameters and evaluation criteria.
+    
+    \item \textbf{Timeout Settings:} The timeout values for ESBMC may have been insufficient for larger networks. Different timeout settings could potentially yield different results.
+    
+
+\end{itemize}
+
+\subsection{External Validity}
+
+\begin{itemize}
+    \item \textbf{Limited Benchmarks:} The baseline study that utilized an MILP solver as the backend relied on the MNIST database \cite{cai2025certified}. However, this database contains a large number of inputs, which can lead to timeouts for the SMT solver due to state explosion \cite{henzinger2021scalable, eleftheriadis2022neuralnetworkequivalencechecking, cordeiro2025neuralnetworkverificationprogramming}. To demonstrate our concept effectively, we have opted to use smaller datasets, such as the Iris and Seeds databases.
+    
+    \item \textbf{Network Architecture:} The results may not be applicable to convolutional neural networks, recurrent networks, or deeper architectures.
+    
+    \item \textbf{Robustness Property:} We focused exclusively on evaluating the robustness property under the $\ell^\infty$ norm using a single perturbation radius ($\epsilon$).
+    
+    \item \textbf{Hardware Dependency:} The time required for SMT verification is influenced by the hardware used, as it requires a considerable amount of computing resources.
+\end{itemize}
+
+\subsection{Construct Validity}
+\begin{itemize}
+
+ \item \textbf{Accuracy Metric:} We used the accuracy metric as the primary evaluation metric. Other metrics, such as F1-score, precision, and recall \cite{aldjanabi_2021}, may provide additional knowledge about the model's quality.
+    
+    \item \textbf{Time Measurement:} Synthesis time includes both the backward phase (preimage computation) and the forward phase (verification). The level of detail in time measurement can affect the level of detail in the comparison.
+\end{itemize}
+
+\section{Summary}
+
+This experiment confirms the effectiveness of a bit-precise SMT-based approach for synthesizing QNNs and draws attention to the advantages of MILP-based methods for speed as well as scalability. The bit-precise approach shows promise for developing more robust quantization strategies in specific scenarios, though it incurs a higher computational cost. Furthermore, subsequent research will tackle scalability by extending the SMT-based synthesis process to handle larger networks.
+
+\begin{table}[htbp]
+\centering
+\caption{Quantization and verification results (Attack $\epsilon=0.01$, ID=25). Times in seconds.}
+\label{tab:results-attack001-id252}
+\small
+\begin{tabular}{@{}llccc rrr rr@{}}
+\hline
+Dataset & Backend & All bits & Frac bits & Int bits & Backward & Forward & Total & Acc. DNN & Acc. QNN \\
+\hline
+Iris\_10$\times$2 & ESBMC & {[4, 3, 3]} & {[2, 1, 1]} & {[2, 2, 2]} & 0.023 & 2.442 & 2.465 & 0.900 & 0.867 \\
+Iris\_10$\times$2 & MILP & {[5, 4, 3]} & {[3, 2, 1]} & {[2, 2, 2]} & 0.024 & 0.065 & 0.089 & 0.900 & 0.900 \\
+\hline
+Iris\_15$\times$2 & ESBMC & --- & --- & --- & --- & --- & 5.560 & --- & --- \\
+Iris\_15$\times$2 & MILP & {[3, 3, 3]} & {[1, 1, 1]} & {[2, 2, 2]} & 0.020 & 0.028 & 0.048 & 0.867 & 0.867 \\
+\hline
+Iris\_3$\times$2 & ESBMC & {[4, 4, 3]} & {[2, 1, 1]} & {[2, 3, 2]} & 0.020 & 0.856 & 0.876 & 0.933 & 0.900 \\
+Iris\_3$\times$2 & MILP & {[3, 4, 3]} & {[1, 1, 1]} & {[2, 3, 2]} & 0.811 & 0.027 & 0.838 & 0.933 & 0.833 \\
+\hline
+Iris\_4$\times$2 & ESBMC & --- & --- & --- & --- & --- & 5.510 & --- & --- \\
+Iris\_4$\times$2 & MILP & {[3, 3, 3]} & {[1, 1, 1]} & {[2, 2, 2]} & 0.016 & 0.031 & 0.047 & 0.867 & 0.867 \\
+\hline
+Seeds\_10$\times$1 & ESBMC & {[7, 3]} & {[5, 1]} & {[2, 2]} & 0.012 & 3.945 & 3.957 & 0.905 & 0.905 \\
+Seeds\_10$\times$1 & MILP & {[7, 3]} & {[5, 1]} & {[2, 2]} & 0.012 & 0.056 & 0.067 & 0.905 & 0.905 \\
+\hline
+Seeds\_15$\times$1 & ESBMC & {[7, 3]} & {[5, 1]} & {[2, 2]} & 0.012 & 8.194 & 8.206 & 0.905 & 0.905 \\
+Seeds\_15$\times$1 & MILP & {[6, 4]} & {[4, 2]} & {[2, 2]} & 0.012 & 0.056 & 0.068 & 0.905 & 0.905 \\
+\hline
+Seeds\_2$\times$1 & ESBMC & {[6, 4]} & {[3, 1]} & {[3, 3]} & 0.011 & 0.871 & 0.882 & 0.857 & 0.833 \\
+Seeds\_2$\times$1 & MILP & {[4, 4]} & {[1, 1]} & {[3, 3]} & 0.011 & 0.018 & 0.029 & 0.857 & 0.500 \\
+\hline
+Seeds\_4$\times$1 & ESBMC & --- & --- & --- & --- & --- & 14.009 & --- & --- \\
+Seeds\_4$\times$1 & MILP & {[4, 4]} & {[2, 1]} & {[2, 3]} & 0.010 & 0.027 & 0.037 & 0.881 & 0.905 \\
+\hline
+Seeds\_5$\times$1 & ESBMC & {[6, 3]} & {[4, 1]} & {[2, 2]} & 0.013 & 1.841 & 1.854 & 0.833 & 0.833 \\
+Seeds\_5$\times$1 & MILP & {[4, 4]} & {[2, 2]} & {[2, 2]} & 0.011 & 0.037 & 0.047 & 0.833 & 0.857 \\
+\hline
+Seeds\_6$\times$1 & ESBMC & {[6, 3]} & {[4, 1]} & {[2, 2]} & 0.012 & 1.717 & 1.729 & 0.833 & 0.833 \\
+Seeds\_6$\times$1 & MILP & {[4, 4]} & {[2, 2]} & {[2, 2]} & 0.012 & 0.036 & 0.048 & 0.833 & 0.857 \\
+\hline
+\end{tabular}
+\end{table}

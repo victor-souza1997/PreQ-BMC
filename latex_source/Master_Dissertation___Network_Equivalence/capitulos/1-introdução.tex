@@ -1,0 +1,377 @@
+\begin{comment}
+    
+
+    Nessa paper vamos focar na verificação de redes Redes Neurais Convulacionais Quantizadas (QCNNs) lidando como o problema da equivalência de código entre a função original e a função quantizadas.
+
+    O objetivo do paper é mostrar que o método de verificação BMC com SMT pode ser usado para garantir a confiabilidade de QCNNs no processamento de imagens em sistemas de menor potência computacional.
+    
+    Existem trabalhos que usam SMT para verificar o modelo matemático, mas como mostrado por \cite{cordeiro2025neuralnetworkverificationprogramming} ele deve ser tratado como um programa de verificação de programa.
+
+    Verificar no BMC
+    --multi-property
+    --parallel-solving
+    --smt-symex-guard
+
+
+\end{comment}
+
+
+\chapter{Introduction}\label{cap:intro}
+
+%%% First talk about the advances of AI in everyday life 
+%%% Then talk about how much have AI models grown 
+%%% Use present tense when talking about this dissertation and past tense when talking about past works.
+
+From the first Artificial Neural Network (ANN) models, such as the Perceptron, which was proposed in 1958 by Frank Rosenblatt \cite {Rosenblatt1958}, to the current state-of-the-art models such as Large Language Models (LLMs)~\cite{OpenAI2023GPT4, guSurveyLLMasaJudge2025}, ANN has become a transformative force across various sectors. Its usage spans many fields, including healthcare for diagnostics of Parkinson's disease~\cite{Luo2025Efficient}, autonomous vehicles for safety features using Convolutional Neural Networks (CNNs) to detect driver distraction in real time~\cite{Lei2025An}, and in finance for fraud detection by analyzing transaction patterns using advanced machine learning algorithms~\cite{10859521}. These examples illustrate the impact of these models on our daily lives, improving efficiency, safety, and decision-making processes. 
+
+%%% Then talk about the usage of AI in embbeded fields, such as smartphones and IoT devices
+%\textcolor{red}{However, beyond their increasing adoption, NNs have also undergone a pronounced scaling trend, with models such as GPT-3, which boasts 175 billion parameters \cite{Brown2020Language}, to GPT-4, which is pushing the boundaries even further \cite{OpenAI2023GPT4}. This escalation in model size has been paralleled by significant performance gains across a variety of tasks, from natural language processing to image recognition \cite{katz2019marabou, amir2021smt}. The trend towards larger models is driven by the observation that increased parameter counts often lead to improved generalization and capacity \cite{dantasComprehensiveReviewModel2024}, allowing these models to handle more complex problems and deliver more precise output. At the same time, this growth also presents challenges, particularly the computational resources required for training and inference \cite{amir2021smt, sena2021verifying}, which inherently also leads to higher energy consumption \cite{gholami2021surveyquantizationmethodsefficient}. As a result, there is increasing interest in developing more efficient architectures that can yield the power of large-scale models while mitigating their resource demands \cite{gholami2021surveyquantizationmethodsefficient,dantasComprehensiveReviewModel2024}.}
+
+{However, beyond their increasing adoption, ANNs have also undergone a pronounced scaling trend, with models such as GPT-3, which boasts 175 billion parameters \cite{Brown2020Language}, to GPT-4, which is pushing the boundaries even further \cite{OpenAI2023GPT4}. This escalation in model size has been paralleled by significant performance gains across a variety of tasks, from natural language processing to image recognition \cite{katz2019marabou, amir2021smt}. The observation drives the tendency to implement larger models that increase the number of model parameters, producing a more powerful model capable of handling complex problems and producing precise results \cite{dantasComprehensiveReviewModel2024}. At the same time, this growth also presents challenges, particularly the computational resources required for training and inference \cite{amir2021smt, sena2021verifying}, which inherently also leads to higher energy consumption \cite{gholami2021surveyquantizationmethodsefficient}. As a result, there is increasing interest in developing more efficient architectures that can yield the power of large-scale models while mitigating their resource demands \cite{gholami2021surveyquantizationmethodsefficient,dantasComprehensiveReviewModel2024}.}
+%%However, these state-of-the-art ANNs are often too large and complex to be deployed on devices with limited resources, such as smartphones and IoT devices \cite{gholami2021surveyquantizationmethodsefficient} \textcolor{red}{are you sure? don't we have small ANNs that can be deployed, e.g., in autonomous vehicles?}. The computational demands of these models can lead to significant latency and energy consumption, making them impractical for real-time applications in resource-constrained environments \textcolor{red}{add a citation}.
+
+
+
+\begin{comment}
+    %%%% These papers talk using quantization to reduce the floating point precision to fixed-point precision.
+    (JACOB et al., 2017;  LIN; TALATHI; ANNAPUREDDY, 2016)
+    %%%% These techniques reduce network size and computational requirements
+    (HAN; MAO; DALLY, 2016; NAGEL et al.,  2021)
+    %%% However it lead to a trade-off between model size and accuracy
+    (JACOB et al., 2017; HUBARA et  al., 2017)
+\end{comment}
+
+%%% Here we will talk about the quantization problem of neural networks, the use of SMT solvers to solve combinatorial problems, and the motivation for this work.
+
+%\textcolor{red}{To address these challenges, quantization techniques are commonly used to reduce the size of models~\cite{Zhu2016Trained, gholami2021surveyquantizationmethodsefficient} \textcolor{red}{what about other methods to prune the ANN? check our recent paper at https://link.springer.com/article/10.1007/s10489-024-05747-w}. It involves reducing the precision of the model's parameters, such as weights, activation functions, and bias, which can lead to a significant reduction in memory usage and computational requirements. However, the known process often results in a trade-off between model size and accuracy, as lower precision leads to degration of the network, leading to potential vulnerabilities \cite{Zhou2017Incremental}.}
+
+%To improve the portability of artificial neural networks (ANNs) across heterogeneous hardware platforms, model compression techniques such as pruning, lightweight architectures, and quantization are widely employed \cite{dantasComprehensiveReviewModel2024}. In embedded systems, pruning and quantization are particularly relevant because they directly address the constraints of limited memory, storage, and computational throughput. Pruning eliminates redundant neurons and connections, thereby reducing model size and energy consumption, while quantization adapts the numerical representation of parameters and activations to the finite-precision arithmetic of the target device. Together, these techniques significantly reduce the computational footprint and enable real-time inference on low-power hardware.
+
+
+
+%\textcolor{red}{To enhance the portability of ANNs across diverse hardware platforms, compression techniques such as pruning, lightweight architectures, and quantization are commonly adopted \cite{dantasComprehensiveReviewModel2024}. Within the domain of embedded systems, quantization and pruning are particularly employed due to their direct alignment with hardware constraints. Quantization adapts neural representations to fixed-point precision representation, facilitating efficient deployment on resource-constrained environment, whereas pruning reduces memory footprint by removing redundant neurons and connections. This optimization process involves converting parameters and activations from high-precision formats, e.g., 32-bit floating-point to lower bit-width representations such as fixed-point or 8-bit integers \cite{abdi2021counterexample}, thereby diminishing model size and computational demand.}
+
+{To cope with the rapidly increasing size of neural networks and the limited computational power of embedded hardware, several compression techniques are employed, including pruning, lighter architectures, and, finally, quantization \cite{dantasComprehensiveReviewModel2024}. Of these techniques, quantization is the most suitable for embedded hardware, as it allows defining the precision of the numerical representation of each network parameter based on the hardware to be used. In this way, the representation previously used with floating-point numbers is now implemented with fixed-point numbers, requiring fewer bits to represent a given value, e.g., from a 32-bit real number to an 8-bit integer \cite{abdi2021counterexample}.}
+
+
+
+%However, both pruning and quantization can introduce approximation errors that affect predictive accuracy and model robustness \cite{abdi2021counterexample}. Quantization, in particular, presents additional challenges, as the reduction of numerical precision can amplify rounding errors and sensitivity to input perturbations \cite{giacobbe2020how}. Thus, while both methods are essential for efficient deployment, quantization stands out as the most critical from a verification perspective, since it fundamentally alters the arithmetic semantics of the network and can expose vulnerabilities not present in its floating-point counterpart \cite{abdi2021counterexample, cordeiro2025neuralnetworkverificationprogramming}.
+
+{As previously described, pruning and quantization techniques are widely used to make neural networks lighter and potentially portable to weaker hardware, such as embedded boards. However, they come at the cost of reduced precision and even greater model vulnerability \cite{abdi2021counterexample}. Quantization, in particular by reducing the precision of network parameters, can make the model sensitive to input disturbances \cite{giacobbe2020how}, leading to classification errors. This makes the model unreliable. Therefore, although both methods are fundamental for the portability of models to weaker hardware, they do not come without a trade-off, as is the case with quantization, which alters the model's arithmetic semantics and exposes it to problems that did not previously exist in the floating-point model \cite{abdi2021counterexample, cordeiro2025neuralnetworkverificationprogramming}.}
+
+%However, this reduction in numerical precision entails a trade-off between efficiency and accuracy: aggressive quantization may degrade predictive performance and increase the model’s susceptibility to numerical and adversarial vulnerabilities \cite{Zhou2017Incremental}.
+
+% Devo abordar melhor as tecnicas de pruning e lightweight architectures
+%is it sTo address the portability of ANNs, compression techniques such as pruning, lightweight architectures, and quantization are commonly employed \cite{dantasComprehensiveReviewModel2024}. In the context of embedded systems, quantization and pruning are often preferred because quantization can directly target the finite-precision arithmetic of the target hardware while the later can reduce memory usage by eliminating unnecessary neuron and connections. 
+
+%This process entails the rigorous conversion of parameter and activation representations from floating point, e.g., 32-bit to lower bit-width formats as fixed-point or 8-bit integers, thus reducing model size and, consequently, compute and memory usage. Nevertheless, quantization introduces a trade-off between model size and accuracy: reduced numerical precision can degrade network performance and render the model more susceptible to vulnerabilities \cite{Zhou2017Incremental}.
+
+% incluir equivalência funcional (FE), que é o termo formal que englobal a manutençao da acurária e do comportamento
+%The verification of Quantized Neural Networks (QNNs) has garnered significant attention in the literature, with numerous studies emphasizing the critical need to ensure that these models preserve essential properties, such as robustness and backdoor-freeness, as well as accuracy, i.e., their \textcolor{red}{Equivalência Funcional (FE)}, from their original counterparts post-quantization \cite{cai2025certified,giacobbe2020how, henriksenp.EfficientNeuralNetwork2020,katz2019marabou,cordeiro2025neuralnetworkverificationprogramming,song2023qnnrepair}. Robustness refers to the model's capacity to withstand minor input perturbations without altering its classification, whereas backdoor-freeness denotes the absence of vulnerabilities that could be exploited for malicious purposes. The accuracy is the capacity of the model of keeping classifying correctly the output. Based on the works of \cite{dantasComprehensiveReviewModel2024}, these propeties cited before are essencial to garantee the safety and realibility of a neural network.
+
+\begin{comment}
+Hence, the verification of Quantized Neural Networks (QNNs) has attracted significant attention in the literature. The foundations for this field were largely established by early work on Satisfiability Modulo Theories (SMT), which pioneered the formal verification of deep neural networks by encoding them and their properties into logical constraints \cite{pulinaAbstractionRefinementApproachVerification2010, Pulina2012Challenging}. This SMT-based approach provides a rigorous and bit-precise framework that is naturally suited for verifying of QNNs. Building on this foundation, numerous studies now emphasize the critical need to ensure that these models preserve essential properties of their original counterparts after quantization \cite{katz2019marabou, giacobbe2020how, henriksenp.EfficientNeuralNetwork2020,song2023qnnrepair, cai2025certified, cordeiro2025neuralnetworkverificationprogramming}. These properties include robustness, backdoor-freeness \cite{cai2025certified}, and behavioral integrity \cite{ cai2025certified,cordeiroAutomatedMethodNeural}, which ensures the preservation of the original model’s accuracy and decision mapping. Robustness refers to the model’s ability to withstand small input perturbations without changing its classification \cite{sena2021verifying, huangEfficientVerificationQuantized2023, dantasComprehensiveReviewModel2024}, while backdoor-freeness denotes the absence of vulnerabilities that could be exploited for malicious purposes \cite{cai2025certified}. Such characteristics are indispensable to ensure the reliability and safety of QNNs, especially in resource-constrained safety critical systems \cite{zhang2020qvip, abdi2021counterexample, cordeiroAutomatedMethodNeural}.
+
+Verificações de QNNs têm atraido bastante atenção na literatura, sabendo que o processo de quantização, embora benéfico, traz consigo vulnerabilidades a redes neurais. Trabalhos recentes começaram pelo uso da verificação usando solvers SMT, que foram pioneiros na verificação de métodos formais de redes neurais por meio da codificação 
+\end{comment}
+%% Paragraph new structure from the above.
+{As a consequence, the field of verifying QNNs has attracted attention in the literature. The foundation of this field was established mainly by early works on Formal Methods that used SAT and SMT solvers, which were pioneers in encoding the safety properties of these networks into logical constraints \cite{pulinaAbstractionRefinementApproachVerification2010, Pulina2012Challenging}. In particular, the use of SMT solvers provides the verifier with a rigorous, bit-precise backend that is naturally suited to a bit-precise verification of QNNs \cite{baranowski2020smt}. Expanding upon this groundwork, several studies in the field have now highlighted the significant need to ensure that quantized models preserve the essential properties they had before Quantization \cite{katz2019marabou, giacobbe2020how, henriksenp.EfficientNeuralNetwork2020,song2023qnnrepair, cai2025certified, cordeiro2025neuralnetworkverificationprogramming}. In state-of-the-art works, these properties include robustness, backdoor-freeness, and behavioral integrity, which provide the preservation of the model’s original accuracy. In a general explanation, robustness refers to the model’s ability to withstand small disturbances at its input and still classify correctly \cite{sena2021verifying, huangEfficientVerificationQuantized2023, dantasComprehensiveReviewModel2024}. At the same time, backdoor-freeness guarantees that the model will be protected against malicious attackers \cite{cai2025certified}. }
+
+%% Vms abordar a motivação do uso de quantização e a necessidade de verificar a integridade dos modelos quantizados.
+
+% vms introduzir a motivação com problemas que surgem com a quantização de redes neurais e pequenas pertubações que podem levar a grandes mudanças na saída do modelo.
+%Indeed, small perturbations in the input of an ANN can lead to significant changes in the model's output classification, which could result in disastrous consequences depending on the application scenario \cite{Szegedy2014Intriguing}. A classic example is an autonomous driving system, where a small sticker placed on a traffic sign, or even a slight change in lighting, could lead the system to interpret a ``Stop'' sign as a ``Speed Limit'' sign, resulting in a severe accident \cite{Eykholt2018Robust}. 
+
+%In these scenarios, models must be efficient enough for deployment on resource-constrained hardware and preserve safety properties particularly robustness and resistance to backdoor attacks without compromising accuracy \cite{.
+%\textcolor{red}{add a citation}. 
+
+% The process of quantization tries to mitigate the disadvantages of process, but fail. let's write about it.
+%Modern quantization techniques, as discussed in the literature \cite{gholami2021surveyquantizationmethodsefficient}, aim to minimize accuracy loss while reducing model size through strategies such as weight sharing, pruning, and low-rank factorization. \textcolor{blue}{However, in contrast to formal verification, these techniques are heuristic-based and do not guarantee soundness\footnote{\textcolor{red}{traduzir texto em portugues?} Uma ferramenta sólida nunca afirmará que uma propriedade de segurança é válida quando, na verdade, não é} or completeness\footnote{A completude é a contraparte da solidez. Enquanto a solidez garante que as respostas "seguro" são corretas, a completude garante que o algoritmo é capaz de sempre chegar a uma conclusão definitiva, provando uma propriedade se ela for verdadeira e encontrando um contraexemplo se ela for falsa}.} 
+
+%These methods primarily evaluate performance degradation using statistical metrics, such as accuracy and loss \textcolor{red}{which methods? add citations...}. While these metrics provide valuable insights, they fail to fully capture the subtle behavioral changes introduced by quantization, which can be critical in safety-sensitive applications~\cite{cordeiro2025neuralnetworkverificationprogramming}. To address this, quantization-aware training (QAT) approaches have been developed to improve model robustness under predefined quantization strategies. However, even these advanced techniques lack formal guarantees of robustness~\cite{cai2025certified}.
+
+
+%{Early work by Pulina and Tacchella \cite{pulinaAbstractionRefinementApproachVerification2010,Pulina2012Challenging} proposed using SMT solvers for neural network verification using abstract refinement techniques to handle nonlinear activation functions. However, while effective for small Multilayer Perceptron (MLP), it struggled with scalability to larger models. Thus, these first studies exposed scalability as a key challenge. Following the early works in real ANN, authors also tried to verify QNNs. These verifications were more alligned to compare the Real domain network with the quantized one by verifying properties like equivalence and robustness of the model. As early work, the verification of QNNs also face scalibility problems. \cite{henzingerScalableVerificationQuantized2022}, by verifying in bit-precision domain the problem becomes Subsequent efforts developed specialized encoding and solvers for piecewise-linear networks, including Reluplex, Marabou, and CEG4N \cite{katz2017reluplex,katz2019marabou, abdi2021counterexample}, and investigated properties such as robustness and backdoor-freeness. In the context of quantized models, SMT is particularly appealing because finite precision semantics can be expressed natively with bit-vector and arithmetic theories \cite{baranowski2020smt}; the central challenge is to control the resulting search space so that proofs and counterexamples remain tractable \cite{henzinger2021scalable}.}
+
+%Early work by Pulina and Tacchella pioneered the verification of Deep Neural Networks (DNNs) using SMT by introducing the Counterexample-guided Abstraction Refinement (CETAR) technique to encode the safety of Multi-Layer Perceptrons (MLPs) \cite{pulinaAbstractionRefinementApproachVerification2010,Pulina2012Challenging}. However, these approaches faced severe scalability difficulties, managing to verify only small networks due to the search space explosion \cite{Pulina2012Challenging}. Building upon this foundation, research expanded to QNN verification, a crucial problem due to the implementation gap between ideal models and hardware implementations with integer arithmetic \cite{henzingerScalableVerificationQuantized2022}. QNN verification in the bit-precise domain proved to be inherently more difficult than verification of networks in real arithmetic being it PSPACE-hard, in contrast to the NP-completeness of verification in reals \cite{henzingerScalableVerificationQuantized2022}. To address this complexity, specific SMT methods were developed to encode finite precision semantics, such as the Theory of Bit-Vectors (QF\_BV) \cite{giacobbe2020how,henzingerScalableVerificationQuantized2022} and the Theory of Fixed-Point Arithmetic (FXP) \cite{sena2021verifying}, which explicitly model rounding and overflow. Modern tools, such as Marabou, QEBVerif, and the EQV framework, utilize these exact techniques to investigate properties like robustness and equivalence, but the central challenge remains developing scalable optimizations and heuristics to keep proofs computationally tractable in the face of bit-precise domain complexity \cite{huangEfficientVerificationQuantized2023,henzingerScalableVerificationQuantized2022}.
+
+%Early work by Pulina and Tacchella \cite{pulinaAbstractionRefinementApproachVerification2010,Pulina2012Challenging} introduced SMT-based verification for neural networks, employing abstraction and refinement to handle nonlinear activations. These methods were effective on small multilayer perceptrons but revealed a central limitation: scalability to larger models. For real valued networks, subsequent research developed specialized encodings and solvers for piecewise linear activations, notably Reluplex, Marabou, and CEG4N \cite{katz2017reluplex,katz2019marabou,abdi2021counterexample}, and examined properties such as robustness and backdoor freeness.
+
+%Quantized neural networks shift the verification problem. Parameters and activations live in discrete domains, and computations follow finite precision arithmetic with rounding, clipping, and possible overflow. This motivates SMT formulations over bit vectors and related arithmetic theories \cite{baranowski2020smt}. Early QNN verification often related a real valued model $N$ to its quantized counterpart $\hat{N}$ by checking functional proximity and robustness; however, reasoning in the bit precision domain enlarges the search space and amplifies scalability challenges \cite{henzingerScalableVerificationQuantized2022,henzinger2021scalable}. Controlling this search so that proofs and counterexamples remain tractable is therefore the central difficulty.
+
+
+%% Here we delve into the history of neural network verification and the motivation for using SMT solvers.
+%\textcolor{red}{Pulina and Tacchella conducted pioneering work in verification in 2012~\cite{Pulina2012Challenging}, proposing the use of SMT solvers to verify the property constraints of ANNs. However, successful, it also demonstrated that scalability for SMT solvers was a significant challenge, limiting practical applications. Since then, several studies have explored the use of SMT solvers to verify the integrity of ANNs, including the verification of properties such as robustness and ausence of backdoor exploits~\cite{katz2017reluplex, amir2021smt, abdi2021counterexample, song2023qnnrepair}} \textcolor{red}{can you formally define ```safety'' and ``robustness''?}. %These methods can be used to verify the integrity of the quantized model by checking whether the quantized model still meets the safety properties of the pre-quantized model \cite{giacobbe2020how,Cai2020Certified, amir2021smt,cheng2021milp, henzinger2021scalable,sena2021verifying, zhangQVIPILPbasedFormal2022, song2022airepair, zhangQEBVerifQuantizationError2023, huangEfficientVerificationQuantized2023}.
+
+
+
+\begin{comment}
+    
+    %% We will talk about the need to verify the integrity of quantized neural networks, and how SMT solvers can be used to verify the integrity of these models.
+    Therefore, it is essencial to have a robust mehtod to verify the integrity of QNNs, ensuring they still meet their requirements and perform securily to their intended tasks. 
+    
+    
+    While quantization can make models more efficient, it is crucial to verify that the quantized model still meets the required performance standards. 
+    
+    Think of a scenario where a quantized model is embbeded in a medical device for a real-time diagnostics or a self-driving car where the most precision is required. In such cases, any degradation in model performance due to quantization is unacceptable. Therefore, given the important of these applications, it is essential to have a robust method for verifying the integrity of quantized models.
+    
+    ANN are widely used in various applications, but their computational and memory resource demands are high \cite{amir2021smt, han2020understanding, abdi2021counterexample, song2023qnnrepair}. Quantization is a crucial technique to mitigate this problem by reducing the bit-width (from 32-bit floating-point to 8-bit integers or even binary) used to represent weights, biases, and activations, making networks more efficient on embedded and low-power devices \cite{amir2021smt, han2020understanding,song2023qnnrepair, abdi2021counterexample, Cai2020Certified}.
+    % This paragraph we will talk about other works that have verified the integrity of neural networks. Then we will talk about the use of MILP to verify preimage of neural networks and use it to verify the integrity of quantized neural networks. However, this approach does not verify using fixed-point precision like SMT solvers do.
+\end{comment}
+
+
+
+\section{Problem Statement}\label{sec:problem_statement}
+
+%The formal method aims to address the implementation gap \cite{cordeiro2025neuralnetworkverificationprogramming}. 
+The majority of canonical verification frameworks, such as Reluplex \cite{katz2017reluplex}, Marabou \cite{amir2021smt}, and Counterexample-Guided Quantization for Neural Networks (CEG4N) \cite{abdi2021counterexample}, assume that networks operate with real-number arithmetic; since the theoretical complexity of fixed-point verification is PSPACE-hard \cite{henzinger2021scalable}, making scalability a significant challenge. However, actual hardware implementations use fixed-point arithmetic, or integer arithmetic implementation \cite{choukrounLowbitQuantizationNeural2019a}, which inherently introduce rounding and overflow errors~\cite{han2020understanding}. This discrepancy means that even if a property $\Xi$ is verified to {hold} for the real-valued model, it may not hold for the actual implementation due to numerical mismatches between precision implementation, leading to an ``implementation gap'' \cite{cordeiro2025neuralnetworkverificationprogramming}.
+
+Furthermore, quantization, though helpful for efficiency, can degrade accuracy and introduce additional nonlinear rounding operations into the semantics of an ANN~\cite{giacobbe2020how}, and, more critically, compromise desired safety properties, e.g., robustness, backdoor-freeness, and behavioral integrity. Existing studies on QNN verification generally focus on post-hoc\footnote{Analysis after the quantization process; i.e., it is purely diagnostic, assessing the resulting model without proposing or implementing remedies for any identified issues.} analysis; that is, they verify a network after it has been quantized, in order to ensure that the quantization process does not introduce vulnerabilities or degrade the accuracy \cite{katz2017reluplex, baranowski2020smt, eleftheriadis2022neuralnetworkequivalencechecking,song2023qnnrepair}. However, these approaches do not guarantee an optimal quantization strategy, unlike the CEG4N and Quadapter frameworks \cite{abdi2021counterexample,cai2025certified}, which have been designed to determine the optimal quantization bit-width for each network layer. 
+
+
+Among these, Quadapter presents a pioneering ideia by proposing the synthesis of a quantization strategy that guarantees the preservation of robustness and backdoor-freeness properties while showing improved scalability compared to other off-the-shelf frameworks as the previously cited CEG4N, since the latter needs to verify the equivalence property on the entire network at each iteration, which may lead to timeouts or excessive computation time, such as for a small 100 neurons network as shown by \cite{cai2025certified}.
+
+Despite that, both studies that present themselves as quantization frameworks overlook the practical nuances of quantization, specifically fixed-point arithmetic, which is crucial for ensuring the desired properties in real hardware implementations~\cite{han2020understanding}. As noted by~\cite{giacobbe2020how}, the robustness and non-robustness are  nonmonotonic with respect to the number of bits. They are not preserved from the floating-point network to the quantized one, highlighting the need for bit-precise verification. Other studies that use formal methods to verify QNNs have considered fixed-point arithmetic but did not optimize quantization strategies \cite{baranowski2020smt,song2023qnnrepair,amir2021smt}. 
+
+%% Now introduce the scalability issue of these approachs and how some works inclusing MILP have been used to verify while scaling better.
+\begin{comment}
+    Para mitigar os riscos introduzidos pela quantização de NNs em redes neurais quantizadas (QNNs), a fronteira da pesquisa tem se movido de análises post-hoc — que verificam uma rede após a quantização — para frameworks de síntese certificada. A abordagem pioneira do Quadapter exemplifica esse avanço. Em vez de simplesmente verificar, o Quadapter sintetiza uma estratégia de quantização (isto é, as larguras de bits por camada) que é garantida para preservar propriedades desejadas, como robustez e ausência de backdoors. Ele alcança isso calculando recursivamente uma sub-aproximação da pré-imagem de "regiões seguras" para guiar o processo de quantização camada por camada.
+    
+    Apesar de sua inovação na síntese, a garantia fornecida pelo Quadapter ainda reside em uma abstração de números reais. Seu motor de análise principal, baseado em Programação Linear Inteira Mista (MILP), modela as ativações dos neurônios como variáveis contínuas. Consequentemente, a "certificação" que ele oferece não captura os efeitos da aritmética de ponto fixo que ocorrem durante a inferência. Isso reintroduz a lacuna de implementação original em um novo contexto: a propriedade é garantida no modelo de síntese, mas não necessariamente no hardware bit-preciso.
+\end{comment}
+
+%% Have to check
+%Thus, the objective is to bridge this gap by integrating the verification of fixed-point arithmetic constraints into the quantization synthesis process proposed by Quadapter~\cite{Cai2020Certified,Zhu2021Quadapter}. Consequently, quantization can be performed while preserving the desired properties in an integer-arithmetic setting, so that they remain satisfied despite rounding and overflow effects~\cite{baranowski2020smt,giacobbe2020how}.
+
+{Thus, the objective is to bridge this gap by integrating the verification of fixed-point arithmetic constraints into the quantization synthesis process proposed by Quadapter~\cite{cai2025certified}. The proposed integration will enable fast verification of QNNs while also preserving the desired properties within the context of fixed-point arithmetic, ensuring they are maintained even in the presence of rounding and overflow effects \cite{baranowski2020smt,giacobbe2020how}.}
+
+\begin{comment}
+    
+    Several works have explored the verification of neural networks, particularly focusing on verification problem like a code problem \cite{cordeiro2025neuralnetworkverificationprogramming}. Some works like \cite{katz2017reluplex,katz2019marabou,abdi2021counterexample,song2023qnnrepair} use SMT solvers to verify the integrity of QNN by checking properties such as robustness\footnote{resistência a perturbações} and safety. However, these approuches typically do not scale well to large models and also do not take into account the fixed-point precision used in quantized models. In contrast, the use of MILP solvers has been proposed to verify the preimage of QNNs \cite{cai2025certified}. This approach allows for the verification of robustness and backdoor-freeness properties of QNNs. Though the work lacks to consider the fixed-point precision used in quantized models as done by \cite{baranowski2020smt}. It then lays the foundation for our work.
+    
+\end{comment}
+
+\section{Objectives}\label{sec:objectives}
+
+%This work aims to develop a novel framework for bit-precisely certified synthesis of quantization strategies, ensuring that functional and safety properties of ANNs are formally preserved in hardware implementations with integer arithmetic. This framework aims to bridge the ``implementation gap'' \cite{cordeiro2025neuralnetworkverificationprogramming} and the deficiencies of post-hoc analyzes~\cite{giacobbe2020how} by integrating the SMT theory of fixed-point arithmetic, as formalized by Baranowski et al.~\cite{baranowski2020smt}, into the synthesis process, ensuring that the strategies are certified for specific finite precision. To achieve this goal, we define the following specific objectives:
+
+
+{Our work aims to develop a novel framework that leverages the layer-by-layer preimage verification Quadapter to obtain optimal bit-widths for each layer, while using a bit-precise verification strategy in the SMT backend to ensure that the safety properties of the QNN are preserved. This framework aims to bridge the ``implementation gap'' \cite{cordeiro2025neuralnetworkverificationprogramming}. The deficiencies of post-hoc analyses~\cite{giacobbe2020how} are addressed by integrating the SMT theory of fixed-point arithmetic, as formalized by Baranowski et al.~\cite{baranowski2020smt}, into the synthesis process, ensuring that the strategies are certified for specific finite precision. To achieve this goal, we define the following specific objectives:}
+
+Investigate how changes in the precision of QNN parameter values affect their behavior: Study and analyze how fixed-point representation and integer arithmetic affect models with rounding and overflow.
+
+Understand how changes in bit-precision affect the ANN's safety properties. As before, examine the effect of varying quantization precision layer by layer, focusing on how it affects the safety property at the network output. Make a comparison between ANN and QNN.
+
+ \begin{comment}
+%% Older
+Propose a formal methodology for bit-precise preimage computation: Design/Develop and formalize a novel SMT-based method for computing the preimage of neural network layers that operates directly under fixed-point arithmetic semantics, ensuring an accurate representation of rounding and overflow effects.
+        % New
+Propose a verification methodology that uses the computed preimage of each layer: Construct a verifier that verifies if, after the quantization process, the preimage of QNN still lies within the preimage of ANN bounds. The verifier will use an SMT backend different from Quadapter, which will take into account the semantics of fixed-point and integer arithmetic.
+
+Integrate bit-precise equivalence verification: Estabilish a verification step within the synthesis framework to rigorosly verify that the behavior of the QNN is faithful representation of the original model, considering
+    fixed-point arithmetic effects.
+        
+    Develop a bit-precise synthesis framework: Design and implement a synthesis algorithm that integrates the proposed preimage methodology. This framework will be capable of generating per-layer quantization strategies that are formally verified to preserve desired properties under fixed-point arithmetic.
+\end{comment}
+\begin{itemize}
+    \item \textbf{Understand how quantization affects the ANN's safety properties:} Quantize the ANN and check, by running benchmarks, how robustness and backdoor-freeness are affected. Make a comparison between ANN and QNN.
+    
+    \item \textbf{Understand how changes in bit-precision affect the ANN's safety properties:} As before, try to understand how changing numerical precision in the quantization process affects the safety property at the network output layer-by-layer. Make a comparison between different bit-precision width.
+    
+    \item \textbf{   Propose a verification methodology that uses the computed preimage of each layer:} Construct a verifier that verifies if, after the quantization process, the preimage of QNN still lies within the preimage of ANN bounds. The verifier will use an SMT backend different from Quadapter, which will take into account the semantics of fixed-point and integer arithmetic.
+   
+    \item \textbf{Develop a bit-precise synthesis framework:} Design and implement a synthesis algorithm that integrates the proposed preimage calculation methodology. The synthesized model will be capable of generating per-layer quantization strategies that are formally verified to preserve desired properties, considering fixed-point arithmetic with the use of SMT solvers.
+   
+    \item \textbf{   Integrate bit-precise equivalence verification:} Establish a verification phase within the synthesis framework, carefully verify that the behavior of the QNN is a faithful representation of the original model, considering
+    fixed-point arithmetic effects.
+
+    
+    \item \textbf{Evaluate the proposed framework:} Empirically validate the developed methodologies using relevant benchmarks, assessing both the effectiveness in preserving properties and the computational effectiveness of the approach by comparing with existing state-of-the-art Synthesis Frameworks.
+\end{itemize}
+
+
+
+
+\section{Contributions}\label{sec:contributions}
+
+From this work, we expect to contribute to the field of QNN verification by providing a framework for synthesizing quantization strategies that account for the fixed-point precision used by QNN models. The main contributions will be:
+\begin{itemize}
+    \item A formalization of the SMT Theory of fixed-point Arithmetic to encode quantization strategy synthesis, allowing for the synthesis of quantization strategies that are certified for specific finite precision.
+    \item An adaptation of the MILP formulation used in \cite{cai2025certified} to an SMT formulation as a set of constraints that reflects fixed-point operations, ensuring that the preimage calculation accounts for the effects of finite precision.
+       \item  An evaluation of the proposed framework will be conducted by applying it to a trained ANN model and specific test datasets to demonstrate how effectively it synthesizes quantization strategies while preserving desired system properties.
+    \item An evaluation of the performance of the proposed framework in terms of scalability and efficiency, comparing it with existing approaches.
+\end{itemize}   
+
+\section{Dissertation Structure}\label{sec:dissertation_structure}
+
+The document structure unfolds as follows. Chapter \ref{cap:intro} introduces the background, motivations, and objectives of the work. Chapter \ref{chap:fundamentos} delves into the theoretical foundations, including the SMT Theory, Neural Networks, and Quantization. In Chapter \ref{chap:methodology}, we will present our proposed methodology, then compare the results in Chapter \ref{chap:experimental_evaluation}, and conclude with the findings in Chapter \ref{chap:conclusao}.
+
+
+\begin{comment}
+\section*{End here}
+
+\newpage
+
+\begin{table}[H]
+\footnotesize
+\centering
+\begin{tabular}{|p{0.2\textwidth}|c|p{0.65\textwidth}|}\hline
+         Work & Year & Verified Property\\\hline
+         1. ``QEBVerif: Quantization Error Bound Verification of Neural Networks'' (Yedi Zhang, Fu Song, Jun Sun et al.)
+ &2023& QEBVerif verifica se a diferença de output entre o modelo original ($N$) e o modelo quantizado ($\hat{N}$), para qualquer input dentro de uma região de perturbação $\ell_\infty$ definida pelo raio $r$, é sempre menor que o limite de erro $\epsilon$\\\hline
+ 2. ``An SMT-Based Approach for Verifying Binarized Neural Networks'' (Guy Amir, Haoze Wu, Clark Barrett, and Guy Katz)
+ &2021&O problema de verificação de Redes Neurais Profundas (DNNs) busca determinar se existe uma entrada $x_0$ que satisfaça uma pré-condição $P(x_0)$ (tipicamente um limite de perturbação $\ell_\infty$ em torno de uma entrada válida) e uma pós-condição $Q(N(x_0))$ (tipicamente a negação de uma propriedade desejada, como a classificação correta). A robustez adversarial, nesse contexto, verifica se pequenas perturbações no input causam uma classificação errada\\\hline
+ 3. ``An SMT Theory of Fixed-Point Arithmetic'' (Marek Baranowski, Shaobo He, Mathias Lechner et al.)
+ &2019& Introduces SMT theory for fixed-point arithmetic, enabling formal verification of quantized operations with rounding and overflow handling.\\\hline
+ 4. ``Formal Verification of Quantized Neural Network'' (Wahiba Bachiri, Yassamine Seladji, Pierre-Loïc Garoche)
+ &2024&1. Equivalência Aproximada Baseada em Norma ($\epsilon_p$ Approximation)
+O trabalho define o erro de aproximação ($\epsilon_p$) como a distância máxima, medida por uma norma ($L_p$-norm), entre a saída da Rede Neural Racional (NNr) e a saída da Rede Neural Quantizada (NNq) para um conjunto finito de entradas $I$:
+\[ \epsilon_p \triangleq \max_{x \in I} (|NNr(x) - NNq(x)|_p) \tag{2} \]
+Onde $\epsilon_p$ é o máximo de distância para o conjunto de $k$ entradas $I$. O trabalho utiliza as normas $L_1$ e $L_\infty$ para medir essa distância\\\hline
+ 5. ``Counterexample Guided Neural Network Quantization Refinement'' (João Batista P. Matos Jr., Eddie B. de Lima Filho, Iury Bessa et al.)
+ &2024&1. Equivalência TOP (Top Equivalence / CBE): Garante que a QNN e a DNN tenham a mesma predição de classe (o argmax do output é o mesmo) para tarefas de classificação.
+2. Equivalência $\epsilon$ (Epsilon Equivalence / NBE): Garante que a diferença entre os outputs da QNN e a DNN seja menor que uma tolerância especificada $\epsilon$ (usando uma norma $L_p$, geralmente $L_{\infty}$). Este critério é mais adequado para tarefas de regressão\\\hline
+ 6. ``Low-bit Quantization of Neural Networks for Efficient Inference'' (Yoni Choukroun, Eli Kravchik, Fan Yang, and Pavel Kisilev)
+ &2019& • A qualidade matemática da conversão de precisão (MMSE).
+• A conformidade e eficiência da implementação (integer-only / kernel-wise).
+• A preservação da acurácia (minimal accuracy loss\\\hline
+ 7. ``Towards Efficient Verification of Quantized Neural Networks'' (Pei Huang, Haoze Wu, Yuting Yang et al.)
+ &2023&$x^$ com  $l^$, e um raio de perturbação $r$, a propriedade de robustez verifica se a QNN mantém a classificação correta $l^$ para **qualquer  $x$ dentro da bola $\ell_\infty$ de raio $r$ centrada em $x^$**. Ou seja, busca-se verificar se: $$ \forall x (x \in B_{\infty}(x^, r) \to F(x) = l^) $$ Onde $F(x)$ é a predição da rede
+O trabalho sugere que, embora a quantização reduza a acurácia, ela nem sempre reduz a robustez; em certos raios de perturbação, as QNNs demonstraram robustez superior às suas contrapartes de ponto flutuante. Futuros trabalhos propostos incluem a análise formal da equivalência ou da diferença entre a rede original e a QNN, e a quantificação formal da perda de precisão\\\hline
+ 8. ``How Many Bits Does it Take to Quantize Your Neural Network?'' (Mirco Giacobbe, Thomas A. Henzinger, and Mathias Lechner)
+ &2020& O foco principal do trabalho é a Robustez Adversarial de QNNs, mas ele estende a verificação para outras propriedades críticas, como a Justiça (Fairness)
+O trabalho também aplicou o método para avaliar o efeito da quantização no viés de gênero de um preditor de notas de estudantes. O estudo verificou a especificação $\land_{i \ne \text{gênero}} (s_i = t_i \land s_{\text{gênero}} \ne t_{\text{gênero}}) \Rightarrow |f(s) - f(t)| \le \beta$, que verifica se a diferença máxima na nota prevista entre dois alunos twins (idênticos, exceto pelo gênero) excede um viés $\beta$.
+• Resultado da Análise: Foi demonstrado que a quantização aumentou monotonicamente o viés, ou seja, quanto menor a largura de bits, maior era o viés encontrado\\\hline
+ 9. ``Scalable Verification of Quantized Neural Networks (Technical Report)'' (Thomas A. Henzinger, Mathias Lechner, Ðorđe Žikelić)
+ &2022&O problema central é a verificação da robustez adversarial de QNNs de múltiplos bits, considerando a semântica bit-exata da implementação em hardware de ponto fixo.
+• Robustez Adversarial: A propriedade verificada é a robustez local, que checa se, para um dado input quantizado, a classificação da QNN permanece inalterada dentro de uma região de perturbação $\ell_\infty$ no domínio dos inteiros quantizados.
+• Contraste com Modelos Reais: O trabalho enfatiza que os métodos de verificação desenvolvidos para redes DNNs idealizadas (aritmética real) não são sólidos (sound) para QNNs, uma vez que ignoram os erros de arredondamento e quantização. A verificação de QNNs requer considerar a interpretação de ponto fixo do hardware ($\text{J}_{\text{int-k}}$), onde as operações de arredondamento são cruciais\\\hline
+ 10. ``Formal verification for quantized neural networks'' (Gergely Kovásznai, Dorina Hedvig Kiss, Péter Mlinkó)
+ &2023&Verificação de Robustez: O estudo de caso principal envolve verificar se a QNN é robusta contra perturbações de entrada na região $\ell_{\infty}$ (raio $\epsilon$), garantindo que a classificação permaneça inalterada para qualquer input dentro dessa vizinhança\\\hline
+ 11. ``Integer-arithmetic-only Certified Robustness for Quantized Neural Networks'' (Haowen Lin, Jian Lou, Li Xiong, Cyrus Shahabi)
+ &2021& Robustez Certificada ($\ell_2$-Norm Bounded Integer Adversarial Perturbation Attack): O método garante que, para qualquer entrada quantizada $x$ e qualquer perturbação $\delta$ (onde $x$ e $\delta$ pertencem a um subgrupo aditivo discreto $H^d$) com magnitude limitada ($|\delta|_2^2 \le L^2$), a classificação certificada da rede suavizada $g(x)$ permanece estável\\\hline
+ 12. ``QNNRepair: Quantized Neural Network Repair'' (Xidan Song, Youcheng Sun, Mustafa A. Mustafa, and Lucas C. Cordeiro)
+ &2023&O QNNRepair foi desenvolvido para melhorar a acurácia de um modelo de rede neural após o processo de quantização, que frequentemente introduz erros significativos.
+A. A Propriedade de Reparo (Objetivo)
+O objetivo de reparo é formulado como uma meta de otimização sujeita a restrições: corrigir os comportamentos incorretos do modelo em testes que falham (failing tests), sem comprometer seu desempenho original em testes que passam (passing tests).
+O reparo é alcançado através da modificação direta dos pesos de neurônios selecionados no modelo quantizado. A magnitude da modificação ($\delta_i$) é minimizada (função objetivo) enquanto se satisfazem as restrições que codificam o comportamento desejado da rede (restrições).\\\hline
+ 13. ``Verifying Quantized Neural Networks using SMT-Based Model Checking'' (Luiz Sena, Xidan Song, Erickson Alves et al.)
+ &2021&O framework QNNVerifier busca verificar se uma ANN (ou QNN) é robusta contra perturbações adversariais em uma determinada região de input.
+• Formalização: A propriedade é expressa na forma de implicação: $\text{x} \in H \implies f(\text{x}) \in G$. Onde $H$ é a região de input (como uma região de perturbação $\ell_{\infty}$ em torno de um ponto) e $G$ é a região de output segura (e.g., a classificação correta)\\\hline
+ 14. ``QVIP: An ILP-based Formal Verification Approach for Quantized Neural Networks'' (Yedi Zhang, Zhe Zhao, Guangke Chen et al.)
+ &2022& Robustness and equivalence verification using ILP for QNNs, ensuring properties like adversarial robustness are preserved under quantization.\\\hline
+ 15. ``Certified Quantization Strategy Synthesis for Neural Networks'' (Yedi Zhang, Guangke Chen, Fu Song et al.)
+ &2023&A. Robustez (Robustness)
+O Quadapter lida com a Robustez Local definida por um par $\langle I_r^u, O_g \rangle$, onde $I_r^u$ é uma região de perturbação ($\ell_{\infty}$-ball de raio $r$) ao redor de uma entrada $u$, e $O_g$ é a região de saída correspondente à classificação correta $g$. O objetivo é encontrar a estratégia $\Xi$ tal que a QNN resultante ($\hat{N}$) satisfaça a robustez, ou seja, $\hat{N} \models \langle I_r^u, O_g \rangle$.
+B. Ausência de Backdoor (Backdoor-Freeness)
+O framework também é aplicado à síntese de estratégias que preservem a ausência de backdoors. Essa propriedade garante que, mesmo quando uma entrada é perturbada com um trigger (padrão malicioso) em uma região específica, a QNN não classifica o input na classe alvo do ataque $t$.\\\hline
+ 16. ``Verifying Binarized Neural Networks by Angluin-Style Learning'' (Andy Shih, Adnan Darwiche, and Arthur Choi)
+ &2021&A propriedade primária que este trabalho permite analisar é a robustez local de BNNs dentro de uma região de input específica, mas o foco é na capacidade de realizar consultas quantitativas sobre o espaço de contraexemplos.
+• Robustez Local: O objetivo inicial é verificar se uma BNN mantém sua classificação para inputs em uma vizinhança $S_x$ definida em torno de uma instância $x$. Esta região $S_x$ deve ser codificável como uma fórmula CNF (Forma Normal Conjuntiva).
+• Consultas Quantitativas (O Ganho Teórico): A principal vantagem reside na conversão da BNN em um Diagrama de Decisão Binária Ordenado (OBDD). Após essa compilação, o sistema pode realizar consultas sobre a distribuição ou características dos contraexemplos em $S_x$, tarefas que são tipicamente #P-completas e intratáveis para solvers SAT/SMT convencionais. Essas consultas incluem:
+    ◦ Contagem de Contraexemplos: Determinar o número exato de inputs na região $S_x$ que levam à classificação incorreta.
+    ◦ Probabilidade de Contraexemplos: Calcular a probabilidade de um input violar a propriedade.
+    ◦ Identificação de Características Comuns: Encontrar um subconjunto de pixels (ou recursos) que, se fixados, garantem que a saída da rede permaneça inalterada (consulta de prime-implicant), o que é útil para explicar a decisão da rede\\\hline
+ 17. ``The Marabou Framework for Verification and Analysis of Deep Neural Networks'' (Contém extensões para BNNs, que são QNNs de 1-bit) (Guy Katz et al.)
+ &2019&Robustez Adversarial Local: Busca provar que pequenas perturbações (e.g., limitadas por uma norma $\ell_p$) em torno de um ponto de entrada $x_0$ não alteram a classificação da rede.
+• Propriedades de Segurança (Safety Properties): Garante que a rede nunca tomará uma decisão indesejada ou que os outputs permanecerão dentro de limites específicos em um dado domínio de entrada (e.g., no contexto do Airborne Collision Avoidance System – ACAS Xu).
+• Propriedades no Nível do Neurônio (Neuron Activation Patterns - NAPs): O Marabou pode ser usado para verificar formalmente propriedades de padrões de ativação de neurônios ocultos, o que auxilia na Explicação de IA (XAI).
+• Verificação de Sistemas de Deep Reinforcement Learning (DRL): Tem sido aplicado para analisar propriedades de segurança, como a ausência de loops infinitos (o agente retorna sempre ao mesmo estado) em sistemas DRL\\\hline
+ 18. ``On Neural Network Equivalence Checking using SMT Solvers'' (Aborda o Equivalence Checking de modelos, incluindo a implicação para QNNs) (Charis Eleftheriadis, Nikolaos Kekatos, Panagiotis Katsaros, and Stavros Tripakis) &2021&1. Equivalência Estrita (Strict Equivalence - SE)
+A equivalência mais forte, que exige que duas NNs produzam exatamente a mesma saída para cada entrada possível.
+• Definição Formal ($\equiv$): $f \equiv f'$ se e somente se $\forall x \in I, f(x) = f'(x)$, onde $I$ é o domínio de entrada.
+
+2. Equivalência Aproximada Baseada em Norma (Norm-Based Equivalence - NBE)
+Permite que as saídas de duas NNs sejam próximas dentro de uma tolerância especificada $\epsilon > 0$, medida por uma norma $L_p$.
+• Definição Formal ($\sim_{p,\epsilon}$): $f \sim_{p,\epsilon} f'$ se e somente se $\forall x \in I, |f(x) - f'(x)|p < \epsilon$. As normas comuns são $L_1$ (Manhattan), $L_2$ (Euclidiana) e $L{\infty}$ (Máxima)
+
+• Propriedades: É uma forma mais flexível de equivalência (reflexiva e simétrica, mas não necessariamente transitiva)
+3. Equivalência Baseada na Ordem de Saída (Order-Based Equivalence / Classification Based Equivalence - CBE)
+Foca em classificadores, onde a ordem das saídas (logits ou probabilidades) é mais importante do que seus valores exatos.
+
+• Definição Formal ($\approx_k$): Equivalência Top-k argsort ($f \approx_k f'$) ocorre se as primeiras $k$ classes mais prováveis são idênticas em ambas as NNs\\ \hline
+    \end{tabular}
+    \caption{Summary of Key Works in QNN Verification}
+    \label{tab:qnn-works}
+\end{table}
+\newpage
+
+
+\begin{itemize}
+    \item \textbf{Formalize the SMT Theory to encode Quantization Synthesis:} Integrate the SMT Theory into the preimage calculation and quantization process, allowing for the synthesis of quantization strategies that are certified for specific finite precision.
+    \item \textbf{Adapt the MILP Formulation to SMT:} Adapt the Mixed-Integer Linear Programming (MILP) formulation used in \cite{cai2025certified} to a SMT formulation that reflects fixed-point operations, ensuring that the preimage calculation accounts for the effects of finite precision.
+    \item \textbf{Validade Framework:} Validate the proposed framework by applying it to a set of NNs, demonstrating its effectiveness in synthesing quantization that preserve the desired properties.
+    \item \textbf{Evaluate Performance:} Evaluate the performance of the proposed framework in terms of scalability and efficiency, comparing it with existing approaches. 
+    
+\end{itemize}
+
+    
+    
+    This dissertation proposes the development of a framework for the certified synthesis of quantization strategies that guarantee the preservation of desired properties after quantization, directly addressing finite-precision arithmetic. This differs from post-hoc approaches and quantization techniques that focus solely on accuracy.
+    
+    \textbf{Synthesis of Quantization Strategies (Inspired by Quadapter):}
+    The work Quadapter is the first to propose the synthesis of certified quantization strategies \cite{Zhu2021Quadapter,Cai2020Certified}. Its central idea is to compute the preimage of each layer with respect to the desired output region and then identify the minimum bit-width for each layer, ensuring that the quantized layer's reachable region remains within that preimage.
+    
+    This work would extend this line of research by focusing on the incorporation of fixed-precision arithmetic during the synthesis process. This is not the primary focus of Quadapter in its current state, which, while dealing with realistic quantization representations, does not yet formally incorporate the nuances of fixed-point arithmetic during verification.
+    
+    \textbf{Formal Integration of the SMT Theory of fixed-point Arithmetic:}
+    A fundamental contribution would be the use of the SMT Theory of fixed-point Arithmetic, as formalized by \cite{baranowski2020smt}. This theory provides a rigorous formalization for fixed-point operations, including rounding modes (roundUp, roundDown) and overflow modes (saturation, wrapAround).
+    
+    The proposal is to integrate this formal theory into the preimage calculation and quantization procedures of the synthesis framework. This would allow the synthesized quantization strategies to be certified for the specific finite precision of the hardware, ensuring that properties hold even with the effects of rounding and overflow. The methods of \cite{baranowski2020smt} already include decision procedures for this theory, via both bit-vectors and reals, which is essential for a verifier. They themselves demonstrate a case study using this theory to verify QNNs.
+    
+    This would more robustly solve the "implementation gap," as the formal guarantees would be directly on the behavior of fixed-point arithmetic, not just a real-number approximation.
+    
+    \textbf{preimage Calculation with fixed-point Semantics:}
+    Quadapter uses a method based on Mixed-Integer Linear Programming (MILP) to compute under-approximations of the preimage. This work would adapt this MILP formulation to precisely reflect fixed-point operations (including rounding and overflow) instead of just real numbers. This would ensure that the calculated preimage already accounts for the effects of finite precision.
+    
+    \textbf{Bit-Precise Verification in Progressive Quantization:}
+    In Quadapter's progressive quantization algorithm, the verification step $\left(\gamma(\hat{A}_{2i}) \subseteq P_{2i}\right)$ \textcolor{red}{(Still have to add the math theory)} compares the quantized reachable region with the preimage. The proposal is to use formal SMT-based fixed-point reasoning (potentially through backends like ESBMC) to perform this verification in a bit-precise manner \cite{esbmc2025}. This would mean that the inclusion of the quantized reachable region within the preimage would be verified considering the exact rules of fixed-point arithmetic.
+    
+    QNN verification is a PSPACE-hard problem, and scalability is a known challenge for all verifiers (e.g., Marabou, Reluplex, CEG4N). Even Quadapter faces timeouts in preimage calculations.
+    
+    \textbf{Adaptive/Dynamic Quantization:} While Quadapter synthesizes per-layer bit-widths, this research could explore how to fine-tune precision (e.g., different precisions within a layer, as discussed by \cite{han2020understanding,abdi2021counterexample}) in a verification-guided manner to minimize bit requirements without losing properties, seeking a balance that optimizes verifier performance.
+    
+    
+    
+\end{comment}
+
+
+\begin{comment}
+    
+\section*{Algumas notas}\label{sec:algumas_notas}
+
+%% Algumas notas
+\textcolor{blue}{Quantization introduces additional non-linear rounding operations to the semantics of a neural network \cite{giacobbe2020how}.}
+
+\cite{giacobbe2020how}  Especificamente, Giacobbe et al. (2020) demonstraram que a robustez e a não-robustez não são monotônicas em relação ao número de bits e não são preservadas da rede de ponto flutuante para a quantizada, evidenciando a necessidade de verificação bit-precisa
+
+\cite{linIntegerarithmeticonlyCertifiedRobustness2021} propõe um método de teste de robustez para aritmética de ponto fixo que utiliza gausiana noise para suavização randomizada.
+
+Eficiência Energética: Reduz substancialmente o consumo de energia. Por exemplo, uma adição INT8 é 30 vezes mais eficiente em energia e 116 vezes mais eficiente em área do que uma adição FP32 \cite{linIntegerarithmeticonlyCertifiedRobustness2021}
+
+Verificação de QNN usando pontos fixo é mais difícil que usando aritmetica de ponto flutuante \cite{henzinger2021scalable}. Verificar QNNs é PSPACE-hard \cite{henzinger2021scalable}.
+
+
+algo é dito \textit{sound} se tudo que é provado verdade é verdade. Não existem falsos positivos se o sistema é \textit{sound}. se um verificador prova que a propriedade \textbf{P} é satisfeita, então \textbf{B} é de fato satisfeita.
+
+
+Robustez local é a propriedade mais estudada na literatura. Uma rede é dita localmente robusta em um ponto de entrada $x$ se pequenas perturbações em $x$ não alteram a classificação da rede. Formalmente, uma rede neural $N$ é localmente robusta em $x$ com raio $\epsilon$ se, para todo $x'$ tal que $||x - x'|| \leq \epsilon$, temos $N(x) = N(x')$ \cite{hungang}.
+
+Mais estudada nas competições de verificação de redes neurais \cite{bak2021second}.
+
+Um dos grandes problemas nessa verificação é a explosão de estados. Para verificar a robustez local, devemos considerar todas as possíveis pertubações dentro do raio $\epsilon$, permitindo assim que a saída da função $\in \hat{A}_{2i} $ que é usada para descrever $\hat N$ esteja dentro da preimagem da região segura $P$. Para resolver no trabalho de \cite{pirzadaLLMGeneratedInvariantsBounded2024} eles usam invariantes\footnote{doesn’t change under the thing you’re doing.} geradas por LLMs para reduzir o espaço de estados.
+
+Um problema na verificação é a explosão de estados induzida por laços (loops). Loops podem introduzir um número infinito de estados, tornando a verificação intratável. Tradicionamente, BMC lida com lanços através do desenrolamento (unrolling) do loop até número k de iterações. No entando, essa técnica é incompleta, pois não cobre todos os possíveis comportamentos do loop.
+
+Um dos principais desafios na verificação formal de software, especialmente para técnicas como Bounded Model Checking (BMC), é a explosão do espaço de estados induzida por laços. A abordagem tradicional do BMC consiste em desenrolar (unrolling) os laços por um número finito de iterações, \textbf{k}, o que transforma o problema de verificação em um problema de satisfatibilidade. Embora eficaz para encontrar contraexemplos de profundidade limitada, essa técnica é inerentemente incompleta para provar a correção de programas com laços de limites grandes ou não determinados estaticamente. Uma alternativa mais robusta para a prova de correção é o uso de invariantes de laço — propriedades que se mantêm verdadeiras a cada iteração. A principal dificuldade, contudo, reside na síntese automática de invariantes que sejam suficientemente fortes para provar a propriedade desejada
+
+Nesse contexto, o trabalho de Pirzada et al. \cite{pirzadaLLMGeneratedInvariantsBounded2024} propõe uma abordagem híbrida inovadora que substitui o desenrolamento de laços no BMC por uma transformação sonora do programa. A metodologia utiliza Large Language Models (LLMs) como uma poderosa heurística para gerar candidatos a invariantes de laço. Reconhecendo que os candidatos gerados por LLM não possuem garantia de correção, cada um é submetido a uma prova formal de que é, de fato, um invariante indutivo, utilizando um provador de teoremas de primeira ordem. Apenas os invariantes cuja validade é formalmente estabelecida são utilizados para substituir a estrutura do laço no programa por uma instrução assume. O programa resultante, agora acíclico, pode ser verificado de forma completa por uma ferramenta de BMC padrão, como o ESBMC. Esta abordagem é sólida para provas de correção (não gera falsos positivos), mas permanece incompleta, pois os invariantes podem superaproximar o comportamento do laço, potencialmente levando a contraexemplos espúrios.
+
+Duas técnicas principais são:
+
+\begin{itemize}
+    \item K-induction: Uma extensão do BMC que tenta provar propriedades para todos os caminhos de execução, não apenas aqueles com até k passos. Isso é feito mostrando que se a propriedade é verdadeira para k passos, então ela também é verdadeira para k+1 passos.
+    \item Invariantes: Propriedades que permanecem verdadeiras em todas as iterações de um loop. Encontrar invariantes pode ajudar a reduzir o espaço de estados que precisa
+    \item Unroling de Loops: Desenrolar loops até um número k de iterações para limitar o número de estados a serem verificados. No entanto, isso não é completo, pois pode haver comportamentos que só se manifestam após mais de k iterações.
+\end{itemize}
+\end{comment}

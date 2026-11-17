@@ -1,0 +1,136 @@
+\chapter{Conclusion} \label{chap:conclusao}
+
+This work is expected to make a considerable contribution to the field of formal methods applied to the verification and synthesis of quantized networks. By developing a methodology that integrates the use of off-the-shelf tools to find the preimage of each layer of neural networks and using the SMT theory of fixed-point arithmetic formalized by Baranowski et al. \cite{baranowski2020smt} in the synthesis process, it is intended to ensure that quantization strategies are certified for specific finite precision. This will not only tackle the implementation gap identified by Cordeiro et al. \cite{cordeiro2025neuralnetworkverificationprogramming}, but also improve the robustness and safety of quantized neural networks in high-stakes scenarios.
+
+
+\section{Future Works}
+
+For future work, we aim to address the scalability issue, as seen in Section \ref{sec:comparison_against_state_of_the_art}, where all comparisons were made using small datasets. For the next step, we aim to improve scalability by applying Invariants for Bounded Model Checking \cite{10.1145/3691620.3695512} and also pruning techniques to remove less important nodes \cite{dantasComprehensiveReviewModel2024}. Then, run the tests on larger models again.
+
+
+\subsection*{Chronogram}
+In this section, we define the main tasks to be accomplished in order to achieve the proposed objectives. The table below summarizes these activities along with their respective deadlines:
+\begin{table}[!ht]
+\centering
+\caption{Dissertation Activity Schedule}
+\label{tab:schedule}
+\resizebox{\textwidth}{!}{% This command resizes the table to fit the text width
+\begin{tabular}{|l|c|c|}
+\hline
+\textbf{Activity} & \textbf{Start Date} & \textbf{End Date \textcolor{red}{(Deadline)}} \\ \hline \hline
+Literature Review and Review of Fundamental Concepts & 01/06/2025 & 31/08/2025 \\ \hline
+Write Introduction and Theoretical Foundation & 01/06/2025 & 31/10/2025 \\ \hline
+Write Methodology & 01/08/2025 & 31/10/2025 \\ \hline
+Present Qualification & - & 15/11/2025 \\ \hline
+Understand the impact of quantization on ANN properties & 12/09/2025 & 12/10/2025 \\ \hline
+Investigate the behavioral gap induced by finite-precision arithmetic & 12/09/2025 & 12/10/2025 \\ \hline
+Propose a formal methodology for bit-precise preimage computation & 12/09/2025 & 12/10/2025 \\ \hline
+Develop a bit-precise synthesis framework & 12/09/2025 & 31/12/2025 \\ \hline
+Integrate bit-precise equivalence verification & 12/09/2025 & 31/12/2025 \\ \hline
+Evaluate the proposed framework & 12/09/2025 & 01/02/2026 \\ \hline
+Write Results & 01/06/2026 & 31/07/2026 \\ \hline
+Write Conclusion & 01/07/2026 & 31/08/2026 \\ \hline
+Review Complete Document & - & 31/08/2026 \\ \hline
+Submit Final Document & - & 15/09/2026 \\ \hline
+Present Defense & - & 30/09/2026 \\ \hline
+\end{tabular}%
+}
+\end{table}
+
+\begin{comment}
+
+\begin{table}[ht]
+\centering
+\caption{Classification of related work with respect to adversarial robustness verification and the use of BMC/SMT-based methods.}
+\label{tab:related_works_smt_robustness}
+\footnotesize
+
+\begin{tabular}{@{}l>{\RaggedRight\arraybackslash}p{8cm}cc@{}}
+\toprule
+\textbf{Reference} & \textbf{Title} &
+\textbf{\shortstack{Adversarial\\Robustness?}} &
+\textbf{\shortstack{Uses BMC\\or SMT?}} \\
+\midrule
+
+Liao et al. (2018) \cite{liaoDefenseAdversarialAttacks2018} &
+Defense against Adversarial Attacks (HGD) & Yes & No \\
+
+Gorsline et al. (2021) \cite{gorslineAdversarialRobustnessQuantized2021} &
+On the Adversarial Robustness of QNNs & Yes & No \\
+
+Baranowski et al. (2020) \cite{baranowski2020smt} &
+An SMT Theory of Fixed-Point Arithmetic & Yes\textsuperscript{1} & Yes \\
+
+Giacobbe et al. (2020) \cite{giacobbe2020how} &
+How Many Bits Does it Take to Quantize? & Yes & Yes \\
+
+Amir et al. (2021) \cite{amir2021smt} &
+SMT-Based Approach for Verifying Binarized NNs & Yes & Yes \\
+
+Cordeiro et al. (2025) \cite{cordeiro2025neuralnetworkverificationprogramming} &
+Neural Network Verification as a Programming Languages Challenge & Yes & Yes \\
+
+Ehlers (2017) \cite{ehlers2017formal} &
+Formal Verification of Piecewise-Linear FFNNs & Yes & Yes \\
+
+Eleftheriadis et al. (2022) \cite{eleftheriadis2022neuralnetworkequivalencechecking} &
+Neural Network Equivalence Checking Using SMT Solvers & Yes & Yes \\
+
+Henzinger et al. (2020) \cite{henzinger2021scalable} &
+Scalable Verification of Quantized Neural Networks & Yes & Yes \\
+
+Huang et al. (2017) \cite{huangSafetyVerificationDeep2017} &
+Safety Verification of Deep Neural Networks (DLV) & Yes & Yes \\
+
+Katz et al. (2017) \cite{katz2017reluplex} &
+Reluplex: An Efficient SMT Solver for DNNs & Yes & Yes \\
+
+Katz et al. (2019) \cite{katz2019marabou} &
+The Marabou Framework & Yes & Yes \\
+
+Lin et al. (2019) \cite{lin2019defensivequantization} &
+Defensive Quantization & Yes & No \\
+
+Lin et al. (2021) \cite{linIntegerarithmeticonlyCertifiedRobustness2021} &
+Integer-Arithmetic-Only Certified Robustness (IntRS) & Yes & No \\
+
+Pulina \& Tacchella (2010) \cite{pulinaAbstractionRefinementApproachVerification2010} &
+Abstraction-Refinement Approach (CEGAR) & Yes & Yes \\
+
+Pulina \& Tacchella (2012) \cite{Pulina2012Challenging} &
+Challenging SMT Solvers to Verify Neural Networks & Yes & Yes \\
+
+Schuele \& Schneider (2006) \cite{article_schule_schneider} &
+BMC of Infinite-State Systems & No & Yes \\
+
+Sena et al. (2021) \cite{sena2021verifying} &
+Verifying QNNs Using SMT-Based Model Checking & Yes & Yes \\
+
+Song et al. (2021) \cite{song2021qnnverifier} &
+QNNVerifier: SMT-Based Model Checking & Yes & Yes \\
+
+Song et al. (2023) \cite{song2023qnnrepair} &
+QNNRepair: Quantized Neural Network Repair & Yes & Yes \\
+
+Wang et al. (2018) \cite{Wang2018} &
+Efficient Formal Safety Analysis (Symbolic Intervals) & Yes & No \\
+
+Wu et al. (2024) \cite{lemur} &
+Lemur: LLMs in Automated Program Verification & No & Yes \\
+
+Wu et al. (2024) \cite{wuMarabou20Versatile2024} &
+Marabou 2.0 & Yes & Yes \\
+
+Zhang et al. (2022) \cite{zhang2020qvip} &
+QVIP: ILP-Based Formal Verification & Yes & No \\
+
+Zhang et al. (2025) \cite{Cai2020Certified} &
+Certified Quantization Strategy Synthesis (QuAdapter) & Yes & No\textsuperscript{6} \\
+
+\bottomrule
+\end{tabular}
+
+\end{table}
+
+    
+\end{comment}

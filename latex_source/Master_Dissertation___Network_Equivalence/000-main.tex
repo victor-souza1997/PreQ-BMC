@@ -1,0 +1,130 @@
+\documentclass[mscexam]{cls_bst/cls_file_ufam_v2}
+
+% PARA DEFESA DE DISSERTAÇÃO DE MESTRADO USE   : msc
+% PARA DEFESA DE QUALIFICAÇÃO DE MESTRADO USE  : mscexam
+
+% PARA DEFESA DE TESE DE DOUTORADO USE         : dsc
+% PARA DEFESA DE QUALIFICAÇÃO DE DOUTORADO USE : dscexam
+
+% Preamble (antes do \begin{document})
+\usepackage{ltablex,booktabs,ragged2e,array}
+\keepXColumns
+\newcolumntype{Y}{>{\RaggedRight\arraybackslash}X} % coluna que wrapa
+\newcolumntype{C}[1]{>{\Centering\arraybackslash}p{#1}} % coluna centralizada de largura fixa
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.05}
+
+%% pacotes e sets
+%\usepackage{lscape}
+\usepackage{pdflscape}
+\usepackage[english,brazil]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{indentfirst}
+\usepackage{fancyhdr}
+\usepackage{url}
+\usepackage{cite}
+\usepackage{epstopdf}
+%\usepackage{subfigure}
+\usepackage{subcaption} 
+\usepackage{epsfig}
+\usepackage{longtable}
+\usepackage{setspace}
+\usepackage{rotating}
+\usepackage{graphicx}
+\usepackage{dsfont}
+\usepackage{enumerate}
+\usepackage{amsmath}
+\usepackage{color}
+\usepackage{bbm}
+\usepackage{amssymb}
+\usepackage[final]{pdfpages}
+%\usepackage[number=none]{glossary}
+\usepackage[noredefwarn]{glossaries}
+%\usepackage[acronym]{glossaries}
+\usepackage{float}
+\usepackage{multirow,colortbl,array}
+\usepackage{hhline}
+\usepackage{makecell}
+\usepackage{nomencl}
+\usepackage[mathletters]{ucs}
+\usepackage{comment}
+\usepackage[dvipsnames]{xcolor}
+\usepackage{pdfpages}
+%% pacote para hyperlinks
+\usepackage{listings}
+
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{amsmath}  % Para os comandos matemáticos como \lfloor, \lceil, etc.
+\usepackage{amsthm}   % Para o ambiente de teoremas/lemas
+
+% Defining the style for the Definition block
+\newtheorem{definition}{Definition}
+\newtheorem{lemma}{Lemma} 
+\newtheorem{theorem}{Theorem}
+
+\geometry{margin=1in}
+
+\usepackage[
+    colorlinks=true,  % Ativa links coloridos em vez de caixas
+    linkcolor=blue,   % Cor dos links internos (ex: sumário)
+    citecolor=blue,    % Cor dos links de citação
+    urlcolor=magenta,  % Cor dos links externos (URLs)
+     pagebackref=true,
+]{hyperref}
+
+
+
+\makenomenclature
+
+\setcounter{secnumdepth}{3}
+\setcounter{tocdepth}{2} %where 3
+\setcounter{chapter}{0}
+\setlength{\parindent}{1.25cm}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% LISTA DE SIGLAS
+\makeglossaries
+\input{capitulos/0-glossary}
+
+\begin{document}
+
+%\pagenumbering{Roman}
+%\pagenumbering{Arabic}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\input{capitulos/0-capa_n_contra}
+\renewcommand{\glossaryname}{Lista de Siglas}
+\printglossaries
+\mainmatter
+
+\input{capitulos/1-introdução.tex}
+%\input{capitulos/2-fundamentos}
+\input{capitulos/3-metodologia}
+\input{capitulos/4-experimentos}
+\input{capitulos/5-conclusão}
+
+%\input{capitulos/4-resultados}
+%\input{capitulos/5-conclusão}
+
+%% Referencias
+%\backmatter %turns off chapter numbering and doesn't fiddle with page numbering
+%\nocite{*} % mostra todas as referencias disponiveis, se estiver comentado mostra apenas referências citadas ao longo do texto
+%\bibliographystyle{cls_bst/bst_ufam}
+% Troca o estilo para (author, ano)
+\bibliographystyle{apalike}
+\bibliography{referencias}
+
+%% apêndice
+%\appendix
+%\input{capitulos/6-apendice}
+
+\end{document}

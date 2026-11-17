@@ -1,0 +1,44 @@
+\chapter{Related Works} \label{chap:related_works}
+
+\begin{itemize}
+    \item Neural Network Verification is a Programming Language challenge 
+\end{itemize}
+
+\section{Verification Section}
+\subsection{Neural Network Verification is a Programming Language Challenge}
+
+In this section, we will discuses the paper \cite{cordeiro2025neuralnetworkverificationprogramming} which shows that network verification is in fact a programming challenge instead of a mathermatical one.
+
+\textbf{The most accurate verifiers fail to reach full robustness.}
+Szegedy, C., Zaremba, W., Sutskever, I., Bruna, J., Erhan, D., Goodfellow, I., Fergus, R.: Intriguing properties of neural networks (2014)
+
+
+//Ler sobre as competições de verificação de redes neurais.
+
+
+- Brix, C., Müller, M.N., Bak, S., Johnson, T.T., Liu, C.: First three years of the international verification of neural networks competition (vnn-comp). International Journal on Software Tools for Technology Transfer 25(3), 329–339 (2023)
+
+- Brix, C., Bak, S., Johnson, T.T., Wu, H.: The fifth international verification of neural networks competition (vnn-comp 2024): Summary and results (2024), https://arxiv.org/abs/2412.19985
+
+The verification can be divided into three properties: Geometric, Huper properties and Domain-sopecific properties. 
+
+Languages lack the expressiveness to encode the properties of neural networks.
+
+
+\section{Neural Network}
+\subsection{Understanding the Impact of Precision Quantization  on the Accuracy and Energy of Neural Networks}
+Main scope of paper is to evaluate the influence of bit scaling into network performance
+
+The trade-off of lower precision and energy and memory footprint is evaluated
+
+Neural Network show inherent resilence to small and insignificant errors within their calculations.
+
+In this light, techniques such as approximate arithmetic, are attractive option to lower power consumption and design complexity in neural networks.
+
+Different works have proposed the use of low precision networks but with little to no justification.
+
+The paper proposes to expand the NN architeture to compensate the precision decrase and therefore the lower drop.
+
+Multipliers are the most demanding computation unit for NN. BY limiting the weights to be in form of $2^{i}$ enables the network to replace expensive, frequent and power-hungry multiplications with much smaller and less complex shifts \cite{lin2016neuralnetworksmultiplications}. 
+
+It's shown that lower-precision, large networks can outperform their full-precision and smaller network counterparts. 
